@@ -378,25 +378,46 @@ class WaveCanvas(QWidget):
         idx = np.linspace(0, data.size - 1, points).astype(np.int64)
         return data[idx]
 
-    def _path_for_wave(self, data: np.ndarray, area: QRectF, vertical_offset: float) -> QPainterPath:
-        wave = self._downsample(data, max(20, int(area.width())))
+    def _path_for_vertical_wave(self, data: np.ndarray, area: QRectF, center_x: float, width_scale: float) -> QPainterPath:
+        wave = self._downsample(data, max(20, int(area.height())))
         path = QPainterPath()
 
         if wave.size < 2:
             return path
 
-        amp = area.height() * 0.34
-        x_step = area.width() / max(1, wave.size - 1)
+        amp = area.width() * width_scale
+        y_step = area.height() / max(1, wave.size - 1)
         wobble = math.sin(self.animation_phase) * 2.0
 
-        path.moveTo(area.left(), area.center().y() + vertical_offset - float(wave[0]) * amp + wobble)
+        path.moveTo(center_x + float(wave[0]) * amp + wobble, area.top())
 
         for i, sample in enumerate(wave[1:], start=1):
-            x = area.left() + i * x_step
-            y = area.center().y() + vertical_offset - float(sample) * amp + wobble
+            x = center_x + float(sample) * amp + wobble
+            y = area.top() + i * y_step
             path.lineTo(QPointF(x, y))
 
         return path
+
+    def _draw_wave_column(
+        self,
+        painter: QPainter,
+        area: QRectF,
+        center_x: float,
+        label: str,
+        color: QColor,
+        data: np.ndarray,
+        thick: int,
+    ) -> None:
+        painter.setPen(QPen(QColor(0, 0, 0, 45), thick + 7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(self._path_for_vertical_wave(data, area.adjusted(4, 4, 4, 4), center_x + 4, 0.09))
+
+        painter.setPen(QPen(color, thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(self._path_for_vertical_wave(data, area, center_x, 0.09))
+
+        painter.setPen(QColor("#263238"))
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        label_rect = QRectF(center_x - area.width() * 0.13, area.bottom() + 4, area.width() * 0.26, 24)
+        painter.drawText(label_rect, Qt.AlignCenter, label)
 
     def _draw_wave(self, painter: QPainter, area: QRectF) -> None:
         if self.audio.ndim == 1:
@@ -405,32 +426,19 @@ class WaveCanvas(QWidget):
             left = self.audio[:, 0]
             right = self.audio[:, 1]
 
-        mono = (left + right) * 0.5
+        common = (left + right) * 0.5
 
-        shadow_path = self._path_for_wave(mono, area.adjusted(8, 8, 8, 8), 8)
-        painter.setPen(QPen(QColor(0, 0, 0, 55), 12, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(shadow_path)
+        left_x = area.left() + area.width() * 0.22
+        common_x = area.left() + area.width() * 0.50
+        right_x = area.left() + area.width() * 0.78
 
-        left_path = self._path_for_wave(left, area, -area.height() * 0.08)
-        right_path = self._path_for_wave(right, area, area.height() * 0.08)
-        mono_path = self._path_for_wave(mono, area, 0)
+        painter.setPen(QPen(QColor(255, 255, 255, 150), 3, Qt.DashLine))
+        for x in [left_x, common_x, right_x]:
+            painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
 
-        painter.setPen(QPen(QColor("#00a8ff"), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(left_path)
-
-        painter.setPen(QPen(QColor("#ff4fa3"), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(right_path)
-
-        painter.setPen(QPen(QColor("#fff176"), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(mono_path)
-
-        painter.setPen(QColor("#263238"))
-        painter.setFont(QFont("Arial", 10, QFont.Bold))
-        painter.drawText(
-            QRectF(area.left(), area.bottom() + 4, area.width(), 20),
-            Qt.AlignCenter,
-            "Blue = left ear    Pink = right ear    Yellow = middle",
-        )
+        self._draw_wave_column(painter, area, left_x, "Left", QColor("#00a8ff"), left, 6)
+        self._draw_wave_column(painter, area, common_x, "Common", QColor("#fff176"), common, 5)
+        self._draw_wave_column(painter, area, right_x, "Right", QColor("#ff4fa3"), right, 6)
 
     def _draw_mascot(self, painter: QPainter, rect: QRectF) -> None:
         cx = rect.left() + 54
@@ -662,24 +670,28 @@ class WaveToyWindow(QMainWindow):
         self.note_combo.addItems(NOTE_NAMES)
         self.note_combo.setCurrentText("A")
 
-        self.octave_spin = QSpinBox()
-        self.octave_spin.setRange(0, 8)
-        self.octave_spin.setValue(4)
+        self.octave_slider = QSlider(Qt.Horizontal)
+        self.octave_slider.setRange(2, 6)
+        self.octave_slider.setValue(4)
+        self.octave_label = QLabel("🧸 Middle")
 
-        self.cents_spin = QDoubleSpinBox()
-        self.cents_spin.setRange(-1200.0, 1200.0)
-        self.cents_spin.setSingleStep(5.0)
-        self.cents_spin.setSuffix(" cents")
+        self.cents_slider = QSlider(Qt.Horizontal)
+        self.cents_slider.setRange(-50, 50)
+        self.cents_slider.setValue(0)
+        self.cents_label = QLabel("🎯 Center")
 
-        self.base_pitch_label = QLabel("A4 = 440.00 Hz")
+        self.base_pitch_label = QLabel("Pitch: 🎵 ready")
+        self.base_pitch_label.setObjectName("symbolHint")
 
         pitch_layout.addWidget(QLabel("Note"), 0, 0)
         pitch_layout.addWidget(self.note_combo, 0, 1)
-        pitch_layout.addWidget(QLabel("Octave"), 1, 0)
-        pitch_layout.addWidget(self.octave_spin, 1, 1)
-        pitch_layout.addWidget(QLabel("Wiggle"), 2, 0)
-        pitch_layout.addWidget(self.cents_spin, 2, 1)
-        pitch_layout.addWidget(self.base_pitch_label, 3, 0, 1, 2)
+        pitch_layout.addWidget(QLabel("Voice Size"), 1, 0)
+        pitch_layout.addWidget(self.octave_label, 1, 1)
+        pitch_layout.addWidget(self.octave_slider, 2, 0, 1, 2)
+        pitch_layout.addWidget(QLabel("Tiny Wiggle"), 3, 0)
+        pitch_layout.addWidget(self.cents_label, 3, 1)
+        pitch_layout.addWidget(self.cents_slider, 4, 0, 1, 2)
+        pitch_layout.addWidget(self.base_pitch_label, 5, 0, 1, 2)
 
         left.addWidget(pitch_box)
 
@@ -712,56 +724,53 @@ class WaveToyWindow(QMainWindow):
         motion_layout.setColumnStretch(0, 1)
         motion_layout.setColumnStretch(1, 2)
 
-        self.duration_spin = QDoubleSpinBox()
-        self.duration_spin.setRange(0.1, MAX_PREVIEW_SECONDS)
-        self.duration_spin.setValue(1.5)
-        self.duration_spin.setSingleStep(0.1)
-        self.duration_spin.setSuffix(" sec")
-
         self.duration_slider = QSlider(Qt.Horizontal)
-        self.duration_slider.setRange(1, int(MAX_PREVIEW_SECONDS * 10))
+        self.duration_slider.setRange(5, 80)
         self.duration_slider.setValue(15)
-        self.duration_slider.setToolTip("Total length of the sound clip.")
+        self.duration_label = QLabel("⏱️ Short")
         self.duration_slider.valueChanged.connect(self._sync_duration_slider_to_spin)
-        self.duration_spin.valueChanged.connect(self._sync_duration_spin_to_slider)
 
-        self.pitch_start = QDoubleSpinBox()
-        self.pitch_start.setRange(1.0, 5000.0)
-        self.pitch_start.setValue(440.0)
-        self.pitch_start.setSingleStep(5.0)
-        self.pitch_start.setSuffix(" Hz")
+        self.pitch_start = QSlider(Qt.Horizontal)
+        self.pitch_start.setRange(36, 84)
+        self.pitch_start.setValue(69)
+        self.pitch_start_label = QLabel("🎵 Middle")
 
-        self.pitch_end = QDoubleSpinBox()
-        self.pitch_end.setRange(1.0, 5000.0)
-        self.pitch_end.setValue(440.0)
-        self.pitch_end.setSingleStep(5.0)
-        self.pitch_end.setSuffix(" Hz")
+        self.pitch_end = QSlider(Qt.Horizontal)
+        self.pitch_end.setRange(36, 84)
+        self.pitch_end.setValue(69)
+        self.pitch_end_label = QLabel("🎵 Middle")
 
         self.loud_start = QSlider(Qt.Horizontal)
         self.loud_start.setRange(0, 100)
         self.loud_start.setValue(40)
+        self.loud_start_label = QLabel("🌿 Medium")
 
         self.loud_end = QSlider(Qt.Horizontal)
         self.loud_end.setRange(0, 100)
         self.loud_end.setValue(40)
+        self.loud_end_label = QLabel("🌿 Medium")
 
         self.curve_combo = QComboBox()
         for key, label in CURVE_LABELS.items():
             self.curve_combo.addItem(label, key)
 
         motion_layout.addWidget(QLabel("Clip Time"), 0, 0)
-        motion_layout.addWidget(self.duration_spin, 0, 1)
+        motion_layout.addWidget(self.duration_label, 0, 1)
         motion_layout.addWidget(self.duration_slider, 1, 0, 1, 2)
         motion_layout.addWidget(QLabel("Start Pitch"), 2, 0)
-        motion_layout.addWidget(self.pitch_start, 2, 1)
-        motion_layout.addWidget(QLabel("End Pitch"), 3, 0)
-        motion_layout.addWidget(self.pitch_end, 3, 1)
-        motion_layout.addWidget(QLabel("Start Wiggle"), 4, 0)
-        motion_layout.addWidget(self.loud_start, 4, 1)
-        motion_layout.addWidget(QLabel("End Wiggle"), 5, 0)
-        motion_layout.addWidget(self.loud_end, 5, 1)
-        motion_layout.addWidget(QLabel("Change Style"), 6, 0)
-        motion_layout.addWidget(self.curve_combo, 6, 1)
+        motion_layout.addWidget(self.pitch_start_label, 2, 1)
+        motion_layout.addWidget(self.pitch_start, 3, 0, 1, 2)
+        motion_layout.addWidget(QLabel("End Pitch"), 4, 0)
+        motion_layout.addWidget(self.pitch_end_label, 4, 1)
+        motion_layout.addWidget(self.pitch_end, 5, 0, 1, 2)
+        motion_layout.addWidget(QLabel("Start Wiggle"), 6, 0)
+        motion_layout.addWidget(self.loud_start_label, 6, 1)
+        motion_layout.addWidget(self.loud_start, 7, 0, 1, 2)
+        motion_layout.addWidget(QLabel("End Wiggle"), 8, 0)
+        motion_layout.addWidget(self.loud_end_label, 8, 1)
+        motion_layout.addWidget(self.loud_end, 9, 0, 1, 2)
+        motion_layout.addWidget(QLabel("Change Style"), 10, 0)
+        motion_layout.addWidget(self.curve_combo, 10, 1)
 
         right.addWidget(motion_box)
 
@@ -777,23 +786,31 @@ class WaveToyWindow(QMainWindow):
         self.pan_end_slider = self._make_percent_slider(-100, 100, 0)
         self.width_slider = self._make_percent_slider(0, 100, 45)
         self.auto_pan_depth_slider = self._make_percent_slider(0, 100, 0)
+        self.auto_pan_rate = QSlider(Qt.Horizontal)
+        self.auto_pan_rate.setRange(1, 80)
+        self.auto_pan_rate.setValue(5)
 
-        self.auto_pan_rate = QDoubleSpinBox()
-        self.auto_pan_rate.setRange(0.05, 8.0)
-        self.auto_pan_rate.setValue(0.5)
-        self.auto_pan_rate.setSingleStep(0.05)
-        self.auto_pan_rate.setSuffix(" Hz")
+        self.pan_start_label = QLabel("⬅️ 🧍 ➡️")
+        self.pan_end_label = QLabel("⬅️ 🧍 ➡️")
+        self.width_label = QLabel("↔️ Medium")
+        self.auto_pan_depth_label = QLabel("😴 Still")
+        self.auto_pan_rate_label = QLabel("🐢 Slow")
 
-        stereo_layout.addWidget(QLabel("Start Pan"), 0, 0)
-        stereo_layout.addWidget(self.pan_start_slider, 0, 1)
-        stereo_layout.addWidget(QLabel("End Pan"), 1, 0)
-        stereo_layout.addWidget(self.pan_end_slider, 1, 1)
-        stereo_layout.addWidget(QLabel("Ear Spread"), 2, 0)
-        stereo_layout.addWidget(self.width_slider, 2, 1)
-        stereo_layout.addWidget(QLabel("Ear Dance"), 3, 0)
-        stereo_layout.addWidget(self.auto_pan_depth_slider, 3, 1)
-        stereo_layout.addWidget(QLabel("Wiggle Speed"), 4, 0)
-        stereo_layout.addWidget(self.auto_pan_rate, 4, 1)
+        stereo_layout.addWidget(QLabel("Start Place"), 0, 0)
+        stereo_layout.addWidget(self.pan_start_label, 0, 1)
+        stereo_layout.addWidget(self.pan_start_slider, 1, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("End Place"), 2, 0)
+        stereo_layout.addWidget(self.pan_end_label, 2, 1)
+        stereo_layout.addWidget(self.pan_end_slider, 3, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("Ear Spread"), 4, 0)
+        stereo_layout.addWidget(self.width_label, 4, 1)
+        stereo_layout.addWidget(self.width_slider, 5, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("Ear Dance"), 6, 0)
+        stereo_layout.addWidget(self.auto_pan_depth_label, 6, 1)
+        stereo_layout.addWidget(self.auto_pan_depth_slider, 7, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("Dance Speed"), 8, 0)
+        stereo_layout.addWidget(self.auto_pan_rate_label, 8, 1)
+        stereo_layout.addWidget(self.auto_pan_rate, 9, 0, 1, 2)
 
         right.addWidget(stereo_box)
 
@@ -849,9 +866,9 @@ class WaveToyWindow(QMainWindow):
 
         widgets_to_regenerate = [
             self.note_combo,
-            self.octave_spin,
-            self.cents_spin,
-            self.duration_spin,
+            self.octave_slider,
+            self.cents_slider,
+            self.duration_slider,
             self.pitch_start,
             self.pitch_end,
             self.loud_start,
@@ -865,8 +882,8 @@ class WaveToyWindow(QMainWindow):
         ]
 
         self.note_combo.currentTextChanged.connect(self._sync_note_to_pitch)
-        self.octave_spin.valueChanged.connect(self._sync_note_to_pitch)
-        self.cents_spin.valueChanged.connect(self._sync_note_to_pitch)
+        self.octave_slider.valueChanged.connect(self._sync_note_to_pitch)
+        self.cents_slider.valueChanged.connect(self._sync_note_to_pitch)
 
         for widget in widgets_to_regenerate:
             if isinstance(widget, QComboBox):
@@ -1014,6 +1031,83 @@ class WaveToyWindow(QMainWindow):
             return "🌿 Medium"
         return "🌳 Big"
 
+    def _octave_picture_text(self, value: int) -> str:
+        if value <= 2:
+            return "🐻 Big Low"
+        if value <= 4:
+            return "🧸 Middle"
+        return "🐭 Tiny High"
+
+    def _cents_picture_text(self, value: int) -> str:
+        if value < -12:
+            return "⬅️ Soft Lean"
+        if value > 12:
+            return "➡️ Sharp Lean"
+        return "🎯 Center"
+
+    def _pitch_picture_text(self, midi_value: int) -> str:
+        if midi_value < 52:
+            return "🐻 Low"
+        if midi_value > 76:
+            return "🐭 High"
+        return "🧸 Middle"
+
+    def _plain_loudness_text(self, value: int) -> str:
+        if value <= 20:
+            return "🤫 Tiny"
+        if value <= 65:
+            return "🌿 Medium"
+        return "🌳 Big"
+
+    def _duration_picture_text(self, tenths: int) -> str:
+        if tenths <= 12:
+            return "⚡ Quick"
+        if tenths <= 35:
+            return "⏱️ Short"
+        if tenths <= 60:
+            return "🚶 Long"
+        return "🐢 Very Long"
+
+    def _pan_picture_text(self, value: int) -> str:
+        if value < -35:
+            return "⬅️ Left"
+        if value > 35:
+            return "Right ➡️"
+        return "⬅️ 🧍 ➡️"
+
+    def _width_picture_text(self, value: int) -> str:
+        if value <= 20:
+            return "🤏 Close"
+        if value <= 65:
+            return "↔️ Medium"
+        return "👐 Wide"
+
+    def _dance_picture_text(self, value: int) -> str:
+        if value <= 10:
+            return "😴 Still"
+        if value <= 55:
+            return "🙂 Sway"
+        return "💃 Dance"
+
+    def _rate_picture_text(self, value: int) -> str:
+        if value <= 15:
+            return "🐢 Slow"
+        if value <= 45:
+            return "🚶 Medium"
+        return "🐇 Fast"
+
+    def _update_symbolic_labels(self) -> None:
+        self.duration_label.setText(self._duration_picture_text(self.duration_slider.value()))
+        self.pitch_start_label.setText(self._pitch_picture_text(self.pitch_start.value()))
+        self.pitch_end_label.setText(self._pitch_picture_text(self.pitch_end.value()))
+        self.loud_start_label.setText(self._plain_loudness_text(self.loud_start.value()))
+        self.loud_end_label.setText(self._plain_loudness_text(self.loud_end.value()))
+        self.pan_start_label.setText(self._pan_picture_text(self.pan_start_slider.value()))
+        self.pan_end_label.setText(self._pan_picture_text(self.pan_end_slider.value()))
+        self.width_label.setText(self._width_picture_text(self.width_slider.value()))
+        self.auto_pan_depth_label.setText(self._dance_picture_text(self.auto_pan_depth_slider.value()))
+        self.auto_pan_rate_label.setText(self._rate_picture_text(self.auto_pan_rate.value()))
+
     def _wave_start_db_from_ui(self) -> Dict[str, float]:
         return {
             wave_type: float(slider.value())
@@ -1026,8 +1120,14 @@ class WaveToyWindow(QMainWindow):
             for wave_type, slider in self.wave_end_sliders.items()
         }
 
+    def _clip_duration_seconds(self) -> float:
+        return self.duration_slider.value() / 10.0
+
+    def _slider_midi_to_hz(self, midi_value: int) -> float:
+        return 440.0 * (2.0 ** ((midi_value - 69) / 12.0))
+
     def _wave_delta_time_from_ui(self) -> Dict[str, float]:
-        duration = self.duration_spin.value()
+        duration = self._clip_duration_seconds()
         return {
             wave_type: duration * float(slider.value()) / 100.0
             for wave_type, slider in self.wave_time_sliders.items()
@@ -1039,40 +1139,42 @@ class WaveToyWindow(QMainWindow):
             wave_end_db=self._wave_end_db_from_ui(),
             wave_delta_time=self._wave_delta_time_from_ui(),
             note=self.note_combo.currentText(),
-            octave=self.octave_spin.value(),
-            cents=self.cents_spin.value(),
-            pitch_start_hz=self.pitch_start.value(),
-            pitch_end_hz=self.pitch_end.value(),
+            octave=self.octave_slider.value(),
+            cents=float(self.cents_slider.value()),
+            pitch_start_hz=self._slider_midi_to_hz(self.pitch_start.value()),
+            pitch_end_hz=self._slider_midi_to_hz(self.pitch_end.value()),
             loudness_start=self.loud_start.value() / 100.0,
             loudness_end=self.loud_end.value() / 100.0,
-            duration_seconds=self.duration_spin.value(),
+            duration_seconds=self._clip_duration_seconds(),
             curve_type=self.curve_combo.currentData(),
             pan_start=self.pan_start_slider.value() / 100.0,
             pan_end=self.pan_end_slider.value() / 100.0,
             stereo_width=self.width_slider.value() / 100.0,
             auto_pan_depth=self.auto_pan_depth_slider.value() / 100.0,
-            auto_pan_rate=self.auto_pan_rate.value(),
+            auto_pan_rate=self.auto_pan_rate.value() / 10.0,
         )
 
     def _sync_note_to_pitch(self) -> None:
-        hz = frequency_from_note(
-            self.note_combo.currentText(),
-            self.octave_spin.value(),
-            self.cents_spin.value(),
-        )
+        octave = self.octave_slider.value()
+        cents = self.cents_slider.value()
+        midi_value = midi_note(self.note_combo.currentText(), octave)
 
-        self.base_pitch_label.setText(f"{self.note_combo.currentText()}{self.octave_spin.value()} = {hz:.2f} Hz")
+        self.octave_label.setText(self._octave_picture_text(octave))
+        self.cents_label.setText(self._cents_picture_text(cents))
+        self.base_pitch_label.setText("Pitch: " + self._pitch_picture_text(midi_value))
 
         self.pitch_start.blockSignals(True)
         self.pitch_end.blockSignals(True)
-        self.pitch_start.setValue(hz)
-        self.pitch_end.setValue(hz)
+        self.pitch_start.setValue(midi_value)
+        self.pitch_end.setValue(midi_value)
         self.pitch_start.blockSignals(False)
         self.pitch_end.blockSignals(False)
 
+        self._update_symbolic_labels()
         self._generate()
 
     def _generate(self, update_message: bool = False) -> None:
+        self._update_symbolic_labels()
         self.current_settings = self._settings_from_ui()
         audio, time_axis, freq_env, loud_env = generate_audio(self.current_settings)
 
@@ -1157,7 +1259,7 @@ class WaveToyWindow(QMainWindow):
                 + pitch_sentence + " "
                 + "Big wiggles sound louder. Tiny wiggles sound quieter. "
                 + stereo_sentence + " "
-                + "Blue shows the left side. Pink shows the right side."
+                + "Blue is left. Yellow is the shared middle. Pink is right."
             )
         else:
             self.explain_label.setText(
@@ -1358,8 +1460,8 @@ class WaveToyWindow(QMainWindow):
             "settings": asdict(self._settings_from_ui()),
             "ui": {
                 "note": self.note_combo.currentText(),
-                "octave": self.octave_spin.value(),
-                "cents": self.cents_spin.value(),
+                "octave": self.octave_slider.value(),
+                "cents": self.cents_slider.value(),
                 "loudness_start_slider": self.loud_start.value(),
                 "loudness_end_slider": self.loud_end.value(),
                 "duration_slider": self.duration_slider.value(),
@@ -1450,18 +1552,18 @@ class WaveToyWindow(QMainWindow):
             waves = {}
 
         self.note_combo.setCurrentText(str(ui.get("note", settings.get("note", "A"))))
-        self.octave_spin.setValue(int(ui.get("octave", settings.get("octave", 4))))
-        self.cents_spin.setValue(float(ui.get("cents", settings.get("cents", 0.0))))
-        self.pitch_start.setValue(float(settings.get("pitch_start_hz", 440.0)))
-        self.pitch_end.setValue(float(settings.get("pitch_end_hz", 440.0)))
-        self.duration_spin.setValue(float(settings.get("duration_seconds", 1.5)))
+        self.octave_slider.setValue(int(ui.get("octave", settings.get("octave", 4))))
+        self.cents_slider.setValue(int(float(ui.get("cents", settings.get("cents", 0.0)))))
+        self.pitch_start.setValue(int(round(69 + 12 * math.log2(max(1.0, float(settings.get("pitch_start_hz", 440.0))) / 440.0))))
+        self.pitch_end.setValue(int(round(69 + 12 * math.log2(max(1.0, float(settings.get("pitch_end_hz", 440.0))) / 440.0))))
+        self.duration_slider.setValue(int(round(float(settings.get("duration_seconds", 1.5)) * 10)))
         self.loud_start.setValue(int(ui.get("loudness_start_slider", 40)))
         self.loud_end.setValue(int(ui.get("loudness_end_slider", 40)))
         self.pan_start_slider.setValue(int(ui.get("pan_start_slider", 0)))
         self.pan_end_slider.setValue(int(ui.get("pan_end_slider", 0)))
         self.width_slider.setValue(int(ui.get("width_slider", 45)))
         self.auto_pan_depth_slider.setValue(int(ui.get("auto_pan_depth_slider", 0)))
-        self.auto_pan_rate.setValue(float(ui.get("auto_pan_rate", 0.5)))
+        self.auto_pan_rate.setValue(int(float(ui.get("auto_pan_rate", 5))))
 
         self._set_curve(str(ui.get("curve_type", settings.get("curve_type", "linear"))))
 
@@ -1564,13 +1666,13 @@ class WaveToyWindow(QMainWindow):
             {"sine": 0, "triangle": -60, "sawtooth": -60, "square": -60},
         )
         self.note_combo.setCurrentText("A")
-        self.octave_spin.setValue(4)
-        self.cents_spin.setValue(0)
-        self.pitch_start.setValue(440)
-        self.pitch_end.setValue(440)
+        self.octave_slider.setValue(4)
+        self.cents_slider.setValue(0)
+        self.pitch_start.setValue(69)
+        self.pitch_end.setValue(69)
         self.loud_start.setValue(35)
         self.loud_end.setValue(35)
-        self.duration_spin.setValue(1.5)
+        self.duration_slider.setValue(15)
         self.pan_start_slider.setValue(0)
         self.pan_end_slider.setValue(0)
         self.width_slider.setValue(20)
@@ -1584,11 +1686,11 @@ class WaveToyWindow(QMainWindow):
             {"sine": -30, "triangle": -60, "sawtooth": 0, "square": -36},
             {"sine": 100, "triangle": 100, "sawtooth": 55, "square": 80},
         )
-        self.pitch_start.setValue(220)
-        self.pitch_end.setValue(880)
+        self.pitch_start.setValue(57)
+        self.pitch_end.setValue(81)
         self.loud_start.setValue(30)
         self.loud_end.setValue(45)
-        self.duration_spin.setValue(2.2)
+        self.duration_slider.setValue(22)
         self.pan_start_slider.setValue(-40)
         self.pan_end_slider.setValue(40)
         self.width_slider.setValue(70)
@@ -1602,14 +1704,14 @@ class WaveToyWindow(QMainWindow):
             {"sine": -60, "triangle": -60, "sawtooth": -18, "square": -12},
             {"sine": 35, "triangle": 100, "sawtooth": 70, "square": 20},
         )
-        self.pitch_start.setValue(330)
-        self.pitch_end.setValue(660)
+        self.pitch_start.setValue(64)
+        self.pitch_end.setValue(76)
         self.loud_start.setValue(35)
         self.loud_end.setValue(35)
-        self.duration_spin.setValue(0.8)
+        self.duration_slider.setValue(8)
         self.width_slider.setValue(80)
         self.auto_pan_depth_slider.setValue(30)
-        self.auto_pan_rate.setValue(2.0)
+        self.auto_pan_rate.setValue(20)
         self._set_curve("linear")
         self._generate()
 
@@ -1619,11 +1721,11 @@ class WaveToyWindow(QMainWindow):
             {"sine": -24, "triangle": -36, "sawtooth": -60, "square": -60},
             {"sine": 100, "triangle": 75, "sawtooth": 100, "square": 100},
         )
-        self.pitch_start.setValue(1000)
-        self.pitch_end.setValue(180)
+        self.pitch_start.setValue(83)
+        self.pitch_end.setValue(53)
         self.loud_start.setValue(45)
         self.loud_end.setValue(10)
-        self.duration_spin.setValue(2.5)
+        self.duration_slider.setValue(25)
         self.pan_start_slider.setValue(45)
         self.pan_end_slider.setValue(-45)
         self.width_slider.setValue(60)
@@ -1636,11 +1738,11 @@ class WaveToyWindow(QMainWindow):
             {"sine": -24, "triangle": 0, "sawtooth": -60, "square": -60},
             {"sine": 100, "triangle": 100, "sawtooth": 100, "square": 100},
         )
-        self.pitch_start.setValue(261.63)
-        self.pitch_end.setValue(261.63)
+        self.pitch_start.setValue(60)
+        self.pitch_end.setValue(60)
         self.loud_start.setValue(0)
         self.loud_end.setValue(50)
-        self.duration_spin.setValue(2.0)
+        self.duration_slider.setValue(20)
         self.width_slider.setValue(40)
         self._set_curve("linear")
         self._generate()
@@ -1679,15 +1781,11 @@ class WaveToyWindow(QMainWindow):
         self.wave_time_labels[wave_type].setText(self._slider_picture_text(time_percent, "time"))
 
     def _sync_duration_slider_to_spin(self, value: int) -> None:
-        self.duration_spin.blockSignals(True)
-        self.duration_spin.setValue(value / 10.0)
-        self.duration_spin.blockSignals(False)
+        self._update_symbolic_labels()
         self._generate()
 
-    def _sync_duration_spin_to_slider(self, value: float) -> None:
-        self.duration_slider.blockSignals(True)
-        self.duration_slider.setValue(int(round(value * 10)))
-        self.duration_slider.blockSignals(False)
+    def _sync_duration_shadow_to_slider(self, value: float) -> None:
+        self._update_symbolic_labels()
         self._generate()
 
     def _set_curve(self, curve_type: str) -> None:
