@@ -48,7 +48,7 @@ except Exception:
     sd = None
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -166,7 +166,7 @@ def waveform_from_phase(wave_type: str, phase: np.ndarray) -> np.ndarray:
 
 
 def db_to_gain(db: float) -> float:
-    if db <= -60.0:
+    if db <= -20.0:
         return 0.0
     return 10.0 ** (db / 20.0)
 
@@ -198,9 +198,9 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
 
     start_levels = settings.wave_start_db or {
         "sine": 0.0,
-        "triangle": -60.0,
-        "sawtooth": -60.0,
-        "square": -60.0,
+        "triangle": -20.0,
+        "sawtooth": -20.0,
+        "square": -20.0,
     }
     end_levels = settings.wave_end_db or dict(start_levels)
     delta_times = settings.wave_delta_time or {wave_type: duration for wave_type in WAVE_ORDER}
@@ -224,7 +224,7 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
     active_gain_total = 0.0
 
     for wave_type in WAVE_ORDER:
-        start_db = float(start_levels.get(wave_type, -60.0))
+        start_db = float(start_levels.get(wave_type, -20.0))
         end_db = float(end_levels.get(wave_type, start_db))
 
         change_seconds = max(0.01, min(float(delta_times.get(wave_type, duration)), duration))
@@ -498,8 +498,9 @@ class WaveToyWindow(QMainWindow):
         self.current_audio = np.zeros((1, 2), dtype=np.float32)
         self.current_settings = SynthSettings()
         self.live_loop_enabled = False
+        self.live_loop_is_refreshing = False
         self.live_loop_timer = QTimer(self)
-        self.live_loop_timer.timeout.connect(self._restart_live_loop)
+        self.live_loop_timer.timeout.connect(self._live_loop_tick)
 
         self.user_presets_path = Path.home() / ".wave_toy_sound_experiments.json"
         self.user_preset_buttons: List[QPushButton] = []
@@ -514,6 +515,7 @@ class WaveToyWindow(QMainWindow):
 
         self._build_actions()
         self._build_ui()
+        self._build_shortcuts()
         self._apply_style()
         self._sync_note_to_pitch()
         self._generate(update_message=True)
@@ -522,6 +524,16 @@ class WaveToyWindow(QMainWindow):
         about = QAction("About Wave Toy", self)
         about.triggered.connect(self._show_about)
         self.menuBar().addMenu("Help").addAction(about)
+
+    def _build_shortcuts(self) -> None:
+        """Install application-level shortcuts so focused sliders/buttons do not swallow Space."""
+        play_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        play_shortcut.setContext(Qt.ApplicationShortcut)
+        play_shortcut.activated.connect(self._play)
+
+        loop_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_Space), self)
+        loop_shortcut.setContext(Qt.ApplicationShortcut)
+        loop_shortcut.activated.connect(self._toggle_live_loop)
 
     def _build_ui(self) -> None:
         scroll = QScrollArea()
@@ -540,7 +552,7 @@ class WaveToyWindow(QMainWindow):
         title = QLabel("🌈 Wave Toy")
         title.setObjectName("title")
 
-        subtitle = QLabel("Build sounds by shaping waves! Space = play. Shift+Space = live loop.")
+        subtitle = QLabel("Build sounds by shaping waves! Space = play. Shift+Space = live loop. Wave sliders use picture labels; numbers appear only in grown-up explanations.")
         subtitle.setObjectName("subtitle")
 
         outer.addWidget(title)
@@ -572,9 +584,9 @@ class WaveToyWindow(QMainWindow):
         wave_layout.setColumnStretch(3, 2)
 
         wave_layout.addWidget(QLabel("Wave"), 0, 0)
-        wave_layout.addWidget(QLabel("Start dB"), 0, 1)
-        wave_layout.addWidget(QLabel("End dB"), 0, 2)
-        wave_layout.addWidget(QLabel("Change Time"), 0, 3)
+        wave_layout.addWidget(QLabel("Start 🌱"), 0, 1)
+        wave_layout.addWidget(QLabel("End 🌳"), 0, 2)
+        wave_layout.addWidget(QLabel("Change 🐢→🐇"), 0, 3)
 
         default_start = {
             "sine": 0,
@@ -591,9 +603,9 @@ class WaveToyWindow(QMainWindow):
             name.setMinimumWidth(118)
             name.setWordWrap(True)
 
-            start_label = QLabel(self._db_text(default_start[wave_type]))
+            start_label = QLabel(self._slider_picture_text(default_start[wave_type], "loudness"))
             start_slider = QSlider(Qt.Horizontal)
-            start_slider.setRange(-60, 0)
+            start_slider.setRange(-20, 0)
             start_slider.setValue(default_start[wave_type])
             start_slider.setTickInterval(6)
             start_slider.setMinimumWidth(90)
@@ -601,23 +613,23 @@ class WaveToyWindow(QMainWindow):
             start_slider.valueChanged.connect(self._generate)
             start_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
-            end_label = QLabel(self._db_text(default_end[wave_type]))
+            end_label = QLabel(self._slider_picture_text(default_end[wave_type], "loudness"))
             end_slider = QSlider(Qt.Horizontal)
-            end_slider.setRange(-60, 0)
+            end_slider.setRange(-20, 0)
             end_slider.setValue(default_end[wave_type])
             end_slider.setTickInterval(6)
             end_slider.setMinimumWidth(90)
-            end_slider.setToolTip("Ending loudness after this wave finishes changing.")
+            end_slider.setToolTip("Ending size of this wave.")
             end_slider.valueChanged.connect(self._generate)
             end_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
-            time_label = QLabel("100%")
+            time_label = QLabel("🐢 Slow")
             time_slider = QSlider(Qt.Horizontal)
             time_slider.setRange(1, 100)
             time_slider.setValue(100)
             time_slider.setTickInterval(10)
             time_slider.setMinimumWidth(90)
-            time_slider.setToolTip("Percent of the clip used to change from Start dB to End dB.")
+            time_slider.setToolTip("How slowly or quickly this wave changes.")
             time_slider.valueChanged.connect(self._generate)
             time_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
@@ -744,9 +756,9 @@ class WaveToyWindow(QMainWindow):
         motion_layout.addWidget(self.pitch_start, 2, 1)
         motion_layout.addWidget(QLabel("End Pitch"), 3, 0)
         motion_layout.addWidget(self.pitch_end, 3, 1)
-        motion_layout.addWidget(QLabel("Start Loudness"), 4, 0)
+        motion_layout.addWidget(QLabel("Start Wiggle"), 4, 0)
         motion_layout.addWidget(self.loud_start, 4, 1)
-        motion_layout.addWidget(QLabel("End Loudness"), 5, 0)
+        motion_layout.addWidget(QLabel("End Wiggle"), 5, 0)
         motion_layout.addWidget(self.loud_end, 5, 1)
         motion_layout.addWidget(QLabel("Change Style"), 6, 0)
         motion_layout.addWidget(self.curve_combo, 6, 1)
@@ -776,9 +788,9 @@ class WaveToyWindow(QMainWindow):
         stereo_layout.addWidget(self.pan_start_slider, 0, 1)
         stereo_layout.addWidget(QLabel("End Pan"), 1, 0)
         stereo_layout.addWidget(self.pan_end_slider, 1, 1)
-        stereo_layout.addWidget(QLabel("Wave Spread"), 2, 0)
+        stereo_layout.addWidget(QLabel("Ear Spread"), 2, 0)
         stereo_layout.addWidget(self.width_slider, 2, 1)
-        stereo_layout.addWidget(QLabel("Auto Wiggle"), 3, 0)
+        stereo_layout.addWidget(QLabel("Ear Dance"), 3, 0)
         stereo_layout.addWidget(self.auto_pan_depth_slider, 3, 1)
         stereo_layout.addWidget(QLabel("Wiggle Speed"), 4, 0)
         stereo_layout.addWidget(self.auto_pan_rate, 4, 1)
@@ -983,7 +995,24 @@ class WaveToyWindow(QMainWindow):
         )
 
     def _db_text(self, value: int) -> str:
-        return "Off" if value <= -60 else f"{value} dB"
+        return "Off" if value <= -20 else f"{value} dB"
+
+    def _slider_picture_text(self, value: int, kind: str) -> str:
+        """Child-facing slider labels. No numerical values here."""
+        if kind == "time":
+            if value <= 25:
+                return "🐇 Fast"
+            if value <= 65:
+                return "🚶 Medium"
+            return "🐢 Slow"
+
+        if value <= -20:
+            return "🤫 Silent"
+        if value <= -14:
+            return "🌱 Tiny"
+        if value <= -8:
+            return "🌿 Medium"
+        return "🌳 Big"
 
     def _wave_start_db_from_ui(self) -> Dict[str, float]:
         return {
@@ -1052,7 +1081,7 @@ class WaveToyWindow(QMainWindow):
         active_count = sum(
             1
             for wave_type, db in (self.current_settings.wave_start_db or {}).items()
-            if db > -60 or (self.current_settings.wave_end_db or {}).get(wave_type, -60) > -60
+            if db > -60 or (self.current_settings.wave_end_db or {}).get(wave_type, -20) > -60
         )
 
         if self.current_settings.auto_pan_depth > 0:
@@ -1065,8 +1094,8 @@ class WaveToyWindow(QMainWindow):
         self.canvas.set_data(audio, freq_env, loud_env, msg)
         self._update_explanation()
 
-        if self.live_loop_enabled:
-            self._restart_live_loop()
+        if self.live_loop_enabled and not self.live_loop_is_refreshing:
+            self._restart_live_loop(regenerate=False)
 
     def _update_explanation(self) -> None:
         s = self.current_settings
@@ -1141,7 +1170,7 @@ class WaveToyWindow(QMainWindow):
             )
 
     def keyPressEvent(self, event) -> None:
-        """Keyboard shortcuts: Space plays once; Shift+Space toggles live looping."""
+        """Fallback keyboard handler. QShortcut handles this more reliably."""
         if event.key() == Qt.Key_Space:
             if event.modifiers() & Qt.ShiftModifier:
                 self._toggle_live_loop()
@@ -1155,7 +1184,10 @@ class WaveToyWindow(QMainWindow):
     def _play(self) -> None:
         """Play the current sound once."""
         self._generate()
+        self._play_current_audio_once()
 
+    def _play_current_audio_once(self) -> None:
+        """Play already-generated audio once."""
         if sd is not None:
             try:
                 sd.stop()
@@ -1188,38 +1220,50 @@ class WaveToyWindow(QMainWindow):
     def _toggle_live_loop(self) -> None:
         """Toggle continuous live playback. Requires sounddevice for clean looping."""
         if self.live_loop_enabled:
-            self.live_loop_enabled = False
-            self.live_loop_timer.stop()
-            if sd is not None:
-                try:
-                    sd.stop()
-                except Exception:
-                    pass
-            self.loop_status_label.setText("Loop: Off")
+            self._disable_live_loop()
             return
 
         if sd is None:
-            self._show_playback_warning("Live loop mode requires sounddevice.")
+            self._show_playback_warning("Live loop mode requires sounddevice. Run: pip install sounddevice")
             return
 
         self.live_loop_enabled = True
         self.loop_status_label.setText("Loop: On")
-        self._restart_live_loop()
+        self._restart_live_loop(regenerate=True)
 
-    def _restart_live_loop(self) -> None:
+    def _disable_live_loop(self) -> None:
+        self.live_loop_enabled = False
+        self.live_loop_timer.stop()
+        self.live_loop_is_refreshing = False
+        if sd is not None:
+            try:
+                sd.stop()
+            except Exception:
+                pass
+        self.loop_status_label.setText("Loop: Off")
+
+    def _live_loop_tick(self) -> None:
+        """Timer callback: rebuild the sound and play the next loop."""
+        self._restart_live_loop(regenerate=True)
+
+    def _restart_live_loop(self, regenerate: bool = True) -> None:
         """Regenerate and restart playback so slider changes are heard live."""
         if not self.live_loop_enabled or sd is None:
             return
 
         try:
+            self.live_loop_is_refreshing = True
+            if regenerate:
+                self._generate()
+            self.live_loop_is_refreshing = False
+
             sd.stop()
             sd.play(self.current_audio, SAMPLE_RATE, blocking=False)
+
             duration_ms = max(100, int(self.current_settings.duration_seconds * 1000))
             self.live_loop_timer.start(duration_ms)
         except Exception as exc:
-            self.live_loop_enabled = False
-            self.live_loop_timer.stop()
-            self.loop_status_label.setText("Loop: Off")
+            self._disable_live_loop()
             self._show_playback_warning(str(exc))
 
     def _play_with_system_player(self) -> Tuple[bool, str]:
@@ -1261,15 +1305,7 @@ class WaveToyWindow(QMainWindow):
             return False, f"Could not launch {name}: {exc}"
 
     def _stop(self) -> None:
-        self.live_loop_enabled = False
-        self.live_loop_timer.stop()
-        self.loop_status_label.setText("Loop: Off")
-
-        if sd is not None:
-            try:
-                sd.stop()
-            except Exception:
-                pass
+        self._disable_live_loop()
 
     def _save(self) -> None:
         self._generate()
@@ -1436,8 +1472,8 @@ class WaveToyWindow(QMainWindow):
         for wave_type in WAVE_ORDER:
             wave_data = waves.get(wave_type, {})
             if isinstance(wave_data, dict):
-                start_levels[wave_type] = int(wave_data.get("start_db", -60))
-                end_levels[wave_type] = int(wave_data.get("end_db", -60))
+                start_levels[wave_type] = int(wave_data.get("start_db", -20))
+                end_levels[wave_type] = int(wave_data.get("end_db", -20))
                 times[wave_type] = int(wave_data.get("change_time_percent", 100))
 
         self._set_wave_levels(start_levels, end_levels, times)
@@ -1620,8 +1656,8 @@ class WaveToyWindow(QMainWindow):
 
         for wave_type in WAVE_ORDER:
             for slider_dict, value_dict, default_value in [
-                (self.wave_start_sliders, levels, -60),
-                (self.wave_end_sliders, end_levels, -60),
+                (self.wave_start_sliders, levels, -20),
+                (self.wave_end_sliders, end_levels, -20),
                 (self.wave_time_sliders, times, 100),
             ]:
                 slider = slider_dict[wave_type]
@@ -1638,9 +1674,9 @@ class WaveToyWindow(QMainWindow):
         end_value = self.wave_end_sliders[wave_type].value()
         time_percent = self.wave_time_sliders[wave_type].value()
 
-        self.wave_start_labels[wave_type].setText(self._db_text(start_value))
-        self.wave_end_labels[wave_type].setText(self._db_text(end_value))
-        self.wave_time_labels[wave_type].setText(f"{time_percent}%")
+        self.wave_start_labels[wave_type].setText(self._slider_picture_text(start_value, "loudness"))
+        self.wave_end_labels[wave_type].setText(self._slider_picture_text(end_value, "loudness"))
+        self.wave_time_labels[wave_type].setText(self._slider_picture_text(time_percent, "time"))
 
     def _sync_duration_slider_to_spin(self, value: int) -> None:
         self.duration_spin.blockSignals(True)
