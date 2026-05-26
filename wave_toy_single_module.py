@@ -3,8 +3,8 @@
 Wave Toy - single-file educational waveform synthesizer GUI.
 
 A kid-friendly Python/PySide6 app for teaching sound waves from first principles.
-It generates sine, triangle, sawtooth, and square waves with pitch/loudness changes
-over time.
+It generates sine, triangle, sawtooth, and square waves together, with a separate
+mixer level for each waveform plus pitch/loudness changes over time.
 
 Dependencies:
     pip install PySide6 numpy
@@ -46,7 +46,6 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -57,7 +56,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QRadioButton,
     QSlider,
     QSpinBox,
     QDoubleSpinBox,
@@ -87,7 +85,9 @@ CURVE_LABELS = {
 
 @dataclass
 class SynthSettings:
-    wave_type: str = "sine"
+    wave_start_db: Dict[str, float] | None = None
+    wave_end_db: Dict[str, float] | None = None
+    wave_delta_time: Dict[str, float] | None = None
     note: str = "A"
     octave: int = 4
     cents: float = 0.0
@@ -131,6 +131,16 @@ def make_curve(start: float, end: float, samples: int, curve_type: str) -> np.nd
     return start + (end - start) * shaped
 
 
+def make_partial_curve(start: float, end: float, total_samples: int, change_samples: int, curve_type: str) -> np.ndarray:
+    """Change from start to end for change_samples, then hold the end value."""
+    change_samples = max(1, min(int(change_samples), int(total_samples)))
+    curve = make_curve(start, end, change_samples, curve_type)
+    if change_samples >= total_samples:
+        return curve
+    hold = np.full(total_samples - change_samples, end, dtype=np.float64)
+    return np.concatenate([curve, hold])
+
+
 def waveform_from_phase(wave_type: str, phase: np.ndarray) -> np.ndarray:
     """Create waveform samples from phase in radians."""
     if wave_type == "sine":
@@ -148,8 +158,15 @@ def waveform_from_phase(wave_type: str, phase: np.ndarray) -> np.ndarray:
     return np.sin(phase)
 
 
+def db_to_gain(db: float) -> float:
+    """Convert dB to linear gain. -60 dB is treated as nearly silent."""
+    if db <= -60.0:
+        return 0.0
+    return 10.0 ** (db / 20.0)
+
+
 def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return audio, time, frequency envelope, loudness envelope."""
+    """Return mixed audio, time, frequency envelope, loudness envelope."""
     duration = max(0.1, min(float(settings.duration_seconds), MAX_PREVIEW_SECONDS))
     total_samples = int(SAMPLE_RATE * duration)
     time_axis = np.arange(total_samples, dtype=np.float64) / SAMPLE_RATE
@@ -166,8 +183,39 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
     phase_step = 2.0 * np.pi * freq_env / SAMPLE_RATE
     phase = np.cumsum(phase_step)
 
-    raw_wave = waveform_from_phase(settings.wave_type, phase)
-    audio = raw_wave * loud_env
+    start_levels = settings.wave_start_db or {
+        "sine": 0.0,
+        "triangle": -60.0,
+        "sawtooth": -60.0,
+        "square": -60.0,
+    }
+    end_levels = settings.wave_end_db or dict(start_levels)
+    delta_times = settings.wave_delta_time or {
+        "sine": duration,
+        "triangle": duration,
+        "sawtooth": duration,
+        "square": duration,
+    }
+
+    mixed = np.zeros(total_samples, dtype=np.float64)
+    active_gain_total = 0.0
+    for wave_type in ["sine", "triangle", "sawtooth", "square"]:
+        start_db = float(start_levels.get(wave_type, -60.0))
+        end_db = float(end_levels.get(wave_type, start_db))
+        change_seconds = max(0.01, min(float(delta_times.get(wave_type, duration)), duration))
+        change_samples = int(change_seconds * SAMPLE_RATE)
+        db_env = make_partial_curve(start_db, end_db, total_samples, change_samples, settings.curve_type)
+        gain_env = np.array([db_to_gain(db) for db in db_env], dtype=np.float64)
+        if float(np.max(gain_env)) <= 0.0:
+            continue
+        mixed += waveform_from_phase(wave_type, phase) * gain_env
+        active_gain_total += float(np.max(gain_env))
+
+    # Keep combinations from becoming much louder just because several waves are active.
+    if active_gain_total > 1.0:
+        mixed /= active_gain_total
+
+    audio = mixed * loud_env
 
     # Safety limiter. Keeps output comfortable and avoids hard clipping.
     peak = float(np.max(np.abs(audio))) if audio.size else 0.0
@@ -315,6 +363,12 @@ class WaveToyWindow(QMainWindow):
         self.setMinimumSize(QSize(720, 520))
         self.current_audio = np.zeros(1, dtype=np.float32)
         self.current_settings = SynthSettings()
+        self.wave_start_sliders: Dict[str, QSlider] = {}
+        self.wave_end_sliders: Dict[str, QSlider] = {}
+        self.wave_time_sliders: Dict[str, QSlider] = {}
+        self.wave_start_labels: Dict[str, QLabel] = {}
+        self.wave_end_labels: Dict[str, QLabel] = {}
+        self.wave_time_labels: Dict[str, QLabel] = {}
 
         self._build_actions()
         self._build_ui()
@@ -352,25 +406,64 @@ class WaveToyWindow(QMainWindow):
         body.addLayout(center, 2)
         body.addLayout(right, 1)
 
-        self.wave_group = QButtonGroup(self)
-        wave_box = self._toy_group("1. Pick a Wave Shape")
-        wave_layout = QVBoxLayout(wave_box)
-        colors = {
-            "sine": "#b8f7d4",
-            "triangle": "#ffd166",
-            "sawtooth": "#9bd8ff",
-            "square": "#ffb3c7",
+        wave_box = self._toy_group("1. Mix the Wave Shapes")
+        wave_layout = QGridLayout(wave_box)
+        wave_layout.addWidget(QLabel("Wave"), 0, 0)
+        wave_layout.addWidget(QLabel("Start dB"), 0, 1)
+        wave_layout.addWidget(QLabel("End dB"), 0, 2)
+        wave_layout.addWidget(QLabel("Change Time"), 0, 3)
+        default_start = {
+            "sine": 0,
+            "triangle": -60,
+            "sawtooth": -60,
+            "square": -60,
         }
-        for index, wave_type in enumerate(["sine", "triangle", "sawtooth", "square"]):
-            button = QRadioButton(f"{self._wave_icon(wave_type)} {WAVE_LABELS[wave_type]}")
-            button.setProperty("waveColor", colors[wave_type])
-            button.setMinimumHeight(48)
-            button.setCursor(Qt.PointingHandCursor)
-            self.wave_group.addButton(button, index)
-            button.toggled.connect(self._generate)
-            wave_layout.addWidget(button)
-            if wave_type == "sine":
-                button.setChecked(True)
+        default_end = dict(default_start)
+        for row, wave_type in enumerate(["sine", "triangle", "sawtooth", "square"], start=1):
+            ui_row = row * 2 - 1
+            name = QLabel(f"{self._wave_icon(wave_type)} {WAVE_LABELS[wave_type]}")
+
+            start_label = QLabel(f"{default_start[wave_type]} dB")
+            start_slider = QSlider(Qt.Horizontal)
+            start_slider.setRange(-60, 0)
+            start_slider.setValue(default_start[wave_type])
+            start_slider.setTickInterval(6)
+            start_slider.setToolTip("Starting loudness. 0 dB is full volume. -60 dB is silent.")
+            start_slider.valueChanged.connect(self._generate)
+            start_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
+
+            end_label = QLabel(f"{default_end[wave_type]} dB")
+            end_slider = QSlider(Qt.Horizontal)
+            end_slider.setRange(-60, 0)
+            end_slider.setValue(default_end[wave_type])
+            end_slider.setTickInterval(6)
+            end_slider.setToolTip("Ending loudness after this wave finishes changing.")
+            end_slider.valueChanged.connect(self._generate)
+            end_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
+
+            time_label = QLabel("100%")
+            time_slider = QSlider(Qt.Horizontal)
+            time_slider.setRange(1, 100)
+            time_slider.setValue(100)
+            time_slider.setTickInterval(10)
+            time_slider.setToolTip("Percent of the clip used to change from Start dB to End dB.")
+            time_slider.valueChanged.connect(self._generate)
+            time_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
+
+            self.wave_start_sliders[wave_type] = start_slider
+            self.wave_end_sliders[wave_type] = end_slider
+            self.wave_time_sliders[wave_type] = time_slider
+            self.wave_start_labels[wave_type] = start_label
+            self.wave_end_labels[wave_type] = end_label
+            self.wave_time_labels[wave_type] = time_label
+
+            wave_layout.addWidget(name, ui_row, 0, 2, 1)
+            wave_layout.addWidget(start_label, ui_row, 1)
+            wave_layout.addWidget(start_slider, ui_row + 1, 1)
+            wave_layout.addWidget(end_label, ui_row, 2)
+            wave_layout.addWidget(end_slider, ui_row + 1, 2)
+            wave_layout.addWidget(time_label, ui_row, 3)
+            wave_layout.addWidget(time_slider, ui_row + 1, 3)
         left.addWidget(wave_box)
 
         pitch_box = self._toy_group("2. Choose Pitch")
@@ -415,6 +508,13 @@ class WaveToyWindow(QMainWindow):
         self.duration_spin.setSingleStep(0.1)
         self.duration_spin.setSuffix(" sec")
 
+        self.duration_slider = QSlider(Qt.Horizontal)
+        self.duration_slider.setRange(1, int(MAX_PREVIEW_SECONDS * 10))
+        self.duration_slider.setValue(15)
+        self.duration_slider.setToolTip("Total length of the sound clip.")
+        self.duration_slider.valueChanged.connect(self._sync_duration_slider_to_spin)
+        self.duration_spin.valueChanged.connect(self._sync_duration_spin_to_slider)
+
         self.pitch_start = QDoubleSpinBox()
         self.pitch_start.setRange(1.0, 5000.0)
         self.pitch_start.setValue(440.0)
@@ -438,8 +538,9 @@ class WaveToyWindow(QMainWindow):
         for key, label in CURVE_LABELS.items():
             self.curve_combo.addItem(label, key)
 
-        motion_layout.addWidget(QLabel("Time"), 0, 0)
+        motion_layout.addWidget(QLabel("Clip Time"), 0, 0)
         motion_layout.addWidget(self.duration_spin, 0, 1)
+        motion_layout.addWidget(self.duration_slider, 1, 0, 1, 2)
         motion_layout.addWidget(QLabel("Start Pitch"), 1, 0)
         motion_layout.addWidget(self.pitch_start, 1, 1)
         motion_layout.addWidget(QLabel("End Pitch"), 2, 0)
@@ -607,19 +708,24 @@ class WaveToyWindow(QMainWindow):
             """
         )
 
-    def _selected_wave(self) -> str:
-        checked = self.wave_group.checkedButton()
-        if not checked:
-            return "sine"
-        label = checked.text()
-        for key, friendly in WAVE_LABELS.items():
-            if friendly in label:
-                return key
-        return "sine"
+    def _wave_start_db_from_ui(self) -> Dict[str, float]:
+        return {wave_type: float(slider.value()) for wave_type, slider in self.wave_start_sliders.items()}
+
+    def _wave_end_db_from_ui(self) -> Dict[str, float]:
+        return {wave_type: float(slider.value()) for wave_type, slider in self.wave_end_sliders.items()}
+
+    def _wave_delta_time_from_ui(self) -> Dict[str, float]:
+        duration = self.duration_spin.value()
+        return {
+            wave_type: duration * float(slider.value()) / 100.0
+            for wave_type, slider in self.wave_time_sliders.items()
+        }
 
     def _settings_from_ui(self) -> SynthSettings:
         return SynthSettings(
-            wave_type=self._selected_wave(),
+            wave_start_db=self._wave_start_db_from_ui(),
+            wave_end_db=self._wave_end_db_from_ui(),
+            wave_delta_time=self._wave_delta_time_from_ui(),
             note=self.note_combo.currentText(),
             octave=self.octave_spin.value(),
             cents=self.cents_spin.value(),
@@ -648,7 +754,11 @@ class WaveToyWindow(QMainWindow):
         audio, time_axis, freq_env, loud_env = generate_audio(self.current_settings)
         self.current_audio = audio
 
-        wave_name = WAVE_LABELS[self.current_settings.wave_type]
+        active_waves = [
+            WAVE_LABELS[wave_type]
+            for wave_type, db in (self.current_settings.wave_start_db or {}).items()
+            if db > -60 or (self.current_settings.wave_end_db or {}).get(wave_type, -60) > -60
+        ]
         start_pitch = self.current_settings.pitch_start_hz
         end_pitch = self.current_settings.pitch_end_hz
         start_loud = int(self.current_settings.loudness_start * 100)
@@ -661,20 +771,26 @@ class WaveToyWindow(QMainWindow):
         elif start_loud != end_loud:
             msg = "The wave grows or shrinks, so loudness changes!"
         else:
-            msg = f"This is a {wave_name}. Listen to its shape!"
+            msg = f"You are mixing {len(active_waves)} wave shape(s). Move the dB sliders!"
 
         self.canvas.set_data(audio, freq_env, loud_env, msg)
         self._update_explanation()
 
     def _update_explanation(self) -> None:
         s = self.current_settings
-        wave_name = WAVE_LABELS[s.wave_type]
         curve_name = CURVE_LABELS[s.curve_type]
+        active = []
+        for wave_type, start_db in (s.wave_start_db or {}).items():
+            end_db = (s.wave_end_db or {}).get(wave_type, start_db)
+            change_time = (s.wave_delta_time or {}).get(wave_type, s.duration_seconds)
+            if start_db > -60 or end_db > -60:
+                active.append(f"{WAVE_LABELS[wave_type]} {start_db:.0f}→{end_db:.0f} dB over {change_time:.1f}s")
+        active_text = ", ".join(active) if active else "no waves yet"
         self.explain_label.setText(
-            f"You made a {wave_name}. Pitch means how high or low the sound is. "
-            f"Loudness means how tall the wave is. This sound starts at {s.pitch_start_hz:.1f} Hz "
-            f"and ends at {s.pitch_end_hz:.1f} Hz using {curve_name.lower()}. "
-            f"Grown-up words: waveform, frequency, amplitude, envelope."
+            f"You are mixing: {active_text}. Pitch means how high or low the sound is. "
+            f"Loudness means how tall the whole wave is. Each dB slider controls one ingredient. "
+            f"This sound starts at {s.pitch_start_hz:.1f} Hz and ends at {s.pitch_end_hz:.1f} Hz "
+            f"using {curve_name.lower()}. Grown-up words: waveform, frequency, decibels, amplitude, envelope."
         )
 
     def _play(self) -> None:
@@ -692,16 +808,21 @@ class WaveToyWindow(QMainWindow):
 
         ok, message = self._play_with_system_player()
         if not ok:
+            warning_text = (
+                "Wave Toy could generate the sound, but could not find an audio player.\n\n"
+                "Try one of these on OpenMandriva/Linux:\n\n"
+                "sudo dnf install portaudio sounddevice\n"
+                "pip install sounddevice\n\n"
+                "Or install a command-line player such as pulseaudio-utils, alsa-utils, ffmpeg, or sox.\n\n"
+                f"Details: {message}"
+            )
+
             QMessageBox.warning(
                 self,
                 "Playback is not available",
-                "Wave Toy could generate the sound, but could not find an audio player."
-                "Try one of these on OpenMandriva/Linux:"
-                "sudo dnf install portaudio sounddevice"
-                "pip install sounddevice"
-                "Or install a command-line player such as pulseaudio-utils, alsa-utils, ffmpeg, or sox."
-                f"Details: {message}",
+                warning_text,
             )
+            QMessageBox.warning(self, "Playback is not available", warning_text)
 
     def _play_with_system_player(self) -> Tuple[bool, str]:
         """Fallback playback using common Linux/macOS command-line tools."""
@@ -773,7 +894,7 @@ class WaveToyWindow(QMainWindow):
         )
 
     def _preset_pure_a4(self) -> None:
-        self._set_wave("sine")
+        self._set_wave_levels({"sine": 0, "triangle": -60, "sawtooth": -60, "square": -60})
         self.note_combo.setCurrentText("A")
         self.octave_spin.setValue(4)
         self.cents_spin.setValue(0)
@@ -786,7 +907,11 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_rocket_pitch(self) -> None:
-        self._set_wave("sawtooth")
+        self._set_wave_levels(
+            {"sine": -18, "triangle": -60, "sawtooth": -18, "square": -24},
+            {"sine": -30, "triangle": -60, "sawtooth": 0, "square": -36},
+            {"sine": 100, "triangle": 100, "sawtooth": 55, "square": 80},
+        )
         self.pitch_start.setValue(220)
         self.pitch_end.setValue(880)
         self.loud_start.setValue(30)
@@ -796,7 +921,11 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_robot_beep(self) -> None:
-        self._set_wave("square")
+        self._set_wave_levels(
+            {"sine": -30, "triangle": -60, "sawtooth": -24, "square": 0},
+            {"sine": -60, "triangle": -60, "sawtooth": -18, "square": -12},
+            {"sine": 35, "triangle": 100, "sawtooth": 70, "square": 20},
+        )
         self.pitch_start.setValue(330)
         self.pitch_end.setValue(660)
         self.loud_start.setValue(35)
@@ -806,7 +935,11 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_falling_star(self) -> None:
-        self._set_wave("sine")
+        self._set_wave_levels(
+            {"sine": 0, "triangle": -18, "sawtooth": -60, "square": -60},
+            {"sine": -24, "triangle": -36, "sawtooth": -60, "square": -60},
+            {"sine": 100, "triangle": 75, "sawtooth": 100, "square": 100},
+        )
         self.pitch_start.setValue(1000)
         self.pitch_end.setValue(180)
         self.loud_start.setValue(45)
@@ -816,7 +949,11 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_fade_in_triangle(self) -> None:
-        self._set_wave("triangle")
+        self._set_wave_levels(
+            {"sine": -60, "triangle": -60, "sawtooth": -60, "square": -60},
+            {"sine": -24, "triangle": 0, "sawtooth": -60, "square": -60},
+            {"sine": 100, "triangle": 100, "sawtooth": 100, "square": 100},
+        )
         self.pitch_start.setValue(261.63)
         self.pitch_end.setValue(261.63)
         self.loud_start.setValue(0)
@@ -825,11 +962,46 @@ class WaveToyWindow(QMainWindow):
         self._set_curve("linear")
         self._generate()
 
-    def _set_wave(self, wave_type: str) -> None:
-        for button in self.wave_group.buttons():
-            if WAVE_LABELS[wave_type] in button.text():
-                button.setChecked(True)
-                return
+    def _set_wave_levels(
+        self,
+        levels: Dict[str, int],
+        end_levels: Dict[str, int] | None = None,
+        times: Dict[str, int] | None = None,
+    ) -> None:
+        end_levels = end_levels or levels
+        times = times or {wave_type: 100 for wave_type in ["sine", "triangle", "sawtooth", "square"]}
+        for wave_type in ["sine", "triangle", "sawtooth", "square"]:
+            for slider_dict, value_dict, default_value in [
+                (self.wave_start_sliders, levels, -60),
+                (self.wave_end_sliders, end_levels, -60),
+                (self.wave_time_sliders, times, 100),
+            ]:
+                slider = slider_dict[wave_type]
+                slider.blockSignals(True)
+                slider.setValue(int(value_dict.get(wave_type, default_value)))
+                slider.blockSignals(False)
+            self._update_wave_envelope_labels(wave_type)
+        self._generate()
+
+    def _update_wave_envelope_labels(self, wave_type: str) -> None:
+        start_value = self.wave_start_sliders[wave_type].value()
+        end_value = self.wave_end_sliders[wave_type].value()
+        time_percent = self.wave_time_sliders[wave_type].value()
+        self.wave_start_labels[wave_type].setText("Off" if start_value <= -60 else f"{start_value} dB")
+        self.wave_end_labels[wave_type].setText("Off" if end_value <= -60 else f"{end_value} dB")
+        self.wave_time_labels[wave_type].setText(f"{time_percent}%")
+
+    def _sync_duration_slider_to_spin(self, value: int) -> None:
+        self.duration_spin.blockSignals(True)
+        self.duration_spin.setValue(value / 10.0)
+        self.duration_spin.blockSignals(False)
+        self._generate()
+
+    def _sync_duration_spin_to_slider(self, value: float) -> None:
+        self.duration_slider.blockSignals(True)
+        self.duration_slider.setValue(int(round(value * 10)))
+        self.duration_slider.blockSignals(False)
+        self._generate()
 
     def _set_curve(self, curve_type: str) -> None:
         for i in range(self.curve_combo.count()):
