@@ -893,15 +893,15 @@ class WaveToyWindow(QMainWindow):
 
         right.addWidget(stereo_box)
 
-        wave_stereo_box = self._toy_group("5. Stereo Per Wave")
+        wave_stereo_box = self._toy_group("5. Stereo Space Per Wave")
         wave_stereo_box.setMinimumWidth(300)
         wave_stereo_layout = QGridLayout(wave_stereo_box)
         wave_stereo_layout.setHorizontalSpacing(12)
         wave_stereo_layout.setVerticalSpacing(8)
         wave_stereo_layout.addWidget(QLabel("Wave"), 0, 0)
-        wave_stereo_layout.addWidget(QLabel("Place"), 0, 1)
-        wave_stereo_layout.addWidget(QLabel("Spread"), 0, 2)
-        wave_stereo_layout.addWidget(QLabel("Dance"), 0, 3)
+        wave_stereo_layout.addWidget(QLabel("Ear Place"), 0, 1)
+        wave_stereo_layout.addWidget(QLabel("Ear Spread"), 0, 2)
+        wave_stereo_layout.addWidget(QLabel("Ear Dance"), 0, 3)
 
         default_wave_pan = {
             "sine": -45,
@@ -919,6 +919,7 @@ class WaveToyWindow(QMainWindow):
             pan_slider = QSlider(Qt.Horizontal)
             pan_slider.setRange(-100, 100)
             pan_slider.setValue(default_wave_pan[wave_type])
+            pan_slider.setToolTip("Where this wave sits between the left and right ear.")
             pan_slider.valueChanged.connect(self._generate)
             pan_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
@@ -926,6 +927,7 @@ class WaveToyWindow(QMainWindow):
             width_slider = QSlider(Qt.Horizontal)
             width_slider.setRange(0, 100)
             width_slider.setValue(65)
+            width_slider.setToolTip("How wide this wave feels in stereo space.")
             width_slider.valueChanged.connect(self._generate)
             width_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
@@ -933,6 +935,7 @@ class WaveToyWindow(QMainWindow):
             dance_slider = QSlider(Qt.Horizontal)
             dance_slider.setRange(0, 100)
             dance_slider.setValue(0)
+            dance_slider.setToolTip("How much this wave dances between ears.")
             dance_slider.valueChanged.connect(self._generate)
             dance_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
