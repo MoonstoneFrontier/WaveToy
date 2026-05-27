@@ -327,6 +327,9 @@ class WaveCanvas(QWidget):
         self.loud_env = np.zeros(1, dtype=np.float32)
         self.mascot_message = "Move the sliders, then press Make Sound!"
         self.animation_phase = 0.0
+        self.zoom_factor = 1.0
+        self.zoom_center = 0.5
+        self.setMouseTracking(True)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -335,6 +338,46 @@ class WaveCanvas(QWidget):
     def _tick(self) -> None:
         self.animation_phase = (self.animation_phase + 0.05) % (2.0 * math.pi)
         self.update()
+
+    def wheelEvent(self, event) -> None:
+        """Mouse wheel zooms the waveform time view."""
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        # Cursor position chooses the zoom center inside the drawing area.
+        rect = self.rect().adjusted(40, 72, -40, -58)
+        if rect.width() > 0:
+            relative_x = (event.position().x() - rect.left()) / rect.width()
+            self.zoom_center = float(np.clip(relative_x, 0.05, 0.95))
+
+        if delta > 0:
+            self.zoom_factor = min(64.0, self.zoom_factor * 1.25)
+        else:
+            self.zoom_factor = max(1.0, self.zoom_factor / 1.25)
+
+        self.update()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """Double-click resets waveform zoom."""
+        self.zoom_factor = 1.0
+        self.zoom_center = 0.5
+        self.update()
+        event.accept()
+
+    def _visible_slice(self, data: np.ndarray) -> np.ndarray:
+        if data.size == 0 or self.zoom_factor <= 1.01:
+            return data
+
+        total = data.shape[0]
+        visible = max(32, int(total / self.zoom_factor))
+        visible = min(visible, total)
+
+        center = int(total * self.zoom_center)
+        start = max(0, min(total - visible, center - visible // 2))
+        end = start + visible
+        return data[start:end]
 
     def set_data(self, audio: np.ndarray, freq_env: np.ndarray, loud_env: np.ndarray, message: str) -> None:
         if audio.size:
@@ -424,10 +467,11 @@ class WaveCanvas(QWidget):
         thick: int,
     ) -> None:
         painter.setPen(QPen(QColor(0, 0, 0, 45), thick + 7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(self._path_for_vertical_wave(data, area.adjusted(4, 4, 4, 4), center_x + 4, 0.09))
+        width_scale = min(0.16, 0.09 + math.log2(max(1.0, self.zoom_factor)) * 0.012)
+        painter.drawPath(self._path_for_vertical_wave(data, area.adjusted(4, 4, 4, 4), center_x + 4, width_scale))
 
         painter.setPen(QPen(color, thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(self._path_for_vertical_wave(data, area, center_x, 0.09))
+        painter.drawPath(self._path_for_vertical_wave(data, area, center_x, width_scale))
 
         painter.setPen(QColor("#263238"))
         painter.setFont(QFont("Arial", 11, QFont.Bold))
@@ -435,11 +479,13 @@ class WaveCanvas(QWidget):
         painter.drawText(label_rect, Qt.AlignCenter, label)
 
     def _draw_wave(self, painter: QPainter, area: QRectF) -> None:
-        if self.audio.ndim == 1:
-            left = right = self.audio
+        visible_audio = self._visible_slice(self.audio)
+
+        if visible_audio.ndim == 1:
+            left = right = visible_audio
         else:
-            left = self.audio[:, 0]
-            right = self.audio[:, 1]
+            left = visible_audio[:, 0]
+            right = visible_audio[:, 1]
 
         common = (left + right) * 0.5
 
@@ -454,6 +500,18 @@ class WaveCanvas(QWidget):
         self._draw_wave_column(painter, area, left_x, "Left", QColor("#00a8ff"), left, 6)
         self._draw_wave_column(painter, area, common_x, "Common", QColor("#fff176"), common, 5)
         self._draw_wave_column(painter, area, right_x, "Right", QColor("#ff4fa3"), right, 6)
+
+        painter.setPen(QColor("#263238"))
+        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        if self.zoom_factor <= 1.01:
+            zoom_text = "Mouse wheel: zoom waveform    Double-click: reset"
+        else:
+            zoom_text = f"Zoomed view ×{self.zoom_factor:.1f}    Mouse wheel: zoom    Double-click: reset"
+        painter.drawText(
+            QRectF(area.left(), area.top() - 28, area.width(), 22),
+            Qt.AlignCenter,
+            zoom_text,
+        )
 
     def _draw_mascot(self, painter: QPainter, rect: QRectF) -> None:
         cx = rect.left() + 54
