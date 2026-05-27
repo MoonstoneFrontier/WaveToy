@@ -109,6 +109,9 @@ class SynthSettings:
     stereo_width: float = 0.45
     auto_pan_depth: float = 0.0
     auto_pan_rate: float = 0.50
+    wave_pan: Dict[str, float] | None = None
+    wave_width: Dict[str, float] | None = None
+    wave_dance: Dict[str, float] | None = None
 
 
 def midi_note(note: str, octave: int) -> int:
@@ -208,12 +211,15 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
     mixed_stereo = np.zeros((total_samples, 2), dtype=np.float64)
 
     width = np.clip(float(settings.stereo_width), 0.0, 1.0)
-    base_pan_offsets = {
-        "sine": -0.45 * width,
-        "triangle": 0.45 * width,
-        "sawtooth": -0.85 * width,
-        "square": 0.85 * width,
+    default_pan_offsets = {
+        "sine": -0.45,
+        "triangle": 0.45,
+        "sawtooth": -0.85,
+        "square": 0.85,
     }
+    wave_pan = settings.wave_pan or {wave_type: default_pan_offsets[wave_type] for wave_type in WAVE_ORDER}
+    wave_width = settings.wave_width or {wave_type: 1.0 for wave_type in WAVE_ORDER}
+    wave_dance = settings.wave_dance or {wave_type: 0.0 for wave_type in WAVE_ORDER}
 
     pan_base = make_curve(float(settings.pan_start), float(settings.pan_end), total_samples, settings.curve_type)
 
@@ -237,8 +243,17 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
             continue
 
         mono_wave = waveform_from_phase(wave_type, phase) * gain_env
-        wave_pan = np.clip(pan_base + auto_pan + base_pan_offsets[wave_type], -1.0, 1.0)
-        mixed_stereo += equal_power_pan(mono_wave, wave_pan)
+        individual_pan = np.clip(float(wave_pan.get(wave_type, default_pan_offsets[wave_type])), -1.0, 1.0)
+        individual_width = np.clip(float(wave_width.get(wave_type, 1.0)), 0.0, 1.0)
+        individual_dance = np.clip(float(wave_dance.get(wave_type, 0.0)), 0.0, 1.0)
+        dance_phase = WAVE_ORDER.index(wave_type) * (math.pi / 2.0)
+        individual_auto_pan = individual_dance * np.sin(2.0 * np.pi * auto_rate * time_axis + dance_phase)
+        wave_pan_env = np.clip(
+            pan_base + auto_pan + (individual_pan * width * individual_width) + individual_auto_pan,
+            -1.0,
+            1.0,
+        )
+        mixed_stereo += equal_power_pan(mono_wave, wave_pan_env)
         active_gain_total += float(np.max(gain_env))
 
     if active_gain_total > 1.0:
@@ -520,6 +535,12 @@ class WaveToyWindow(QMainWindow):
         self.wave_start_labels: Dict[str, QLabel] = {}
         self.wave_end_labels: Dict[str, QLabel] = {}
         self.wave_time_labels: Dict[str, QLabel] = {}
+        self.wave_pan_sliders: Dict[str, QSlider] = {}
+        self.wave_width_sliders: Dict[str, QSlider] = {}
+        self.wave_dance_sliders: Dict[str, QSlider] = {}
+        self.wave_pan_labels: Dict[str, QLabel] = {}
+        self.wave_width_labels: Dict[str, QLabel] = {}
+        self.wave_dance_labels: Dict[str, QLabel] = {}
 
         self._build_actions()
         self._build_ui()
@@ -560,7 +581,7 @@ class WaveToyWindow(QMainWindow):
         title = QLabel("🌈 Wave Toy")
         title.setObjectName("title")
 
-        subtitle = QLabel("Build sounds by shaping waves! Space = play. Shift+Space = live loop. Wave sliders use picture labels; numbers appear only in grown-up explanations.")
+        subtitle = QLabel("Build sounds by shaping waves! Space = play. Shift+Space = live loop. Fine sliders use picture labels.")
         subtitle.setObjectName("subtitle")
 
         outer.addWidget(title)
@@ -613,9 +634,9 @@ class WaveToyWindow(QMainWindow):
 
             start_label = QLabel(self._slider_picture_text(default_start[wave_type], "loudness"))
             start_slider = QSlider(Qt.Horizontal)
-            start_slider.setRange(-20, 0)
-            start_slider.setValue(default_start[wave_type])
-            start_slider.setTickInterval(6)
+            start_slider.setRange(-200, 0)
+            start_slider.setValue(default_start[wave_type] * 10)
+            start_slider.setTickInterval(20)
             start_slider.setMinimumWidth(90)
             start_slider.setToolTip("Starting loudness. 0 dB is full volume. -60 dB is silent.")
             start_slider.valueChanged.connect(self._generate)
@@ -623,9 +644,9 @@ class WaveToyWindow(QMainWindow):
 
             end_label = QLabel(self._slider_picture_text(default_end[wave_type], "loudness"))
             end_slider = QSlider(Qt.Horizontal)
-            end_slider.setRange(-20, 0)
-            end_slider.setValue(default_end[wave_type])
-            end_slider.setTickInterval(6)
+            end_slider.setRange(-200, 0)
+            end_slider.setValue(default_end[wave_type] * 10)
+            end_slider.setTickInterval(20)
             end_slider.setMinimumWidth(90)
             end_slider.setToolTip("Ending size of this wave.")
             end_slider.valueChanged.connect(self._generate)
@@ -671,8 +692,8 @@ class WaveToyWindow(QMainWindow):
         self.note_combo.setCurrentText("A")
 
         self.octave_slider = QSlider(Qt.Horizontal)
-        self.octave_slider.setRange(2, 6)
-        self.octave_slider.setValue(4)
+        self.octave_slider.setRange(20, 60)
+        self.octave_slider.setValue(40)
         self.octave_label = QLabel("🧸 Middle")
 
         self.cents_slider = QSlider(Qt.Horizontal)
@@ -725,19 +746,19 @@ class WaveToyWindow(QMainWindow):
         motion_layout.setColumnStretch(1, 2)
 
         self.duration_slider = QSlider(Qt.Horizontal)
-        self.duration_slider.setRange(5, 80)
-        self.duration_slider.setValue(15)
+        self.duration_slider.setRange(10, 160)
+        self.duration_slider.setValue(30)
         self.duration_label = QLabel("⏱️ Short")
         self.duration_slider.valueChanged.connect(self._sync_duration_slider_to_spin)
 
         self.pitch_start = QSlider(Qt.Horizontal)
-        self.pitch_start.setRange(36, 84)
-        self.pitch_start.setValue(69)
+        self.pitch_start.setRange(360, 840)
+        self.pitch_start.setValue(690)
         self.pitch_start_label = QLabel("🎵 Middle")
 
         self.pitch_end = QSlider(Qt.Horizontal)
-        self.pitch_end.setRange(36, 84)
-        self.pitch_end.setValue(69)
+        self.pitch_end.setRange(360, 840)
+        self.pitch_end.setValue(690)
         self.pitch_end_label = QLabel("🎵 Middle")
 
         self.loud_start = QSlider(Qt.Horizontal)
@@ -813,6 +834,66 @@ class WaveToyWindow(QMainWindow):
         stereo_layout.addWidget(self.auto_pan_rate, 9, 0, 1, 2)
 
         right.addWidget(stereo_box)
+
+        wave_stereo_box = self._toy_group("5. Stereo Per Wave")
+        wave_stereo_box.setMinimumWidth(300)
+        wave_stereo_layout = QGridLayout(wave_stereo_box)
+        wave_stereo_layout.setHorizontalSpacing(12)
+        wave_stereo_layout.setVerticalSpacing(8)
+        wave_stereo_layout.addWidget(QLabel("Wave"), 0, 0)
+        wave_stereo_layout.addWidget(QLabel("Place"), 0, 1)
+        wave_stereo_layout.addWidget(QLabel("Spread"), 0, 2)
+        wave_stereo_layout.addWidget(QLabel("Dance"), 0, 3)
+
+        default_wave_pan = {
+            "sine": -45,
+            "triangle": 45,
+            "sawtooth": -85,
+            "square": 85,
+        }
+
+        for row, wave_type in enumerate(WAVE_ORDER, start=1):
+            ui_row = row * 2 - 1
+            name = QLabel(f"{self._wave_icon(wave_type)} {WAVE_LABELS[wave_type]}")
+            name.setWordWrap(True)
+
+            pan_label = QLabel(self._pan_picture_text(default_wave_pan[wave_type]))
+            pan_slider = QSlider(Qt.Horizontal)
+            pan_slider.setRange(-100, 100)
+            pan_slider.setValue(default_wave_pan[wave_type])
+            pan_slider.valueChanged.connect(self._generate)
+            pan_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
+
+            width_label = QLabel("↔️ Medium")
+            width_slider = QSlider(Qt.Horizontal)
+            width_slider.setRange(0, 100)
+            width_slider.setValue(65)
+            width_slider.valueChanged.connect(self._generate)
+            width_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
+
+            dance_label = QLabel("😴 Still")
+            dance_slider = QSlider(Qt.Horizontal)
+            dance_slider.setRange(0, 100)
+            dance_slider.setValue(0)
+            dance_slider.valueChanged.connect(self._generate)
+            dance_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
+
+            self.wave_pan_sliders[wave_type] = pan_slider
+            self.wave_width_sliders[wave_type] = width_slider
+            self.wave_dance_sliders[wave_type] = dance_slider
+            self.wave_pan_labels[wave_type] = pan_label
+            self.wave_width_labels[wave_type] = width_label
+            self.wave_dance_labels[wave_type] = dance_label
+
+            wave_stereo_layout.addWidget(name, ui_row, 0, 2, 1)
+            wave_stereo_layout.addWidget(pan_label, ui_row, 1)
+            wave_stereo_layout.addWidget(pan_slider, ui_row + 1, 1)
+            wave_stereo_layout.addWidget(width_label, ui_row, 2)
+            wave_stereo_layout.addWidget(width_slider, ui_row + 1, 2)
+            wave_stereo_layout.addWidget(dance_label, ui_row, 3)
+            wave_stereo_layout.addWidget(dance_slider, ui_row + 1, 3)
+
+        right.addWidget(wave_stereo_box)
 
         preset_box = self._toy_group("Sound Experiments")
         preset_box.setMinimumWidth(300)
@@ -1023,18 +1104,20 @@ class WaveToyWindow(QMainWindow):
                 return "🚶 Medium"
             return "🐢 Slow"
 
-        if value <= -20:
+        db_value = value / 10.0
+        if db_value <= -20:
             return "🤫 Silent"
-        if value <= -14:
+        if db_value <= -14:
             return "🌱 Tiny"
-        if value <= -8:
+        if db_value <= -8:
             return "🌿 Medium"
         return "🌳 Big"
 
     def _octave_picture_text(self, value: int) -> str:
-        if value <= 2:
+        voice_value = value / 10.0
+        if voice_value <= 2.6:
             return "🐻 Big Low"
-        if value <= 4:
+        if voice_value <= 4.4:
             return "🧸 Middle"
         return "🐭 Tiny High"
 
@@ -1046,9 +1129,10 @@ class WaveToyWindow(QMainWindow):
         return "🎯 Center"
 
     def _pitch_picture_text(self, midi_value: int) -> str:
-        if midi_value < 52:
+        scaled_midi = midi_value / 10.0
+        if scaled_midi < 52:
             return "🐻 Low"
-        if midi_value > 76:
+        if scaled_midi > 76:
             return "🐭 High"
         return "🧸 Middle"
 
@@ -1059,12 +1143,12 @@ class WaveToyWindow(QMainWindow):
             return "🌿 Medium"
         return "🌳 Big"
 
-    def _duration_picture_text(self, tenths: int) -> str:
-        if tenths <= 12:
+    def _duration_picture_text(self, duration_steps: int) -> str:
+        if duration_steps <= 24:
             return "⚡ Quick"
-        if tenths <= 35:
+        if duration_steps <= 70:
             return "⏱️ Short"
-        if tenths <= 60:
+        if duration_steps <= 120:
             return "🚶 Long"
         return "🐢 Very Long"
 
@@ -1107,24 +1191,28 @@ class WaveToyWindow(QMainWindow):
         self.width_label.setText(self._width_picture_text(self.width_slider.value()))
         self.auto_pan_depth_label.setText(self._dance_picture_text(self.auto_pan_depth_slider.value()))
         self.auto_pan_rate_label.setText(self._rate_picture_text(self.auto_pan_rate.value()))
+        for wave_type in WAVE_ORDER:
+            if wave_type in self.wave_pan_sliders:
+                self._update_wave_stereo_labels(wave_type)
 
     def _wave_start_db_from_ui(self) -> Dict[str, float]:
         return {
-            wave_type: float(slider.value())
+            wave_type: float(slider.value()) / 10.0
             for wave_type, slider in self.wave_start_sliders.items()
         }
 
     def _wave_end_db_from_ui(self) -> Dict[str, float]:
         return {
-            wave_type: float(slider.value())
+            wave_type: float(slider.value()) / 10.0
             for wave_type, slider in self.wave_end_sliders.items()
         }
 
     def _clip_duration_seconds(self) -> float:
-        return self.duration_slider.value() / 10.0
+        return self.duration_slider.value() / 20.0
 
     def _slider_midi_to_hz(self, midi_value: int) -> float:
-        return 440.0 * (2.0 ** ((midi_value - 69) / 12.0))
+        scaled_midi = midi_value / 10.0
+        return 440.0 * (2.0 ** ((scaled_midi - 69) / 12.0))
 
     def _wave_delta_time_from_ui(self) -> Dict[str, float]:
         duration = self._clip_duration_seconds()
@@ -1133,13 +1221,31 @@ class WaveToyWindow(QMainWindow):
             for wave_type, slider in self.wave_time_sliders.items()
         }
 
+    def _wave_pan_from_ui(self) -> Dict[str, float]:
+        return {
+            wave_type: slider.value() / 100.0
+            for wave_type, slider in self.wave_pan_sliders.items()
+        }
+
+    def _wave_width_from_ui(self) -> Dict[str, float]:
+        return {
+            wave_type: slider.value() / 100.0
+            for wave_type, slider in self.wave_width_sliders.items()
+        }
+
+    def _wave_dance_from_ui(self) -> Dict[str, float]:
+        return {
+            wave_type: slider.value() / 100.0
+            for wave_type, slider in self.wave_dance_sliders.items()
+        }
+
     def _settings_from_ui(self) -> SynthSettings:
         return SynthSettings(
             wave_start_db=self._wave_start_db_from_ui(),
             wave_end_db=self._wave_end_db_from_ui(),
             wave_delta_time=self._wave_delta_time_from_ui(),
             note=self.note_combo.currentText(),
-            octave=self.octave_slider.value(),
+            octave=int(round(self.octave_slider.value() / 10.0)),
             cents=float(self.cents_slider.value()),
             pitch_start_hz=self._slider_midi_to_hz(self.pitch_start.value()),
             pitch_end_hz=self._slider_midi_to_hz(self.pitch_end.value()),
@@ -1152,10 +1258,14 @@ class WaveToyWindow(QMainWindow):
             stereo_width=self.width_slider.value() / 100.0,
             auto_pan_depth=self.auto_pan_depth_slider.value() / 100.0,
             auto_pan_rate=self.auto_pan_rate.value() / 10.0,
+            wave_pan=self._wave_pan_from_ui(),
+            wave_width=self._wave_width_from_ui(),
+            wave_dance=self._wave_dance_from_ui(),
         )
 
     def _sync_note_to_pitch(self) -> None:
-        octave = self.octave_slider.value()
+        octave_float = self.octave_slider.value() / 10.0
+        octave = int(round(octave_float))
         cents = self.cents_slider.value()
         midi_value = midi_note(self.note_combo.currentText(), octave)
 
@@ -1165,8 +1275,8 @@ class WaveToyWindow(QMainWindow):
 
         self.pitch_start.blockSignals(True)
         self.pitch_end.blockSignals(True)
-        self.pitch_start.setValue(midi_value)
-        self.pitch_end.setValue(midi_value)
+        self.pitch_start.setValue(midi_value * 10)
+        self.pitch_end.setValue(midi_value * 10)
         self.pitch_start.blockSignals(False)
         self.pitch_end.blockSignals(False)
 
@@ -1210,7 +1320,7 @@ class WaveToyWindow(QMainWindow):
 
             if start_db > -60 or end_db > -60:
                 active.append(
-                    f"{WAVE_LABELS[wave_type]} {start_db:.0f}→{end_db:.0f} dB over {change_time:.1f}s"
+                    f"{WAVE_LABELS[wave_type]} {start_db:.1f}→{end_db:.1f} dB over {change_time:.1f}s"
                 )
 
         active_text = ", ".join(active) if active else "no waves yet"
@@ -1268,6 +1378,7 @@ class WaveToyWindow(QMainWindow):
                 f"{s.loudness_start:.2f} to {s.loudness_end:.2f}. Stereo pan moves from "
                 f"{s.pan_start:.2f} to {s.pan_end:.2f}, width is {s.stereo_width:.2f}, and "
                 f"auto-pan depth/rate are {s.auto_pan_depth:.2f}/{s.auto_pan_rate:.2f} Hz. "
+                f"Per-wave stereo pan values are {s.wave_pan}; spreads are {s.wave_width}; dances are {s.wave_dance}. "
                 f"Grown-up words: waveform, frequency, decibels, amplitude envelope, stereo field."
             )
 
@@ -1476,6 +1587,9 @@ class WaveToyWindow(QMainWindow):
                         "start_db": self.wave_start_sliders[wave_type].value(),
                         "end_db": self.wave_end_sliders[wave_type].value(),
                         "change_time_percent": self.wave_time_sliders[wave_type].value(),
+                        "pan": self.wave_pan_sliders[wave_type].value(),
+                        "spread": self.wave_width_sliders[wave_type].value(),
+                        "dance": self.wave_dance_sliders[wave_type].value(),
                     }
                     for wave_type in WAVE_ORDER
                 },
@@ -1552,11 +1666,11 @@ class WaveToyWindow(QMainWindow):
             waves = {}
 
         self.note_combo.setCurrentText(str(ui.get("note", settings.get("note", "A"))))
-        self.octave_slider.setValue(int(ui.get("octave", settings.get("octave", 4))))
+        self.octave_slider.setValue(int(float(ui.get("octave", settings.get("octave", 4))) * 10))
         self.cents_slider.setValue(int(float(ui.get("cents", settings.get("cents", 0.0)))))
-        self.pitch_start.setValue(int(round(69 + 12 * math.log2(max(1.0, float(settings.get("pitch_start_hz", 440.0))) / 440.0))))
-        self.pitch_end.setValue(int(round(69 + 12 * math.log2(max(1.0, float(settings.get("pitch_end_hz", 440.0))) / 440.0))))
-        self.duration_slider.setValue(int(round(float(settings.get("duration_seconds", 1.5)) * 10)))
+        self.pitch_start.setValue(int(round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_start_hz", 440.0))) / 440.0)) * 10)))
+        self.pitch_end.setValue(int(round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_end_hz", 440.0))) / 440.0)) * 10)))
+        self.duration_slider.setValue(int(round(float(settings.get("duration_seconds", 1.5)) * 20)))
         self.loud_start.setValue(int(ui.get("loudness_start_slider", 40)))
         self.loud_end.setValue(int(ui.get("loudness_end_slider", 40)))
         self.pan_start_slider.setValue(int(ui.get("pan_start_slider", 0)))
@@ -1570,6 +1684,9 @@ class WaveToyWindow(QMainWindow):
         start_levels: Dict[str, int] = {}
         end_levels: Dict[str, int] = {}
         times: Dict[str, int] = {}
+        wave_pan: Dict[str, int] = {}
+        wave_width: Dict[str, int] = {}
+        wave_dance: Dict[str, int] = {}
 
         for wave_type in WAVE_ORDER:
             wave_data = waves.get(wave_type, {})
@@ -1577,8 +1694,12 @@ class WaveToyWindow(QMainWindow):
                 start_levels[wave_type] = int(wave_data.get("start_db", -20))
                 end_levels[wave_type] = int(wave_data.get("end_db", -20))
                 times[wave_type] = int(wave_data.get("change_time_percent", 100))
+                wave_pan[wave_type] = int(wave_data.get("pan", self.wave_pan_sliders[wave_type].value()))
+                wave_width[wave_type] = int(wave_data.get("spread", self.wave_width_sliders[wave_type].value()))
+                wave_dance[wave_type] = int(wave_data.get("dance", self.wave_dance_sliders[wave_type].value()))
 
         self._set_wave_levels(start_levels, end_levels, times)
+        self._set_wave_stereo(wave_pan, wave_width, wave_dance)
         self._generate()
 
 
@@ -1666,13 +1787,13 @@ class WaveToyWindow(QMainWindow):
             {"sine": 0, "triangle": -60, "sawtooth": -60, "square": -60},
         )
         self.note_combo.setCurrentText("A")
-        self.octave_slider.setValue(4)
+        self.octave_slider.setValue(40)
         self.cents_slider.setValue(0)
-        self.pitch_start.setValue(69)
-        self.pitch_end.setValue(69)
+        self.pitch_start.setValue(690)
+        self.pitch_end.setValue(690)
         self.loud_start.setValue(35)
         self.loud_end.setValue(35)
-        self.duration_slider.setValue(15)
+        self.duration_slider.setValue(30)
         self.pan_start_slider.setValue(0)
         self.pan_end_slider.setValue(0)
         self.width_slider.setValue(20)
@@ -1686,11 +1807,11 @@ class WaveToyWindow(QMainWindow):
             {"sine": -30, "triangle": -60, "sawtooth": 0, "square": -36},
             {"sine": 100, "triangle": 100, "sawtooth": 55, "square": 80},
         )
-        self.pitch_start.setValue(57)
-        self.pitch_end.setValue(81)
+        self.pitch_start.setValue(570)
+        self.pitch_end.setValue(810)
         self.loud_start.setValue(30)
         self.loud_end.setValue(45)
-        self.duration_slider.setValue(22)
+        self.duration_slider.setValue(44)
         self.pan_start_slider.setValue(-40)
         self.pan_end_slider.setValue(40)
         self.width_slider.setValue(70)
@@ -1704,11 +1825,11 @@ class WaveToyWindow(QMainWindow):
             {"sine": -60, "triangle": -60, "sawtooth": -18, "square": -12},
             {"sine": 35, "triangle": 100, "sawtooth": 70, "square": 20},
         )
-        self.pitch_start.setValue(64)
-        self.pitch_end.setValue(76)
+        self.pitch_start.setValue(640)
+        self.pitch_end.setValue(760)
         self.loud_start.setValue(35)
         self.loud_end.setValue(35)
-        self.duration_slider.setValue(8)
+        self.duration_slider.setValue(16)
         self.width_slider.setValue(80)
         self.auto_pan_depth_slider.setValue(30)
         self.auto_pan_rate.setValue(20)
@@ -1721,11 +1842,11 @@ class WaveToyWindow(QMainWindow):
             {"sine": -24, "triangle": -36, "sawtooth": -60, "square": -60},
             {"sine": 100, "triangle": 75, "sawtooth": 100, "square": 100},
         )
-        self.pitch_start.setValue(83)
-        self.pitch_end.setValue(53)
+        self.pitch_start.setValue(830)
+        self.pitch_end.setValue(530)
         self.loud_start.setValue(45)
         self.loud_end.setValue(10)
-        self.duration_slider.setValue(25)
+        self.duration_slider.setValue(50)
         self.pan_start_slider.setValue(45)
         self.pan_end_slider.setValue(-45)
         self.width_slider.setValue(60)
@@ -1738,13 +1859,39 @@ class WaveToyWindow(QMainWindow):
             {"sine": -24, "triangle": 0, "sawtooth": -60, "square": -60},
             {"sine": 100, "triangle": 100, "sawtooth": 100, "square": 100},
         )
-        self.pitch_start.setValue(60)
-        self.pitch_end.setValue(60)
+        self.pitch_start.setValue(600)
+        self.pitch_end.setValue(600)
         self.loud_start.setValue(0)
         self.loud_end.setValue(50)
-        self.duration_slider.setValue(20)
+        self.duration_slider.setValue(40)
         self.width_slider.setValue(40)
         self._set_curve("linear")
+        self._generate()
+
+    def _set_wave_stereo(
+        self,
+        pan_values: Dict[str, int],
+        width_values: Dict[str, int],
+        dance_values: Dict[str, int],
+    ) -> None:
+        for wave_type in WAVE_ORDER:
+            for slider_dict, value_dict, default_value in [
+                (self.wave_pan_sliders, pan_values, self.wave_pan_sliders[wave_type].value()),
+                (self.wave_width_sliders, width_values, self.wave_width_sliders[wave_type].value()),
+                (self.wave_dance_sliders, dance_values, self.wave_dance_sliders[wave_type].value()),
+            ]:
+                slider = slider_dict[wave_type]
+                slider.blockSignals(True)
+                raw_value = int(value_dict.get(wave_type, default_value))
+                if slider_dict in (self.wave_start_sliders, self.wave_end_sliders):
+                    # Backward compatible: old recipes/presets use whole dB values.
+                    if -20 <= raw_value <= 0:
+                        raw_value *= 10
+                slider.setValue(raw_value)
+                slider.blockSignals(False)
+
+            self._update_wave_stereo_labels(wave_type)
+
         self._generate()
 
     def _set_wave_levels(
@@ -1764,12 +1911,24 @@ class WaveToyWindow(QMainWindow):
             ]:
                 slider = slider_dict[wave_type]
                 slider.blockSignals(True)
-                slider.setValue(int(value_dict.get(wave_type, default_value)))
+                raw_value = int(value_dict.get(wave_type, default_value))
+                if slider_dict in (self.wave_start_sliders, self.wave_end_sliders):
+                    # Backward compatible: old recipes/presets use whole dB values.
+                    if -20 <= raw_value <= 0:
+                        raw_value *= 10
+                slider.setValue(raw_value)
                 slider.blockSignals(False)
 
             self._update_wave_envelope_labels(wave_type)
 
         self._generate()
+
+    def _update_wave_stereo_labels(self, wave_type: str) -> None:
+        if wave_type not in self.wave_pan_sliders:
+            return
+        self.wave_pan_labels[wave_type].setText(self._pan_picture_text(self.wave_pan_sliders[wave_type].value()))
+        self.wave_width_labels[wave_type].setText(self._width_picture_text(self.wave_width_sliders[wave_type].value()))
+        self.wave_dance_labels[wave_type].setText(self._dance_picture_text(self.wave_dance_sliders[wave_type].value()))
 
     def _update_wave_envelope_labels(self, wave_type: str) -> None:
         start_value = self.wave_start_sliders[wave_type].value()
