@@ -326,6 +326,7 @@ class WaveCanvas(QWidget):
         self.freq_env = np.zeros(1, dtype=np.float32)
         self.loud_env = np.zeros(1, dtype=np.float32)
         self.mascot_message = "Move the sliders, then press Make Sound!"
+        self.visual_conditions = {}
         self.animation_phase = 0.0
         self.zoom_factor = 1.0
         self.zoom_center = 0.5
@@ -379,7 +380,14 @@ class WaveCanvas(QWidget):
         end = start + visible
         return data[start:end]
 
-    def set_data(self, audio: np.ndarray, freq_env: np.ndarray, loud_env: np.ndarray, message: str) -> None:
+    def set_data(
+        self,
+        audio: np.ndarray,
+        freq_env: np.ndarray,
+        loud_env: np.ndarray,
+        message: str,
+        visual_conditions: dict | None = None,
+    ) -> None:
         if audio.size:
             audio = np.asarray(audio, dtype=np.float32)
             if audio.ndim == 1:
@@ -391,6 +399,7 @@ class WaveCanvas(QWidget):
         self.freq_env = freq_env if freq_env.size else np.zeros(1, dtype=np.float32)
         self.loud_env = loud_env if loud_env.size else np.zeros(1, dtype=np.float32)
         self.mascot_message = message
+        self.visual_conditions = visual_conditions or {}
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -501,6 +510,8 @@ class WaveCanvas(QWidget):
         self._draw_wave_column(painter, area, common_x, "Common", QColor("#fff176"), common, 5)
         self._draw_wave_column(painter, area, right_x, "Right", QColor("#ff4fa3"), right, 6)
 
+        self._draw_condition_overlay(painter, area, left_x, common_x, right_x)
+
         painter.setPen(QColor("#263238"))
         painter.setFont(QFont("Arial", 10, QFont.Bold))
         if self.zoom_factor <= 1.01:
@@ -512,6 +523,102 @@ class WaveCanvas(QWidget):
             Qt.AlignCenter,
             zoom_text,
         )
+
+    def _draw_condition_overlay(
+        self,
+        painter: QPainter,
+        area: QRectF,
+        left_x: float,
+        common_x: float,
+        right_x: float,
+    ) -> None:
+        if not self.visual_conditions:
+            return
+
+        colors = {
+            "sine": QColor("#2ecc71"),
+            "triangle": QColor("#f1c40f"),
+            "sawtooth": QColor("#3498db"),
+            "square": QColor("#e84393"),
+        }
+        icons = {
+            "sine": "〰 Smooth",
+            "triangle": "△ Mountain",
+            "sawtooth": "▱ Ramp",
+            "square": "▣ Blocky",
+        }
+
+        panel = QRectF(area.left() + 10, area.top() + 8, area.width() - 20, 112)
+        painter.setPen(QPen(QColor(255, 255, 255, 170), 2))
+        painter.setBrush(QColor(255, 255, 255, 110))
+        painter.drawRoundedRect(panel, 16, 16)
+
+        row_h = panel.height() / 4.0
+        x_min = left_x
+        x_mid = common_x
+        x_max = right_x
+
+        painter.setFont(QFont("Arial", 8, QFont.Bold))
+        for index, wave_type in enumerate(["sine", "triangle", "sawtooth", "square"]):
+            condition = self.visual_conditions.get(wave_type, {})
+            row_top = panel.top() + index * row_h
+            row_center = row_top + row_h * 0.52
+
+            color = colors[wave_type]
+            active = bool(condition.get("active", False))
+            start_db = float(condition.get("start_db", -20.0))
+            end_db = float(condition.get("end_db", -20.0))
+            pan = float(condition.get("pan", 0.0))
+            spread = float(condition.get("spread", 0.0))
+            dance = float(condition.get("dance", 0.0))
+            change_fraction = float(condition.get("change_fraction", 1.0))
+
+            painter.setPen(QColor("#263238"))
+            painter.drawText(QRectF(panel.left() + 10, row_top + 2, 88, row_h - 2), Qt.AlignVCenter, icons[wave_type])
+
+            # On/off condition: colored bead means the wave contributes to the sound.
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color if active else QColor(160, 160, 160, 110))
+            painter.drawEllipse(QPointF(panel.left() + 106, row_center), 6 if active else 4, 6 if active else 4)
+
+            # Start-to-end loudness condition: small-to-big beads show envelope direction.
+            start_size = 4 + max(0.0, min(1.0, (start_db + 20.0) / 20.0)) * 9
+            end_size = 4 + max(0.0, min(1.0, (end_db + 20.0) / 20.0)) * 9
+            x_a = panel.left() + 130
+            x_b = panel.left() + 168
+            painter.setPen(QPen(color, 3, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(QPointF(x_a, row_center), QPointF(x_b, row_center))
+            painter.setBrush(color)
+            painter.drawEllipse(QPointF(x_a, row_center), start_size, start_size)
+            painter.drawEllipse(QPointF(x_b, row_center), end_size, end_size)
+
+            # Change-time condition: pictorial progress bar.
+            bar = QRectF(panel.left() + 194, row_center - 5, 60, 10)
+            painter.setPen(QPen(QColor("#263238"), 1))
+            painter.setBrush(QColor(255, 255, 255, 160))
+            painter.drawRoundedRect(bar, 5, 5)
+            fill = QRectF(bar.left(), bar.top(), bar.width() * max(0.02, min(1.0, change_fraction)), bar.height())
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(fill, 5, 5)
+
+            # Stereo condition: ring is placed left/common/right, spread changes ring size, dance adds halo.
+            x = x_mid + pan * (x_max - x_min) * 0.5
+            x = max(x_min, min(x_max, x))
+            ring = 8 + spread * 16
+            dance_ring = ring + dance * (8 + 5 * math.sin(self.animation_phase + index))
+
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 55))
+            painter.drawEllipse(QPointF(x, row_center), ring, ring)
+
+            if dance > 0.05:
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 130), 2, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(QPointF(x, row_center), dance_ring, dance_ring)
+
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 90), 1, Qt.DotLine))
+            painter.drawLine(QPointF(panel.left() + 260, row_center), QPointF(x, row_center))
 
     def _draw_mascot(self, painter: QPainter, rect: QRectF) -> None:
         cx = rect.left() + 54
@@ -1344,6 +1451,29 @@ class WaveToyWindow(QMainWindow):
         self._update_symbolic_labels()
         self._generate()
 
+    def _visual_conditions_from_ui(self) -> Dict[str, Dict[str, float | bool]]:
+        conditions: Dict[str, Dict[str, float | bool]] = {}
+
+        for wave_type in WAVE_ORDER:
+            start_db = self.wave_start_sliders[wave_type].value() / 10.0
+            end_db = self.wave_end_sliders[wave_type].value() / 10.0
+            change_fraction = self.wave_time_sliders[wave_type].value() / 100.0
+            pan = self.wave_pan_sliders.get(wave_type).value() / 100.0 if wave_type in self.wave_pan_sliders else 0.0
+            spread = self.wave_width_sliders.get(wave_type).value() / 100.0 if wave_type in self.wave_width_sliders else 0.0
+            dance = self.wave_dance_sliders.get(wave_type).value() / 100.0 if wave_type in self.wave_dance_sliders else 0.0
+
+            conditions[wave_type] = {
+                "active": start_db > -20.0 or end_db > -20.0,
+                "start_db": start_db,
+                "end_db": end_db,
+                "change_fraction": change_fraction,
+                "pan": pan,
+                "spread": spread,
+                "dance": dance,
+            }
+
+        return conditions
+
     def _generate(self, update_message: bool = False) -> None:
         self._update_symbolic_labels()
         self.current_settings = self._settings_from_ui()
@@ -1364,7 +1494,7 @@ class WaveToyWindow(QMainWindow):
         else:
             msg = f"You are mixing {active_count} wave shape(s). Move the sliders!"
 
-        self.canvas.set_data(audio, freq_env, loud_env, msg)
+        self.canvas.set_data(audio, freq_env, loud_env, msg, self._visual_conditions_from_ui())
         self._update_explanation()
 
         if self.live_loop_enabled and not self.live_loop_is_refreshing:
