@@ -48,12 +48,13 @@ try:
 except Exception:
     sd = None
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -1506,6 +1507,154 @@ class StereoFieldPreview(QWidget):
         painter.drawText(rect.adjusted(6, 2, -6, -2), Qt.AlignTop | Qt.AlignRight, "R")
 
 
+class CircleOfFifthsNotePicker(QWidget):
+    """Toy-like circular note selector arranged in circle-of-fifths order."""
+
+    noteSelected = Signal(str)
+
+    FIFTHS_ORDER = ["C", "G", "D", "A", "E", "B", "F#", "C#", "G#", "D#", "A#", "F"]
+
+    def __init__(self, accent_color: QColor | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._selected_note = "A"
+        self._accent_color = QColor(accent_color or QColor("#ff8cc6"))
+        self._note_bubbles: Dict[str, QRectF] = {}
+        self.setMinimumSize(QSize(310, 310))
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setToolTip("The wheel picks the note. The Tuning Map decides how the note is spaced.")
+
+    def sizeHint(self) -> QSize:
+        return QSize(330, 330)
+
+    def selected_note(self) -> str:
+        return self._selected_note
+
+    def set_note(self, note: str) -> None:
+        if note not in NOTE_TO_INDEX:
+            note = "A"
+        if note != self._selected_note:
+            self._selected_note = note
+            self.update()
+
+    def _bubble_rects(self) -> Dict[str, QRectF]:
+        rect = QRectF(self.rect()).adjusted(16, 16, -16, -16)
+        center = rect.center()
+        radius = min(rect.width(), rect.height()) * 0.36
+        bubble_radius = max(20.0, min(rect.width(), rect.height()) * 0.075)
+        bubble_rects: Dict[str, QRectF] = {}
+        for index, note in enumerate(self.FIFTHS_ORDER):
+            angle = -math.pi / 2.0 + index * 2.0 * math.pi / len(self.FIFTHS_ORDER)
+            x = center.x() + math.cos(angle) * radius
+            y = center.y() + math.sin(angle) * radius
+            bubble_rects[note] = QRectF(x - bubble_radius, y - bubble_radius, bubble_radius * 2.0, bubble_radius * 2.0)
+        return bubble_rects
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(8, 8, -8, -8)
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0.0, QColor("#fff7c7"))
+        gradient.setColorAt(0.45, QColor("#d7f3ff"))
+        gradient.setColorAt(1.0, QColor("#ffd6e7"))
+        painter.setPen(QPen(QColor(0, 0, 0, 35), 3))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(rect, 30, 30)
+
+        center = rect.center()
+        wheel_radius = min(rect.width(), rect.height()) * 0.36
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(self._accent_color.red(), self._accent_color.green(), self._accent_color.blue(), 120), 6))
+        painter.drawEllipse(center, wheel_radius, wheel_radius)
+        painter.setPen(QPen(QColor(255, 255, 255, 170), 3, Qt.DashLine))
+        painter.drawEllipse(center, wheel_radius * 0.72, wheel_radius * 0.72)
+
+        painter.setPen(QColor("#263238"))
+        painter.setFont(QFont("Arial", 16, QFont.Bold))
+        painter.drawText(rect.adjusted(0, 10, 0, 0), Qt.AlignTop | Qt.AlignHCenter, "🎡 Note Wheel")
+        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        painter.drawText(rect.adjusted(34, 0, -34, -16), Qt.AlignBottom | Qt.AlignHCenter, "Around the circle: C → G → D → A ...")
+
+        self._note_bubbles = self._bubble_rects()
+        for index, note in enumerate(self.FIFTHS_ORDER):
+            bubble = self._note_bubbles[note]
+            selected = note == self._selected_note
+            hue = int((index / len(self.FIFTHS_ORDER)) * 359)
+            base = QColor.fromHsv(hue, 95, 255)
+            fill = QColor(self._accent_color) if selected else QColor(base.red(), base.green(), base.blue(), 205)
+            outline = QColor("#263238") if selected else QColor(255, 255, 255, 230)
+            pen_width = 4 if selected else 2
+
+            painter.setPen(QPen(outline, pen_width))
+            painter.setBrush(fill)
+            if selected:
+                pressed = bubble.adjusted(2, 3, -2, -1)
+                painter.drawEllipse(pressed)
+                text_rect = pressed
+            else:
+                painter.drawEllipse(bubble)
+                text_rect = bubble
+
+            painter.setPen(QColor("#263238"))
+            painter.setFont(QFont("Arial", 12, QFont.Bold))
+            painter.drawText(text_rect, Qt.AlignCenter, note)
+
+        painter.setFont(QFont("Arial", 22, QFont.Bold))
+        painter.setPen(QColor("#263238"))
+        painter.drawText(QRectF(center.x() - 58, center.y() - 32, 116, 64), Qt.AlignCenter, self._selected_note)
+
+    def mousePressEvent(self, event) -> None:
+        for note, bubble in self._bubble_rects().items():
+            if bubble.contains(event.position()):
+                self.set_note(note)
+                self.noteSelected.emit(note)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Left, Qt.Key_Up, Qt.Key_Right, Qt.Key_Down):
+            notes = self.FIFTHS_ORDER
+            index = notes.index(self._selected_note) if self._selected_note in notes else notes.index("A")
+            step = -1 if event.key() in (Qt.Key_Left, Qt.Key_Up) else 1
+            self.set_note(notes[(index + step) % len(notes)])
+            self.noteSelected.emit(self._selected_note)
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.noteSelected.emit(self._selected_note)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class NoteWheelDialog(QDialog):
+    """Small popup dialog that hosts the circular note picker."""
+
+    def __init__(self, wave_name: str, selected_note: str, accent_color: QColor, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"🎡 Note Wheel - {wave_name}")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        helper = QLabel("Pick a note bubble. The Tuning Map decides how the note is spaced.")
+        helper.setObjectName("subtitle")
+        helper.setWordWrap(True)
+        layout.addWidget(helper)
+
+        self.picker = CircleOfFifthsNotePicker(accent_color)
+        self.picker.set_note(selected_note)
+        layout.addWidget(self.picker)
+
+        close_button = QPushButton("Done")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button, 0, Qt.AlignRight)
+
+
 class WaveToyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1552,6 +1701,7 @@ class WaveToyWindow(QMainWindow):
         self.wave_solo_buttons: Dict[str, QCheckBox] = {}
         self.wave_follow_pitch_buttons: Dict[str, QCheckBox] = {}
         self.wave_note_combos: Dict[str, QComboBox] = {}
+        self.wave_note_buttons: Dict[str, QPushButton] = {}
         self.wave_octave_spins: Dict[str, QSpinBox] = {}
         self.wave_cents_sliders: Dict[str, QSlider] = {}
         self.wave_pitch_labels: Dict[str, QLabel] = {}
@@ -1647,6 +1797,7 @@ class WaveToyWindow(QMainWindow):
             label: QLabel,
             follow: QCheckBox,
             note_combo: QComboBox,
+            note_button: QPushButton,
             octave_spin: QSpinBox,
             cents_slider: QSlider,
         ) -> QWidget:
@@ -1679,12 +1830,15 @@ class WaveToyWindow(QMainWindow):
             for tiny_label in (note_label, size_label, wiggle_label):
                 tiny_label.setObjectName("tinyPitchLabel")
 
-            note_combo.setMaximumWidth(54)
+            note_combo.setVisible(False)
+            note_button.setMinimumWidth(76)
+            note_button.setToolTip("🎡 Pick this wave's note from the circle of fifths. The Tuning Map decides how the note is spaced.")
             octave_spin.setMaximumWidth(48)
             cents_slider.setMinimumWidth(94)
             note_panel_layout.addWidget(note_label, 0, 0)
             note_panel_layout.addWidget(size_label, 0, 1)
             note_panel_layout.addWidget(note_combo, 1, 0)
+            note_panel_layout.addWidget(note_button, 1, 0)
             note_panel_layout.addWidget(octave_spin, 1, 1)
             note_panel_layout.addWidget(wiggle_label, 2, 0, 1, 2)
             note_panel_layout.addWidget(cents_slider, 3, 0, 1, 2)
@@ -1765,6 +1919,7 @@ class WaveToyWindow(QMainWindow):
             note_combo.addItems(NOTE_NAMES)
             note_combo.setCurrentText("A")
             note_combo.setToolTip("🎯 My Note for this wave when Follow Main is off.")
+            note_button = QPushButton("🎡 A")
             octave_spin = QSpinBox()
             octave_spin.setRange(0, 8)
             octave_spin.setValue(4)
@@ -1775,6 +1930,7 @@ class WaveToyWindow(QMainWindow):
             cents_slider.setToolTip("🎯 Wiggle: fine-tune this wave in cents when My Note is on.")
             follow_pitch.stateChanged.connect(lambda state, wt=wave_type: self._update_wave_pitch_label(wt))
             note_combo.currentTextChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
+            note_button.clicked.connect(lambda checked=False, wt=wave_type: self._open_note_wheel(wt))
             octave_spin.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
             cents_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
             self._connect_scheduled_generate(follow_pitch.stateChanged, "wave_follow_pitch")
@@ -1784,6 +1940,7 @@ class WaveToyWindow(QMainWindow):
 
             self.wave_follow_pitch_buttons[wave_type] = follow_pitch
             self.wave_note_combos[wave_type] = note_combo
+            self.wave_note_buttons[wave_type] = note_button
             self.wave_octave_spins[wave_type] = octave_spin
             self.wave_cents_sliders[wave_type] = cents_slider
             self.wave_pitch_labels[wave_type] = pitch_label
@@ -1879,7 +2036,7 @@ class WaveToyWindow(QMainWindow):
             output_layout.addWidget(QLabel("L / R"), 0, Qt.AlignCenter)
             output_layout.addLayout(ear_preview_row)
 
-            pitch_cell = make_pitch_cell(wave_type, pitch_label, follow_pitch, note_combo, octave_spin, cents_slider)
+            pitch_cell = make_pitch_cell(wave_type, pitch_label, follow_pitch, note_combo, note_button, octave_spin, cents_slider)
             shape_stage = make_stage("Shape", shape_preview, [mute_button, solo_button, pitch_cell])
             shape_stage.layout().insertWidget(1, name)
             envelope_stage = make_stage(
@@ -2745,6 +2902,22 @@ class WaveToyWindow(QMainWindow):
             for wave_type, button in self.wave_follow_pitch_buttons.items()
         }
 
+    def _open_note_wheel(self, wave_type: str) -> None:
+        combo = self.wave_note_combos.get(wave_type)
+        if combo is None:
+            return
+
+        accent = QColor(MiniWavePreview.COLORS.get(wave_type, QColor("#ff8cc6")))
+        dialog = NoteWheelDialog(WAVE_LABELS.get(wave_type, wave_type.title()), combo.currentText(), accent, self)
+
+        def choose_note(note: str) -> None:
+            if note in NOTE_TO_INDEX:
+                combo.setCurrentText(note)
+                dialog.accept()
+
+        dialog.picker.noteSelected.connect(choose_note)
+        dialog.exec()
+
     def _update_wave_pitch_label(self, wave_type: str) -> None:
         if wave_type not in self.wave_pitch_labels:
             return
@@ -2762,10 +2935,18 @@ class WaveToyWindow(QMainWindow):
         button = self.wave_follow_pitch_buttons.get(wave_type)
         if button is not None:
             button.setText("👯 Follow Main" if follows else "🎯 My Note")
+        note_button = self.wave_note_buttons.get(wave_type)
+        if note_button is not None:
+            note_button.setText(f"🎡 {note}")
         panel = self.wave_pitch_panels.get(wave_type)
         if panel is not None:
             panel.setVisible(not follows)
-        for widget in (self.wave_note_combos.get(wave_type), self.wave_octave_spins.get(wave_type), self.wave_cents_sliders.get(wave_type)):
+        for widget in (
+            self.wave_note_combos.get(wave_type),
+            self.wave_note_buttons.get(wave_type),
+            self.wave_octave_spins.get(wave_type),
+            self.wave_cents_sliders.get(wave_type),
+        ):
             if widget is not None:
                 widget.setEnabled(not follows)
         if hasattr(self, "duration_slider"):
