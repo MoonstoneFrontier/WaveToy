@@ -1,0 +1,42 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Local audio exports and test renders
+exports/
+renders/
+output/
+out/
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.aiff
+*.aif
+*.wave-toy.json
+
+# Local logs and diagnostics
+logs/
+*.log
+*.trace
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
