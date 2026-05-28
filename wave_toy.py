@@ -217,6 +217,10 @@ class SynthSettings:
     tuning_method: str = "equal_temperament_12"
     tuning_root_note: str = "A"
     tuning_reference_hz: float = 440.0
+    wave_note: Dict[str, str] | None = None
+    wave_octave: Dict[str, int] | None = None
+    wave_cents: Dict[str, float] | None = None
+    wave_follow_main_pitch: Dict[str, bool] | None = None
     paulstretch_enabled: bool = False
     paulstretch_amount: float = 1.0
     paulstretch_evolution: float = 0.0
@@ -280,6 +284,38 @@ def frequency_for_note(
         return frequency_from_note(note, octave, cents, reference_hz)
 
     return root_frequency * (2.0 ** octave_delta) * ratio * (2.0 ** (cents / 1200.0))
+
+
+def wave_effective_frequency_env(settings: SynthSettings, wave_type: str, global_freq_env: np.ndarray) -> np.ndarray:
+    """Return the global pitch curve or a per-wave custom pitch curve."""
+    follow_map = settings.wave_follow_main_pitch or {name: True for name in WAVE_ORDER}
+    if follow_map.get(wave_type, True):
+        return global_freq_env
+
+    notes = settings.wave_note or {name: "A" for name in WAVE_ORDER}
+    octaves = settings.wave_octave or {name: 4 for name in WAVE_ORDER}
+    cents_map = settings.wave_cents or {name: 0.0 for name in WAVE_ORDER}
+    note = str(notes.get(wave_type, settings.note if settings.note in NOTE_TO_INDEX else "A"))
+    if note not in NOTE_TO_INDEX:
+        note = "A"
+    try:
+        octave = int(octaves.get(wave_type, settings.octave))
+    except Exception:
+        octave = 4
+    try:
+        cents = float(cents_map.get(wave_type, 0.0))
+    except Exception:
+        cents = 0.0
+
+    frequency = frequency_for_note(
+        note,
+        octave,
+        cents,
+        settings.tuning_method,
+        settings.tuning_root_note,
+        settings.tuning_reference_hz,
+    )
+    return np.full_like(global_freq_env, max(1.0, float(frequency)), dtype=np.float64)
 
 
 def make_curve(start: float, end: float, samples: int, curve_type: str) -> np.ndarray:
@@ -364,7 +400,10 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
     # Draw a short, readable oscillator strip using the same waveform function as
     # the audio engine. The phase count is intentionally display-oriented rather
     # than SAMPLE_RATE-sized, so paintEvent never performs full synthesis.
-    cycles = 2.35
+    global_freq = make_curve(float(settings.pitch_start_hz), float(settings.pitch_end_hz), sample_count, settings.curve_type)
+    wave_freq = wave_effective_frequency_env(settings, wave_type, global_freq)
+    preview_anchor = max(1.0, float(np.mean(global_freq))) if global_freq.size else 440.0
+    cycles = 2.35 * max(0.25, min(4.0, float(np.mean(wave_freq)) / preview_anchor))
     phase = np.linspace(0.0, 2.0 * np.pi * cycles, sample_count, dtype=np.float64)
     raw_wave = waveform_from_phase(wave_type, phase)
     mono = raw_wave * gain_env
@@ -533,9 +572,6 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
     freq_env = make_curve(pitch_start, pitch_end, total_samples, settings.curve_type)
     loud_env = make_curve(loud_start, loud_end, total_samples, settings.curve_type)
 
-    phase_step = 2.0 * np.pi * freq_env / SAMPLE_RATE
-    phase = np.cumsum(phase_step)
-
     start_levels = settings.wave_start_db or {
         "sine": 0.0,
         "triangle": -20.0,
@@ -584,6 +620,8 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
         if float(np.max(gain_env)) <= 0.0:
             continue
 
+        wave_freq_env = wave_effective_frequency_env(settings, wave_type, freq_env)
+        phase = np.cumsum(2.0 * np.pi * wave_freq_env / SAMPLE_RATE)
         mono_wave = waveform_from_phase(wave_type, phase) * gain_env
         individual_pan = np.clip(float(wave_pan.get(wave_type, default_pan_offsets[wave_type])), -1.0, 1.0)
         individual_width = np.clip(float(wave_width.get(wave_type, 1.0)), 0.0, 1.0)
@@ -707,6 +745,13 @@ class WaveCanvas(QWidget):
         self.zoom_center = 0.5
         self.update()
         event.accept()
+
+    def center_on_playback_fraction(self, fraction: float) -> None:
+        """Approximate playback-follow scrolling for zoomed Wave Explorer views."""
+        if self.zoom_factor <= 1.01:
+            return
+        self.zoom_center = float(np.clip(fraction, 0.02, 0.98))
+        self.update()
 
     def _visible_slice(self, data: np.ndarray) -> np.ndarray:
         if data.size == 0 or self.zoom_factor <= 1.01:
@@ -1013,6 +1058,79 @@ class ToyButton(QPushButton):
             }}
             """
         )
+
+
+class WaveExplorerWindow(QWidget):
+    """Large non-modal waveform popup that reuses WaveCanvas rendering."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle("🌊 Wave Explorer")
+        self.resize(760, 520)
+        self.setMinimumSize(QSize(620, 420))
+
+        self.playback_start_time: float | None = None
+        self.playback_duration_seconds = 0.0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("🌊 Wave Explorer")
+        title.setObjectName("waveExplorerTitle")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        self.canvas = WaveCanvas()
+        self.canvas.setMinimumSize(QSize(700, 380))
+        layout.addWidget(self.canvas, 1)
+
+        self.status_label = QLabel("Mouse wheel zooms. During playback, a zoomed picture follows the sound.")
+        self.status_label.setObjectName("symbolHint")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self.follow_timer = QTimer(self)
+        self.follow_timer.timeout.connect(self._follow_playback_tick)
+
+    def set_data(
+        self,
+        audio: np.ndarray,
+        freq_env: np.ndarray,
+        loud_env: np.ndarray,
+        message: str,
+        visual_conditions: dict | None = None,
+    ) -> None:
+        self.canvas.set_data(audio, freq_env, loud_env, message, visual_conditions)
+        seconds = len(audio) / SAMPLE_RATE if audio.size else 0.0
+        self.status_label.setText(
+            f"{message}  •  {seconds:.2f}s sound-picture. Mouse wheel zooms; playback follow is approximate."
+        )
+
+    def start_playback_follow(self, audio_samples: int) -> None:
+        self.playback_duration_seconds = max(0.0, float(audio_samples) / SAMPLE_RATE)
+        if self.playback_duration_seconds <= 0.0:
+            self.stop_playback_follow()
+            return
+        self.playback_start_time = time.monotonic()
+        self.follow_timer.start(45)
+        self._follow_playback_tick()
+
+    def stop_playback_follow(self) -> None:
+        self.playback_start_time = None
+        if self.follow_timer.isActive():
+            self.follow_timer.stop()
+
+    def _follow_playback_tick(self) -> None:
+        if self.playback_start_time is None or self.playback_duration_seconds <= 0.0:
+            self.stop_playback_follow()
+            return
+        elapsed = time.monotonic() - self.playback_start_time
+        if elapsed >= self.playback_duration_seconds:
+            self.canvas.center_on_playback_fraction(1.0)
+            self.stop_playback_follow()
+            return
+        self.canvas.center_on_playback_fraction(elapsed / self.playback_duration_seconds)
 
 
 class MiniWavePreview(QWidget):
@@ -1419,6 +1537,12 @@ class WaveToyWindow(QMainWindow):
         self.wave_cards: Dict[str, QWidget] = {}
         self.wave_mute_buttons: Dict[str, QCheckBox] = {}
         self.wave_solo_buttons: Dict[str, QCheckBox] = {}
+        self.wave_follow_pitch_buttons: Dict[str, QCheckBox] = {}
+        self.wave_note_combos: Dict[str, QComboBox] = {}
+        self.wave_octave_spins: Dict[str, QSpinBox] = {}
+        self.wave_cents_sliders: Dict[str, QSlider] = {}
+        self.wave_pitch_labels: Dict[str, QLabel] = {}
+        self.wave_explorer: WaveExplorerWindow | None = None
         self._preview_stop_timer = QTimer(self)
         self._preview_stop_timer.setSingleShot(True)
         self._preview_stop_timer.timeout.connect(lambda: self._set_preview_motion(False))
@@ -1504,6 +1628,30 @@ class WaveToyWindow(QMainWindow):
             layout.addWidget(slider)
             return cell
 
+        def make_pitch_cell(label: QLabel, follow: QCheckBox, note_combo: QComboBox, octave_spin: QSpinBox, cents_slider: QSlider) -> QWidget:
+            cell = QWidget()
+            cell.setObjectName("sliderCell")
+            layout = QVBoxLayout(cell)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(2)
+            title = QLabel("Pitch")
+            title.setObjectName("controlCaption")
+            label.setObjectName("controlValue")
+            label.setMinimumWidth(110)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(3)
+            note_combo.setMaximumWidth(54)
+            octave_spin.setMaximumWidth(48)
+            row.addWidget(note_combo)
+            row.addWidget(octave_spin)
+            layout.addWidget(title)
+            layout.addWidget(label)
+            layout.addWidget(follow)
+            layout.addLayout(row)
+            layout.addWidget(cents_slider)
+            return cell
+
         def make_stage(title_text: str, visual: QWidget, controls: List[QWidget] | None = None) -> QWidget:
             stage = QWidget()
             stage.setObjectName("signalStage")
@@ -1568,6 +1716,37 @@ class WaveToyWindow(QMainWindow):
             solo_button.stateChanged.connect(lambda state, wt=wave_type: self._set_wave_solo(wt, bool(state)))
             self.wave_mute_buttons[wave_type] = mute_button
             self.wave_solo_buttons[wave_type] = solo_button
+
+            pitch_label = QLabel("👯 Follow Main")
+            follow_pitch = QCheckBox("👯 Follow Main")
+            follow_pitch.setChecked(True)
+            follow_pitch.setToolTip("Let this wave follow the main note or choose its own note.")
+            note_combo = QComboBox()
+            note_combo.addItems(NOTE_NAMES)
+            note_combo.setCurrentText("A")
+            note_combo.setToolTip("🎯 My Note for this wave when Follow Main is off.")
+            octave_spin = QSpinBox()
+            octave_spin.setRange(0, 8)
+            octave_spin.setValue(4)
+            octave_spin.setToolTip("Octave for this wave's own note.")
+            cents_slider = QSlider(Qt.Horizontal)
+            cents_slider.setRange(-50 * 100, 50 * 100)
+            cents_slider.setValue(0)
+            cents_slider.setToolTip("Fine-tune this wave in cents when Follow Main is off.")
+            follow_pitch.stateChanged.connect(lambda state, wt=wave_type: self._update_wave_pitch_label(wt))
+            note_combo.currentTextChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
+            octave_spin.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
+            cents_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
+            self._connect_scheduled_generate(follow_pitch.stateChanged, "wave_follow_pitch")
+            self._connect_scheduled_generate(note_combo.currentIndexChanged, "wave_note")
+            self._connect_scheduled_generate(octave_spin.valueChanged, "wave_octave")
+            self._connect_scheduled_generate(cents_slider.valueChanged, "wave_cents")
+
+            self.wave_follow_pitch_buttons[wave_type] = follow_pitch
+            self.wave_note_combos[wave_type] = note_combo
+            self.wave_octave_spins[wave_type] = octave_spin
+            self.wave_cents_sliders[wave_type] = cents_slider
+            self.wave_pitch_labels[wave_type] = pitch_label
 
             start_label = QLabel(self._slider_picture_text(default_start[wave_type] * DB_SLIDER_SCALE, "loudness"))
             start_slider = QSlider(Qt.Horizontal)
@@ -1660,7 +1839,8 @@ class WaveToyWindow(QMainWindow):
             output_layout.addWidget(QLabel("L / R"), 0, Qt.AlignCenter)
             output_layout.addLayout(ear_preview_row)
 
-            shape_stage = make_stage("Shape", shape_preview, [mute_button, solo_button])
+            pitch_cell = make_pitch_cell(pitch_label, follow_pitch, note_combo, octave_spin, cents_slider)
+            shape_stage = make_stage("Shape", shape_preview, [mute_button, solo_button, pitch_cell])
             shape_stage.layout().insertWidget(1, name)
             envelope_stage = make_stage(
                 "Envelope",
@@ -1690,6 +1870,9 @@ class WaveToyWindow(QMainWindow):
             card_layout.addWidget(make_flow_arrow(), 0, 5)
             card_layout.addWidget(output_stage, 0, 6)
             wave_layout.addWidget(card)
+
+        for wave_type in WAVE_ORDER:
+            self._update_wave_pitch_label(wave_type)
 
         self.clear_solo_button = QPushButton("🌈 All Waves")
         self.clear_solo_button.setToolTip("Clear solo so the full mix plays again.")
@@ -1782,17 +1965,24 @@ class WaveToyWindow(QMainWindow):
 
         left.addWidget(explain_box)
 
-        overview_box = self._toy_group("Wave Overview")
-        overview_box.setMinimumWidth(280)
-        overview_box.setMaximumWidth(370)
-        overview_layout = QVBoxLayout(overview_box)
-        overview_layout.setContentsMargins(10, 18, 10, 10)
-        overview_layout.setSpacing(6)
-        self.canvas = WaveCanvas()
-        self.canvas.setMinimumSize(QSize(260, 180))
-        self.canvas.setMaximumSize(QSize(340, 240))
-        overview_layout.addWidget(self.canvas, 0, Qt.AlignCenter)
-        right.addWidget(overview_box, 0, Qt.AlignTop | Qt.AlignRight)
+        explorer_box = self._toy_group("Wave Explorer")
+        explorer_box.setMinimumWidth(280)
+        explorer_box.setMaximumWidth(370)
+        explorer_layout = QVBoxLayout(explorer_box)
+        explorer_layout.setContentsMargins(10, 18, 10, 10)
+        explorer_layout.setSpacing(8)
+        self.wave_explorer = WaveExplorerWindow(self)
+        self.canvas = self.wave_explorer.canvas
+        self.wave_explorer_button = ToyButton("🌊 Wave Explorer", "#7bdff2")
+        self.wave_explorer_button.setMinimumHeight(76)
+        self.wave_explorer_button.setToolTip("Open a big sound-picture window.")
+        self.wave_explorer_button.clicked.connect(self._open_wave_explorer)
+        explorer_hint = QLabel("Open a big, zoomable sound-picture window that can follow playback.")
+        explorer_hint.setObjectName("symbolHint")
+        explorer_hint.setWordWrap(True)
+        explorer_layout.addWidget(self.wave_explorer_button)
+        explorer_layout.addWidget(explorer_hint)
+        right.addWidget(explorer_box, 0, Qt.AlignTop | Qt.AlignRight)
 
         motion_box = self._toy_group("3. Change Over Time")
         motion_box.setMinimumWidth(280)
@@ -2480,6 +2670,57 @@ class WaveToyWindow(QMainWindow):
             for wave_type, slider in self.wave_dance_sliders.items()
         }
 
+
+    def _wave_note_from_ui(self) -> Dict[str, str]:
+        return {
+            wave_type: combo.currentText()
+            for wave_type, combo in self.wave_note_combos.items()
+        }
+
+    def _wave_octave_from_ui(self) -> Dict[str, int]:
+        return {
+            wave_type: int(spin.value())
+            for wave_type, spin in self.wave_octave_spins.items()
+        }
+
+    def _wave_cents_from_ui(self) -> Dict[str, float]:
+        return {
+            wave_type: float(slider.value()) / 100.0
+            for wave_type, slider in self.wave_cents_sliders.items()
+        }
+
+    def _wave_follow_main_pitch_from_ui(self) -> Dict[str, bool]:
+        return {
+            wave_type: button.isChecked()
+            for wave_type, button in self.wave_follow_pitch_buttons.items()
+        }
+
+    def _update_wave_pitch_label(self, wave_type: str) -> None:
+        if wave_type not in self.wave_pitch_labels:
+            return
+        follows = self.wave_follow_pitch_buttons.get(wave_type).isChecked() if wave_type in self.wave_follow_pitch_buttons else True
+        note = self.wave_note_combos.get(wave_type).currentText() if wave_type in self.wave_note_combos else "A"
+        octave = self.wave_octave_spins.get(wave_type).value() if wave_type in self.wave_octave_spins else 4
+        cents = self.wave_cents_sliders.get(wave_type).value() / 100.0 if wave_type in self.wave_cents_sliders else 0.0
+        if follows:
+            text = "👯 Follow Main"
+        else:
+            sign = "+" if cents > 0 else ""
+            text = f"🎯 {note}{octave} {sign}{cents:.0f}¢"
+        self.wave_pitch_labels[wave_type].setText(text)
+        for widget in (self.wave_note_combos.get(wave_type), self.wave_octave_spins.get(wave_type), self.wave_cents_sliders.get(wave_type)):
+            if widget is not None:
+                widget.setEnabled(not follows)
+        if hasattr(self, "duration_slider"):
+            self._update_all_wave_previews()
+
+    def _open_wave_explorer(self) -> None:
+        if self.wave_explorer is None:
+            self.wave_explorer = WaveExplorerWindow(self)
+        self.wave_explorer.show()
+        self.wave_explorer.raise_()
+        self.wave_explorer.activateWindow()
+
     def _settings_from_ui(self) -> SynthSettings:
         return SynthSettings(
             wave_start_db=self._wave_start_db_from_ui(),
@@ -2508,6 +2749,10 @@ class WaveToyWindow(QMainWindow):
             tuning_method=str(self.tuning_method_combo.currentData()),
             tuning_root_note=self.tuning_root_combo.currentText(),
             tuning_reference_hz=float(self.tuning_reference_spin.value()),
+            wave_note=self._wave_note_from_ui(),
+            wave_octave=self._wave_octave_from_ui(),
+            wave_cents=self._wave_cents_from_ui(),
+            wave_follow_main_pitch=self._wave_follow_main_pitch_from_ui(),
             paulstretch_enabled=self.paulstretch_enabled.isChecked(),
             paulstretch_amount=self.paul_amount_slider.value() / PAULSTRETCH_SCALE,
             paulstretch_evolution=self.paul_evolution_slider.value() / (100.0 * PERCENT_SLIDER_SCALE),
@@ -2640,7 +2885,11 @@ class WaveToyWindow(QMainWindow):
         else:
             msg = f"You are mixing {active_count} wave shape(s). Move the sliders!"
 
-        self.canvas.set_data(audio, freq_env, loud_env, msg, self._visual_conditions_from_ui())
+        visual_conditions = self._visual_conditions_from_ui()
+        if self.wave_explorer is not None:
+            self.wave_explorer.set_data(audio, freq_env, loud_env, msg, visual_conditions)
+        else:
+            self.canvas.set_data(audio, freq_env, loud_env, msg, visual_conditions)
         self._update_explanation()
 
         if self.live_loop_enabled and not self.live_loop_is_refreshing:
@@ -2735,6 +2984,8 @@ class WaveToyWindow(QMainWindow):
         """Play the current sound once."""
         self._generate()
         self._play_current_audio_once()
+        if self.wave_explorer is not None:
+            self.wave_explorer.start_playback_follow(len(self.current_audio))
         if not self.live_loop_enabled:
             self._start_preview_motion_for_current_duration()
 
@@ -2783,6 +3034,8 @@ class WaveToyWindow(QMainWindow):
         self.loop_status_label.setText("Loop: On")
         self._preview_stop_timer.stop()
         self._set_preview_motion(True)
+        if self.wave_explorer is not None:
+            self.wave_explorer.start_playback_follow(len(self.current_audio))
         self._restart_live_loop(regenerate=True)
 
     def _disable_live_loop(self) -> None:
@@ -2791,6 +3044,8 @@ class WaveToyWindow(QMainWindow):
         self.live_loop_is_refreshing = False
         self._preview_stop_timer.stop()
         self._set_preview_motion(False)
+        if self.wave_explorer is not None:
+            self.wave_explorer.stop_playback_follow()
         if sd is not None:
             try:
                 sd.stop()
@@ -2815,6 +3070,8 @@ class WaveToyWindow(QMainWindow):
 
             sd.stop()
             sd.play(self.current_audio, SAMPLE_RATE, blocking=False)
+            if self.wave_explorer is not None:
+                self.wave_explorer.start_playback_follow(len(self.current_audio))
 
             duration_ms = max(100, int((len(self.current_audio) / SAMPLE_RATE) * 1000))
             self.live_loop_timer.start(duration_ms)
@@ -2944,6 +3201,10 @@ class WaveToyWindow(QMainWindow):
                         "spread": self.wave_width_sliders[wave_type].value(),
                         "dance": self.wave_dance_sliders[wave_type].value(),
                         "muted": self.wave_mute_buttons[wave_type].isChecked(),
+                        "follow_main_pitch": self.wave_follow_pitch_buttons[wave_type].isChecked(),
+                        "note": self.wave_note_combos[wave_type].currentText(),
+                        "octave": self.wave_octave_spins[wave_type].value(),
+                        "cents": self.wave_cents_sliders[wave_type].value() / 100.0,
                     }
                     for wave_type in WAVE_ORDER
                 },
@@ -3034,9 +3295,15 @@ class WaveToyWindow(QMainWindow):
 
         self.note_combo.setCurrentText(str(ui.get("note", settings.get("note", "A"))))
         loaded_octave = float(ui.get("octave", settings.get("octave", 4)))
-        self.octave_slider.setValue(int(loaded_octave * OCTAVE_SLIDER_SCALE))
+        if loaded_octave > 8:
+            self.octave_slider.setValue(int(loaded_octave))
+        else:
+            self.octave_slider.setValue(int(loaded_octave * OCTAVE_SLIDER_SCALE))
         loaded_cents = float(ui.get("cents", settings.get("cents", 0.0)))
-        self.cents_slider.setValue(int(loaded_cents * 100))
+        if abs(loaded_cents) > 50:
+            self.cents_slider.setValue(int(loaded_cents))
+        else:
+            self.cents_slider.setValue(int(loaded_cents * 100))
         self._set_tuning_method(str(ui.get("tuning_method", settings.get("tuning_method", "equal_temperament_12"))))
         self.tuning_root_combo.setCurrentText(str(ui.get("tuning_root_note", settings.get("tuning_root_note", "A"))))
         self.tuning_reference_spin.setValue(float(ui.get("tuning_reference_hz", settings.get("tuning_reference_hz", 440.0))))
@@ -3068,6 +3335,14 @@ class WaveToyWindow(QMainWindow):
         wave_width: Dict[str, int] = {}
         wave_dance: Dict[str, int] = {}
         wave_muted: Dict[str, bool] = {}
+        wave_follow_pitch: Dict[str, bool] = {}
+        wave_note: Dict[str, str] = {}
+        wave_octave: Dict[str, int] = {}
+        wave_cents: Dict[str, float] = {}
+        settings_wave_follow = settings.get("wave_follow_main_pitch", {}) if isinstance(settings.get("wave_follow_main_pitch", {}), dict) else {}
+        settings_wave_note = settings.get("wave_note", {}) if isinstance(settings.get("wave_note", {}), dict) else {}
+        settings_wave_octave = settings.get("wave_octave", {}) if isinstance(settings.get("wave_octave", {}), dict) else {}
+        settings_wave_cents = settings.get("wave_cents", {}) if isinstance(settings.get("wave_cents", {}), dict) else {}
 
         for wave_type in WAVE_ORDER:
             wave_data = waves.get(wave_type, {})
@@ -3079,6 +3354,16 @@ class WaveToyWindow(QMainWindow):
                 wave_width[wave_type] = int(wave_data.get("spread", self.wave_width_sliders[wave_type].value()))
                 wave_dance[wave_type] = int(wave_data.get("dance", self.wave_dance_sliders[wave_type].value()))
                 wave_muted[wave_type] = bool(wave_data.get("muted", (settings.get("wave_muted", {}) if isinstance(settings.get("wave_muted", {}), dict) else {}).get(wave_type, False)))
+                wave_follow_pitch[wave_type] = bool(wave_data.get("follow_main_pitch", settings_wave_follow.get(wave_type, True)))
+                wave_note[wave_type] = str(wave_data.get("note", settings_wave_note.get(wave_type, "A")))
+                try:
+                    wave_octave[wave_type] = int(wave_data.get("octave", settings_wave_octave.get(wave_type, 4)))
+                except Exception:
+                    wave_octave[wave_type] = 4
+                try:
+                    wave_cents[wave_type] = float(wave_data.get("cents", settings_wave_cents.get(wave_type, 0.0)))
+                except Exception:
+                    wave_cents[wave_type] = 0.0
 
         self._set_wave_levels(start_levels, end_levels, times)
         self._set_wave_stereo(wave_pan, wave_width, wave_dance)
@@ -3089,6 +3374,29 @@ class WaveToyWindow(QMainWindow):
                 button.setChecked(bool(wave_muted.get(wave_type, False)))
                 button.setText("🤫 Quiet" if button.isChecked() else "🎵 On")
                 button.blockSignals(False)
+        for wave_type in WAVE_ORDER:
+            follow = self.wave_follow_pitch_buttons.get(wave_type)
+            note = self.wave_note_combos.get(wave_type)
+            octave = self.wave_octave_spins.get(wave_type)
+            cents = self.wave_cents_sliders.get(wave_type)
+            if follow is not None:
+                follow.blockSignals(True)
+                follow.setChecked(bool(wave_follow_pitch.get(wave_type, True)))
+                follow.blockSignals(False)
+            if note is not None:
+                note.blockSignals(True)
+                note.setCurrentText(wave_note.get(wave_type, "A") if wave_note.get(wave_type, "A") in NOTE_TO_INDEX else "A")
+                note.blockSignals(False)
+            if octave is not None:
+                octave.blockSignals(True)
+                octave.setValue(max(0, min(8, int(wave_octave.get(wave_type, 4)))))
+                octave.blockSignals(False)
+            if cents is not None:
+                cents.blockSignals(True)
+                cents.setValue(max(-5000, min(5000, int(round(wave_cents.get(wave_type, 0.0) * 100)))))
+                cents.blockSignals(False)
+            self._update_wave_pitch_label(wave_type)
+
         solo_wave = ui.get("solo_wave", settings.get("solo_wave"))
         for wave_type, button in self.wave_solo_buttons.items():
             button.blockSignals(True)
