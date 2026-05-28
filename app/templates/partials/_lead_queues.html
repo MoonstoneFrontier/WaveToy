@@ -1,0 +1,41 @@
+{% from "partials/_lead_action_forms.html" import lead_actions %}
+<section class="lead-queues">
+  <h2>Lead Queues</h2>
+  <div class="queue-counts">
+    {% for queue_name, queue_leads in queues.items() %}
+      <span>{{ queue_name|replace('_', ' ')|title }}: {{ queue_leads|length }}</span>
+    {% endfor %}
+  </div>
+
+  {% for queue_name, queue_leads in queues.items() %}
+    <section class="lead-queue">
+      <h3>{{ queue_name|replace('_', ' ')|title }}</h3>
+      {% if queue_leads %}
+        {% for lead in queue_leads %}
+          <article class="lead-card">
+            <h4>{{ lead.name or lead.id }}</h4>
+            <p>Stage: {{ lead.acquisition_stage or "new" }} · Priority: {{ lead.acquisition_priority or "normal" }} · Risk: {{ lead.risk_score or 0 }}</p>
+            {% if lead.dedupe_warning %}
+              <p class="dedupe-warning">Dedupe warning ({{ lead.dedupe_warning.risk_level or lead.dedupe_risk_level or "unknown" }}): {{ lead.dedupe_warning.message or lead.dedupe_warning }}</p>
+            {% endif %}
+            {{ lead_actions(lead) }}
+            <section class="recent-timeline">
+              <h5>Recent Timeline</h5>
+              {% if lead.timeline %}
+                <ul>
+                  {% for event in lead.timeline[-3:] %}
+                    <li>{{ event.event_type }} — {{ event.summary }}</li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                <p>No timeline events yet.</p>
+              {% endif %}
+            </section>
+          </article>
+        {% endfor %}
+      {% else %}
+        <p>No leads in this queue.</p>
+      {% endif %}
+    </section>
+  {% endfor %}
+</section>
