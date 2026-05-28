@@ -500,7 +500,7 @@ class WaveCanvas(QWidget):
     def __init__(self) -> None:
         super().__init__()
 
-        self.setMinimumSize(QSize(420, 300))
+        self.setMinimumSize(QSize(260, 180))
         self.audio = np.zeros((1, 2), dtype=np.float32)
         self.freq_env = np.zeros(1, dtype=np.float32)
         self.loud_env = np.zeros(1, dtype=np.float32)
@@ -1076,12 +1076,12 @@ class WaveToyWindow(QMainWindow):
         self.setCentralWidget(scroll)
 
         root = QWidget()
-        root.setMinimumSize(QSize(940, 660))
+        root.setMinimumSize(QSize(1060, 720))
         scroll.setWidget(root)
 
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(22, 22, 22, 22)
-        outer.setSpacing(18)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
 
         title = QLabel("🌈 Wave Toy")
         title.setObjectName("title")
@@ -1093,37 +1093,40 @@ class WaveToyWindow(QMainWindow):
         outer.addWidget(subtitle)
 
         body = QHBoxLayout()
-        body.setSpacing(18)
+        body.setSpacing(16)
         outer.addLayout(body, 1)
 
         left = QVBoxLayout()
-        center = QVBoxLayout()
         right = QVBoxLayout()
-        left.setSpacing(16)
-        center.setSpacing(16)
-        right.setSpacing(16)
+        left.setSpacing(10)
+        right.setSpacing(10)
 
-        body.addLayout(left, 4)
-        body.addLayout(center, 4)
+        body.addLayout(left, 7)
         body.addLayout(right, 3)
 
-        wave_box = self._toy_group("1. Mix Wave Shapes and Place Them in Stereo")
-        wave_box.setMinimumWidth(760)
-        wave_layout = QGridLayout(wave_box)
-        wave_layout.setHorizontalSpacing(10)
-        wave_layout.setVerticalSpacing(8)
-        for column, stretch in enumerate([1, 1, 2, 2, 2, 2, 2, 2, 2]):
-            wave_layout.setColumnStretch(column, stretch)
+        wave_box = self._toy_group("1. Mix Wave Shapes and Stereo Placement")
+        wave_box.setMinimumWidth(620)
+        wave_layout = QVBoxLayout(wave_box)
+        wave_layout.setContentsMargins(12, 18, 12, 12)
+        wave_layout.setSpacing(8)
 
-        wave_layout.addWidget(QLabel("Wave"), 0, 0)
-        wave_layout.addWidget(QLabel("Actual Look"), 0, 1)
-        wave_layout.addWidget(QLabel("Start 🌱"), 0, 2)
-        wave_layout.addWidget(QLabel("End 🌳"), 0, 3)
-        wave_layout.addWidget(QLabel("Change 🐢→🐇"), 0, 4)
-        wave_layout.addWidget(QLabel("Ear Place"), 0, 5)
-        wave_layout.addWidget(QLabel("Ear Spread"), 0, 6)
-        wave_layout.addWidget(QLabel("Ear Dance"), 0, 7)
-        wave_layout.addWidget(QLabel("Ear Waves"), 0, 8)
+        def make_slider_cell(label: QLabel, slider: QSlider, caption: str) -> QWidget:
+            cell = QWidget()
+            cell.setObjectName("sliderCell")
+            layout = QVBoxLayout(cell)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(1)
+            title = QLabel(caption)
+            title.setObjectName("controlCaption")
+            title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            label.setObjectName("controlValue")
+            label.setMinimumWidth(82)
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            slider.setMinimumWidth(108)
+            layout.addWidget(title)
+            layout.addWidget(label)
+            layout.addWidget(slider)
+            return cell
 
         default_start = {
             "sine": 0,
@@ -1139,29 +1142,41 @@ class WaveToyWindow(QMainWindow):
             "square": 85,
         }
 
-        for row, wave_type in enumerate(WAVE_ORDER, start=1):
-            ui_row = row * 2 - 1
+        for wave_type in WAVE_ORDER:
+            card = QWidget()
+            card.setObjectName("waveCard")
+            card_layout = QGridLayout(card)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setHorizontalSpacing(10)
+            card_layout.setVerticalSpacing(4)
+            card_layout.setColumnStretch(0, 0)
+            card_layout.setColumnStretch(1, 1)
+            card_layout.setColumnStretch(2, 1)
+            card_layout.setColumnStretch(3, 1)
+            card_layout.setColumnStretch(4, 1)
+            card_layout.setColumnStretch(5, 1)
+            card_layout.setColumnStretch(6, 1)
 
-            name = QLabel(f"{self._wave_icon(wave_type)} {WAVE_LABELS[wave_type]}")
-            name.setMinimumWidth(118)
+            name = QLabel(f"{self._wave_icon(wave_type)}\n{WAVE_LABELS[wave_type]}")
+            name.setObjectName("waveCardTitle")
+            name.setMinimumWidth(92)
             name.setWordWrap(True)
+            name.setAlignment(Qt.AlignCenter)
 
-            start_label = QLabel(self._slider_picture_text(default_start[wave_type], "loudness"))
+            start_label = QLabel(self._slider_picture_text(default_start[wave_type] * DB_SLIDER_SCALE, "loudness"))
             start_slider = QSlider(Qt.Horizontal)
             start_slider.setRange(-20 * DB_SLIDER_SCALE, 0)
             start_slider.setValue(default_start[wave_type] * DB_SLIDER_SCALE)
             start_slider.setTickInterval(2 * DB_SLIDER_SCALE)
-            start_slider.setMinimumWidth(90)
             start_slider.setToolTip("Starting size of this wave.")
             self._connect_scheduled_generate(start_slider.valueChanged, "wave_start_slider")
             start_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
-            end_label = QLabel(self._slider_picture_text(default_end[wave_type], "loudness"))
+            end_label = QLabel(self._slider_picture_text(default_end[wave_type] * DB_SLIDER_SCALE, "loudness"))
             end_slider = QSlider(Qt.Horizontal)
             end_slider.setRange(-20 * DB_SLIDER_SCALE, 0)
             end_slider.setValue(default_end[wave_type] * DB_SLIDER_SCALE)
             end_slider.setTickInterval(2 * DB_SLIDER_SCALE)
-            end_slider.setMinimumWidth(90)
             end_slider.setToolTip("Ending size of this wave.")
             self._connect_scheduled_generate(end_slider.valueChanged, "wave_end_slider")
             end_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
@@ -1171,16 +1186,14 @@ class WaveToyWindow(QMainWindow):
             time_slider.setRange(1, 100 * PERCENT_SLIDER_SCALE)
             time_slider.setValue(100 * PERCENT_SLIDER_SCALE)
             time_slider.setTickInterval(10 * PERCENT_SLIDER_SCALE)
-            time_slider.setMinimumWidth(90)
             time_slider.setToolTip("How slowly or quickly this wave changes.")
             self._connect_scheduled_generate(time_slider.valueChanged, "wave_time_slider")
             time_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
-            pan_label = QLabel(self._pan_picture_text(default_wave_pan[wave_type]))
+            pan_label = QLabel(self._pan_picture_text(default_wave_pan[wave_type] * PERCENT_SLIDER_SCALE))
             pan_slider = QSlider(Qt.Horizontal)
             pan_slider.setRange(-100 * PERCENT_SLIDER_SCALE, 100 * PERCENT_SLIDER_SCALE)
             pan_slider.setValue(default_wave_pan[wave_type] * PERCENT_SLIDER_SCALE)
-            pan_slider.setMinimumWidth(90)
             pan_slider.setToolTip("Where this wave sits between the left and right ear.")
             self._connect_scheduled_generate(pan_slider.valueChanged, "wave_pan_slider")
             pan_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
@@ -1189,7 +1202,6 @@ class WaveToyWindow(QMainWindow):
             width_slider = QSlider(Qt.Horizontal)
             width_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             width_slider.setValue(65 * PERCENT_SLIDER_SCALE)
-            width_slider.setMinimumWidth(90)
             width_slider.setToolTip("How wide this wave feels in stereo space.")
             self._connect_scheduled_generate(width_slider.valueChanged, "wave_width_slider")
             width_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
@@ -1198,7 +1210,6 @@ class WaveToyWindow(QMainWindow):
             dance_slider = QSlider(Qt.Horizontal)
             dance_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             dance_slider.setValue(0)
-            dance_slider.setMinimumWidth(90)
             dance_slider.setToolTip("How much this wave dances between ears.")
             self._connect_scheduled_generate(dance_slider.valueChanged, "wave_dance_slider")
             dance_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
@@ -1216,41 +1227,46 @@ class WaveToyWindow(QMainWindow):
             self.wave_width_labels[wave_type] = width_label
             self.wave_dance_labels[wave_type] = dance_label
 
-            preview = MiniWavePreview(wave_type)
+            preview = MiniWavePreview(wave_type, size=QSize(92, 42))
             preview.set_amplitude(db_to_gain(default_start[wave_type]))
             self.wave_mix_previews[wave_type] = preview
 
-            left_preview = MiniWavePreview(wave_type, channel="left", size=QSize(72, 36))
-            right_preview = MiniWavePreview(wave_type, channel="right", size=QSize(72, 36))
+            left_preview = MiniWavePreview(wave_type, channel="left", size=QSize(66, 34))
+            right_preview = MiniWavePreview(wave_type, channel="right", size=QSize(66, 34))
             self.wave_stereo_previews[wave_type] = (left_preview, right_preview)
             ear_preview_row = QHBoxLayout()
+            ear_preview_row.setContentsMargins(0, 0, 0, 0)
             ear_preview_row.setSpacing(4)
             ear_preview_row.addWidget(QLabel("L"))
             ear_preview_row.addWidget(left_preview)
             ear_preview_row.addWidget(QLabel("R"))
             ear_preview_row.addWidget(right_preview)
-            ear_preview_row.addStretch(1)
 
-            wave_layout.addWidget(name, ui_row, 0, 2, 1)
-            wave_layout.addWidget(preview, ui_row, 1, 2, 1)
-            wave_layout.addWidget(start_label, ui_row, 2)
-            wave_layout.addWidget(start_slider, ui_row + 1, 2)
-            wave_layout.addWidget(end_label, ui_row, 3)
-            wave_layout.addWidget(end_slider, ui_row + 1, 3)
-            wave_layout.addWidget(time_label, ui_row, 4)
-            wave_layout.addWidget(time_slider, ui_row + 1, 4)
-            wave_layout.addWidget(pan_label, ui_row, 5)
-            wave_layout.addWidget(pan_slider, ui_row + 1, 5)
-            wave_layout.addWidget(width_label, ui_row, 6)
-            wave_layout.addWidget(width_slider, ui_row + 1, 6)
-            wave_layout.addWidget(dance_label, ui_row, 7)
-            wave_layout.addWidget(dance_slider, ui_row + 1, 7)
-            wave_layout.addLayout(ear_preview_row, ui_row, 8, 2, 1)
+            stereo_preview = QWidget()
+            stereo_preview.setObjectName("earPreviewCell")
+            stereo_preview_layout = QVBoxLayout(stereo_preview)
+            stereo_preview_layout.setContentsMargins(0, 0, 0, 0)
+            stereo_preview_layout.setSpacing(2)
+            stereo_title = QLabel("Ear Waves")
+            stereo_title.setObjectName("controlCaption")
+            stereo_preview_layout.addWidget(stereo_title)
+            stereo_preview_layout.addLayout(ear_preview_row)
+
+            card_layout.addWidget(name, 0, 0, 2, 1)
+            card_layout.addWidget(preview, 0, 1, 2, 1, Qt.AlignCenter)
+            card_layout.addWidget(make_slider_cell(start_label, start_slider, "Start"), 0, 2)
+            card_layout.addWidget(make_slider_cell(end_label, end_slider, "End"), 0, 3)
+            card_layout.addWidget(make_slider_cell(time_label, time_slider, "Time"), 0, 4)
+            card_layout.addWidget(make_slider_cell(pan_label, pan_slider, "Place"), 1, 2)
+            card_layout.addWidget(make_slider_cell(width_label, width_slider, "Spread"), 1, 3)
+            card_layout.addWidget(make_slider_cell(dance_label, dance_slider, "Dance"), 1, 4)
+            card_layout.addWidget(stereo_preview, 0, 5, 2, 2)
+            wave_layout.addWidget(card)
 
         left.addWidget(wave_box)
 
         pitch_box = self._toy_group("2. Choose Pitch")
-        pitch_box.setMinimumWidth(360)
+        pitch_box.setMinimumWidth(300)
         pitch_layout = QGridLayout(pitch_box)
         pitch_layout.setHorizontalSpacing(12)
         pitch_layout.setVerticalSpacing(10)
@@ -1287,7 +1303,7 @@ class WaveToyWindow(QMainWindow):
         left.addWidget(pitch_box)
 
         explain_box = self._toy_group("What happened?")
-        explain_box.setMinimumHeight(150)
+        explain_box.setMinimumHeight(110)
         explain_layout = QVBoxLayout(explain_box)
         explain_layout.setSpacing(10)
 
@@ -1302,16 +1318,22 @@ class WaveToyWindow(QMainWindow):
         explain_layout.addWidget(self.beginner_mode)
         explain_layout.addWidget(self.explain_label)
 
-        center.addWidget(explain_box)
-        center.addStretch(1)
+        left.addWidget(explain_box)
 
+        overview_box = self._toy_group("Wave Overview")
+        overview_box.setMinimumWidth(280)
+        overview_box.setMaximumWidth(370)
+        overview_layout = QVBoxLayout(overview_box)
+        overview_layout.setContentsMargins(10, 18, 10, 10)
+        overview_layout.setSpacing(6)
         self.canvas = WaveCanvas()
-        self.canvas.setMinimumSize(QSize(300, 230))
-        self.canvas.setMaximumSize(QSize(360, 290))
-        right.addWidget(self.canvas, 0, Qt.AlignTop | Qt.AlignRight)
+        self.canvas.setMinimumSize(QSize(260, 180))
+        self.canvas.setMaximumSize(QSize(340, 240))
+        overview_layout.addWidget(self.canvas, 0, Qt.AlignCenter)
+        right.addWidget(overview_box, 0, Qt.AlignTop | Qt.AlignRight)
 
         motion_box = self._toy_group("3. Change Over Time")
-        motion_box.setMinimumWidth(300)
+        motion_box.setMinimumWidth(280)
         motion_layout = QGridLayout(motion_box)
         motion_layout.setHorizontalSpacing(12)
         motion_layout.setVerticalSpacing(10)
@@ -1403,7 +1425,7 @@ class WaveToyWindow(QMainWindow):
         right.addWidget(paul_box)
 
         stereo_box = self._toy_group("4. Stereo Space")
-        stereo_box.setMinimumWidth(300)
+        stereo_box.setMinimumWidth(280)
         stereo_layout = QGridLayout(stereo_box)
         stereo_layout.setHorizontalSpacing(12)
         stereo_layout.setVerticalSpacing(10)
@@ -1443,7 +1465,7 @@ class WaveToyWindow(QMainWindow):
         right.addWidget(stereo_box)
 
         preset_box = self._toy_group("Sound Experiments")
-        preset_box.setMinimumWidth(300)
+        preset_box.setMinimumWidth(280)
         preset_layout = QVBoxLayout(preset_box)
         preset_layout.setSpacing(8)
 
@@ -1474,10 +1496,14 @@ class WaveToyWindow(QMainWindow):
         self.stop_button = ToyButton("■ Stop!", "#ff6b6b")
         self.save_button = ToyButton("💾 Save My Sound", "#ffd166")
         self.load_button = ToyButton("📂 Load Sound", "#b8f2e6")
-        self.make_button.setMinimumWidth(180)
-        self.stop_button.setMinimumWidth(120)
-        self.save_button.setMinimumWidth(190)
-        self.load_button.setMinimumWidth(180)
+        for button, width in (
+            (self.make_button, 160),
+            (self.stop_button, 110),
+            (self.save_button, 170),
+            (self.load_button, 160),
+        ):
+            button.setMinimumWidth(width)
+            button.setMaximumHeight(54)
         self.loop_status_label = QLabel("Loop: Off")
         self.loop_status_label.setObjectName("loopStatus")
 
@@ -1566,6 +1592,9 @@ class WaveToyWindow(QMainWindow):
             QSlider {{
                 min-height: {SLIDER_MIN_HEIGHT}px;
             }}
+            QWidget#sliderCell QSlider {{
+                min-height: 38px;
+            }}
             QSlider::groove:horizontal {{
                 height: {SLIDER_GROOVE_HEIGHT}px;
                 background: #d7f3ff;
@@ -1608,20 +1637,42 @@ class WaveToyWindow(QMainWindow):
             }
             QGroupBox#toyGroup {
                 background: #ffffff;
-                border: 5px solid rgba(0, 0, 0, 0.16);
-                border-radius: 24px;
-                margin-top: 22px;
-                padding: 18px;
-                font-size: 18px;
+                border: 4px solid rgba(0, 0, 0, 0.16);
+                border-radius: 20px;
+                margin-top: 16px;
+                padding: 10px;
+                font-size: 17px;
                 font-weight: 900;
                 color: #263238;
             }
             QGroupBox#toyGroup::title {
                 subcontrol-origin: margin;
-                left: 18px;
-                padding: 2px 8px;
+                left: 16px;
+                padding: 1px 8px;
                 background: #ffffff;
                 border-radius: 8px;
+            }
+            QWidget#waveCard {
+                background: #f9fbff;
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: 16px;
+            }
+            QWidget#sliderCell, QWidget#earPreviewCell {
+                background: transparent;
+            }
+            QLabel#waveCardTitle {
+                font-size: 13px;
+                font-weight: 900;
+            }
+            QLabel#controlCaption {
+                font-size: 11px;
+                font-weight: 900;
+                color: #607d8b;
+            }
+            QLabel#controlValue {
+                font-size: 12px;
+                font-weight: 900;
+                color: #263238;
             }
             QLabel {
                 font-size: 14px;
