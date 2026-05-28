@@ -210,7 +210,7 @@ def equal_power_pan(mono: np.ndarray, pan: np.ndarray) -> np.ndarray:
 
 def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_count: int = 160) -> Dict[str, np.ndarray | Dict[str, float | bool]]:
     """Build compact cached preview samples without running the full audio render."""
-    sample_count = max(24, int(sample_count))
+    sample_count = max(120, min(240, int(sample_count)))
     duration = max(0.1, min(float(settings.duration_seconds), MAX_PREVIEW_SECONDS))
 
     start_levels = settings.wave_start_db or {"sine": 0.0, "triangle": -20.0, "sawtooth": -20.0, "square": -20.0}
@@ -230,7 +230,8 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
     # than SAMPLE_RATE-sized, so paintEvent never performs full synthesis.
     cycles = 2.35
     phase = np.linspace(0.0, 2.0 * np.pi * cycles, sample_count, dtype=np.float64)
-    mono = waveform_from_phase(wave_type, phase) * gain_env
+    raw_wave = waveform_from_phase(wave_type, phase)
+    mono = raw_wave * gain_env
 
     default_pan_offsets = {"sine": -0.45, "triangle": 0.45, "sawtooth": -0.85, "square": 0.85}
     wave_pan = settings.wave_pan or {name: default_pan_offsets[name] for name in WAVE_ORDER}
@@ -253,13 +254,23 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
 
     stereo = equal_power_pan(mono, pan_env)
     peak = max(float(np.max(np.abs(mono))) if mono.size else 0.0, 1.0)
+    left_level = np.abs(stereo[:, 0]) / peak
+    right_level = np.abs(stereo[:, 1]) / peak
     return {
+        "shape": raw_wave.astype(np.float32),
+        "envelope": gain_env.astype(np.float32),
+        "pan": pan_env.astype(np.float32),
+        "left_level": left_level.astype(np.float32),
+        "right_level": right_level.astype(np.float32),
         "mono": (mono / peak).astype(np.float32),
         "left": (stereo[:, 0] / peak).astype(np.float32),
         "right": (stereo[:, 1] / peak).astype(np.float32),
         "metadata": {
             "active": bool(np.max(gain_env) > 0.0),
             "amplitude": float(np.max(gain_env)) if gain_env.size else 0.0,
+            "start_gain": float(gain_env[0]) if gain_env.size else 0.0,
+            "end_gain": float(gain_env[-1]) if gain_env.size else 0.0,
+            "change_fraction": float(change_seconds / duration),
             "pan": float(individual_pan),
             "width": float(individual_width),
             "dance": float(individual_dance),
@@ -1004,6 +1015,215 @@ class MiniWavePreview(QWidget):
             painter.drawText(rect.adjusted(5, 2, -5, -2), Qt.AlignTop | Qt.AlignLeft, self.channel[:1].upper())
 
 
+class EnvelopePreview(QWidget):
+    """Cached loudness-envelope preview for one wave-card stage."""
+
+    def __init__(self, size: QSize | None = None) -> None:
+        super().__init__()
+        self.envelope = np.ones(160, dtype=np.float32)
+        self.change_fraction = 1.0
+        self.start_gain = 1.0
+        self.end_gain = 1.0
+        self.setFixedSize(size or QSize(230, 54))
+        self.setToolTip("Shows this ingredient's loudness path: start size, end size, and how quickly it changes.")
+
+    def set_envelope(self, envelope: np.ndarray, metadata: Dict[str, float | bool]) -> None:
+        new_envelope = np.asarray(envelope, dtype=np.float32).reshape(-1)
+        if new_envelope.size == 0:
+            new_envelope = np.zeros(160, dtype=np.float32)
+        new_envelope = np.clip(new_envelope, 0.0, 1.0)
+        changed = self.envelope.shape != new_envelope.shape or not np.allclose(self.envelope, new_envelope, atol=0.001)
+
+        change_fraction = float(np.clip(metadata.get("change_fraction", 1.0), 0.0, 1.0))
+        start_gain = float(np.clip(metadata.get("start_gain", new_envelope[0]), 0.0, 1.0))
+        end_gain = float(np.clip(metadata.get("end_gain", new_envelope[-1]), 0.0, 1.0))
+        changed = changed or any(
+            abs(current - new) > 0.001
+            for current, new in (
+                (self.change_fraction, change_fraction),
+                (self.start_gain, start_gain),
+                (self.end_gain, end_gain),
+            )
+        )
+
+        if changed:
+            self.envelope = new_envelope
+            self.change_fraction = change_fraction
+            self.start_gain = start_gain
+            self.end_gain = end_gain
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        painter.setPen(QPen(QColor(0, 0, 0, 45), 2))
+        painter.setBrush(QColor("#fff7d6"))
+        painter.drawRoundedRect(rect, 12, 12)
+
+        inner = rect.adjusted(10, 8, -10, -12)
+        baseline = inner.bottom()
+        painter.setPen(QPen(QColor("#ffd166"), 1, Qt.DashLine))
+        for fraction in (0.25, 0.5, 0.75):
+            y = inner.top() + inner.height() * fraction
+            painter.drawLine(QPointF(inner.left(), y), QPointF(inner.right(), y))
+
+        fill_path = QPainterPath()
+        line_path = QPainterPath()
+        for index, value in enumerate(self.envelope):
+            x_fraction = index / max(1, len(self.envelope) - 1)
+            x = inner.left() + x_fraction * inner.width()
+            y = baseline - float(value) * inner.height()
+            if index == 0:
+                fill_path.moveTo(QPointF(x, baseline))
+                fill_path.lineTo(QPointF(x, y))
+                line_path.moveTo(QPointF(x, y))
+            else:
+                fill_path.lineTo(QPointF(x, y))
+                line_path.lineTo(QPointF(x, y))
+        fill_path.lineTo(QPointF(inner.right(), baseline))
+        fill_path.closeSubpath()
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 209, 102, 100))
+        painter.drawPath(fill_path)
+        painter.setPen(QPen(QColor("#f39c12"), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(line_path)
+
+        change_x = inner.left() + inner.width() * self.change_fraction
+        painter.setPen(QPen(QColor("#263238"), 2, Qt.DashLine))
+        painter.drawLine(QPointF(change_x, inner.top()), QPointF(change_x, baseline + 4))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#5cdb95"))
+        painter.drawEllipse(QPointF(inner.left(), baseline - self.start_gain * inner.height()), 5, 5)
+        painter.setBrush(QColor("#ff4fa3"))
+        painter.drawEllipse(QPointF(inner.right(), baseline - self.end_gain * inner.height()), 5, 5)
+
+
+class StereoFieldPreview(QWidget):
+    """Cached per-wave stereo field preview with balance bars and movement."""
+
+    COLORS = MiniWavePreview.COLORS
+
+    def __init__(self, wave_type: str = "sine", size: QSize | None = None) -> None:
+        super().__init__()
+        self.wave_type = wave_type
+        self.left_level = np.zeros(160, dtype=np.float32)
+        self.right_level = np.zeros(160, dtype=np.float32)
+        self.pan = np.zeros(160, dtype=np.float32)
+        self.width = 1.0
+        self.dance = 0.0
+        self.animation_phase = 0.0
+        self.motion_active = False
+        self.setFixedSize(size or QSize(230, 54))
+        self.setToolTip("Shows where this ingredient sits: left/right balance, spread, and dance movement.")
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+
+    def set_wave_type(self, wave_type: str) -> None:
+        if self.wave_type != wave_type:
+            self.wave_type = wave_type
+            self.update()
+
+    def set_stereo_data(self, left_level: np.ndarray, right_level: np.ndarray, pan: np.ndarray, metadata: Dict[str, float | bool]) -> None:
+        new_left = np.clip(np.asarray(left_level, dtype=np.float32).reshape(-1), 0.0, 1.0)
+        new_right = np.clip(np.asarray(right_level, dtype=np.float32).reshape(-1), 0.0, 1.0)
+        new_pan = np.clip(np.asarray(pan, dtype=np.float32).reshape(-1), -1.0, 1.0)
+        if new_left.size == 0:
+            new_left = np.zeros(160, dtype=np.float32)
+        if new_right.size == 0:
+            new_right = np.zeros(160, dtype=np.float32)
+        if new_pan.size == 0:
+            new_pan = np.zeros(160, dtype=np.float32)
+
+        width = float(np.clip(metadata.get("width", 1.0), 0.0, 1.0))
+        dance = float(np.clip(metadata.get("dance", 0.0), 0.0, 1.0))
+        changed = (
+            self.left_level.shape != new_left.shape
+            or self.right_level.shape != new_right.shape
+            or self.pan.shape != new_pan.shape
+            or not np.allclose(self.left_level, new_left, atol=0.001)
+            or not np.allclose(self.right_level, new_right, atol=0.001)
+            or not np.allclose(self.pan, new_pan, atol=0.001)
+            or abs(self.width - width) > 0.001
+            or abs(self.dance - dance) > 0.001
+        )
+        if changed:
+            self.left_level = new_left
+            self.right_level = new_right
+            self.pan = new_pan
+            self.width = width
+            self.dance = dance
+            self.update()
+
+    def set_motion(self, active: bool) -> None:
+        self.motion_active = bool(active)
+        if self.motion_active and not self.timer.isActive():
+            self.timer.start(45)
+        elif not self.motion_active and self.timer.isActive():
+            self.timer.stop()
+        self.update()
+
+    def _tick(self) -> None:
+        self.animation_phase = (self.animation_phase + 0.10) % (2.0 * math.pi)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        painter.setPen(QPen(QColor(0, 0, 0, 45), 2))
+        painter.setBrush(QColor("#eef7ff"))
+        painter.drawRoundedRect(rect, 12, 12)
+
+        inner = rect.adjusted(10, 8, -10, -8)
+        center_x = inner.center().x()
+        center_y = inner.center().y()
+        painter.setPen(QPen(QColor("#77c8ff"), 1, Qt.DashLine))
+        painter.drawLine(QPointF(center_x, inner.top()), QPointF(center_x, inner.bottom()))
+        painter.drawLine(QPointF(inner.left(), center_y), QPointF(inner.right(), center_y))
+
+        left_peak = float(np.max(self.left_level)) if self.left_level.size else 0.0
+        right_peak = float(np.max(self.right_level)) if self.right_level.size else 0.0
+        bar_width = inner.width() * 0.38
+        bar_height = 8.0
+        left_bar = QRectF(center_x - bar_width * left_peak, inner.top() + 2, bar_width * left_peak, bar_height)
+        right_bar = QRectF(center_x, inner.top() + 2, bar_width * right_peak, bar_height)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#4aa3ff"))
+        painter.drawRoundedRect(left_bar, 4, 4)
+        painter.setBrush(QColor("#ff6fb1"))
+        painter.drawRoundedRect(right_bar, 4, 4)
+
+        color = QColor(self.COLORS.get(self.wave_type, QColor("#2ecc71")))
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 70))
+        painter.setPen(QPen(color, 3))
+
+        pan_value = float(np.mean(self.pan)) if self.pan.size else 0.0
+        if self.motion_active and self.dance > 0.0:
+            pan_value += 0.18 * self.dance * math.sin(self.animation_phase)
+        pan_value = float(np.clip(pan_value, -1.0, 1.0))
+        x = center_x + pan_value * inner.width() * 0.45
+        radius_x = 8.0 + self.width * 22.0
+        radius_y = 7.0 + max(left_peak, right_peak) * 15.0
+        painter.drawEllipse(QPointF(x, center_y + 6), radius_x, radius_y)
+
+        if self.dance > 0.05:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 140), 2, Qt.DashLine))
+            dancer = radius_x + self.dance * (8.0 + 4.0 * math.sin(self.animation_phase))
+            painter.drawEllipse(QPointF(x, center_y + 6), dancer, radius_y + self.dance * 6.0)
+
+        painter.setPen(QColor("#263238"))
+        painter.setFont(QFont("Arial", 8, QFont.Bold))
+        painter.drawText(rect.adjusted(6, 2, -6, -2), Qt.AlignTop | Qt.AlignLeft, "L")
+        painter.drawText(rect.adjusted(6, 2, -6, -2), Qt.AlignTop | Qt.AlignRight, "R")
+
+
 class WaveToyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1042,6 +1262,8 @@ class WaveToyWindow(QMainWindow):
         self.wave_width_labels: Dict[str, QLabel] = {}
         self.wave_dance_labels: Dict[str, QLabel] = {}
         self.wave_mix_previews: Dict[str, MiniWavePreview] = {}
+        self.wave_envelope_previews: Dict[str, EnvelopePreview] = {}
+        self.wave_stereo_field_previews: Dict[str, StereoFieldPreview] = {}
         self.wave_stereo_previews: Dict[str, Tuple[MiniWavePreview, MiniWavePreview]] = {}
         self._preview_stop_timer = QTimer(self)
         self._preview_stop_timer.setSingleShot(True)
@@ -1120,13 +1342,39 @@ class WaveToyWindow(QMainWindow):
             title.setObjectName("controlCaption")
             title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             label.setObjectName("controlValue")
-            label.setMinimumWidth(82)
+            label.setMinimumWidth(72)
             label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            slider.setMinimumWidth(108)
+            slider.setMinimumWidth(86)
             layout.addWidget(title)
             layout.addWidget(label)
             layout.addWidget(slider)
             return cell
+
+        def make_stage(title_text: str, visual: QWidget, controls: List[QWidget] | None = None) -> QWidget:
+            stage = QWidget()
+            stage.setObjectName("signalStage")
+            stage_layout = QVBoxLayout(stage)
+            stage_layout.setContentsMargins(0, 0, 0, 0)
+            stage_layout.setSpacing(3)
+            title_label = QLabel(title_text)
+            title_label.setObjectName("signalStageTitle")
+            title_label.setAlignment(Qt.AlignCenter)
+            stage_layout.addWidget(title_label)
+            stage_layout.addWidget(visual, 0, Qt.AlignCenter)
+            if controls:
+                controls_row = QHBoxLayout()
+                controls_row.setContentsMargins(0, 0, 0, 0)
+                controls_row.setSpacing(4)
+                for control in controls:
+                    controls_row.addWidget(control)
+                stage_layout.addLayout(controls_row)
+            return stage
+
+        def make_flow_arrow() -> QLabel:
+            arrow = QLabel("➜")
+            arrow.setObjectName("signalFlowArrow")
+            arrow.setAlignment(Qt.AlignCenter)
+            return arrow
 
         default_start = {
             "sine": 0,
@@ -1147,19 +1395,13 @@ class WaveToyWindow(QMainWindow):
             card.setObjectName("waveCard")
             card_layout = QGridLayout(card)
             card_layout.setContentsMargins(10, 8, 10, 8)
-            card_layout.setHorizontalSpacing(10)
+            card_layout.setHorizontalSpacing(6)
             card_layout.setVerticalSpacing(4)
-            card_layout.setColumnStretch(0, 0)
-            card_layout.setColumnStretch(1, 1)
-            card_layout.setColumnStretch(2, 1)
-            card_layout.setColumnStretch(3, 1)
-            card_layout.setColumnStretch(4, 1)
-            card_layout.setColumnStretch(5, 1)
-            card_layout.setColumnStretch(6, 1)
+            for column, stretch in enumerate([0, 0, 2, 0, 2, 0, 0]):
+                card_layout.setColumnStretch(column, stretch)
 
-            name = QLabel(f"{self._wave_icon(wave_type)}\n{WAVE_LABELS[wave_type]}")
+            name = QLabel(f"{WAVE_LABELS[wave_type]}")
             name.setObjectName("waveCardTitle")
-            name.setMinimumWidth(92)
             name.setWordWrap(True)
             name.setAlignment(Qt.AlignCenter)
 
@@ -1194,7 +1436,7 @@ class WaveToyWindow(QMainWindow):
             pan_slider = QSlider(Qt.Horizontal)
             pan_slider.setRange(-100 * PERCENT_SLIDER_SCALE, 100 * PERCENT_SLIDER_SCALE)
             pan_slider.setValue(default_wave_pan[wave_type] * PERCENT_SLIDER_SCALE)
-            pan_slider.setToolTip("Where this wave sits between the left and right ear.")
+            pan_slider.setToolTip("Where this ingredient sits between the left and right ear.")
             self._connect_scheduled_generate(pan_slider.valueChanged, "wave_pan_slider")
             pan_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
@@ -1202,7 +1444,7 @@ class WaveToyWindow(QMainWindow):
             width_slider = QSlider(Qt.Horizontal)
             width_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             width_slider.setValue(65 * PERCENT_SLIDER_SCALE)
-            width_slider.setToolTip("How wide this wave feels in stereo space.")
+            width_slider.setToolTip("How wide this ingredient feels in stereo space.")
             self._connect_scheduled_generate(width_slider.valueChanged, "wave_width_slider")
             width_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
@@ -1210,7 +1452,7 @@ class WaveToyWindow(QMainWindow):
             dance_slider = QSlider(Qt.Horizontal)
             dance_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             dance_slider.setValue(0)
-            dance_slider.setToolTip("How much this wave dances between ears.")
+            dance_slider.setToolTip("How much this ingredient dances between ears.")
             self._connect_scheduled_generate(dance_slider.valueChanged, "wave_dance_slider")
             dance_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
@@ -1227,40 +1469,62 @@ class WaveToyWindow(QMainWindow):
             self.wave_width_labels[wave_type] = width_label
             self.wave_dance_labels[wave_type] = dance_label
 
-            preview = MiniWavePreview(wave_type, size=QSize(92, 42))
-            preview.set_amplitude(db_to_gain(default_start[wave_type]))
-            self.wave_mix_previews[wave_type] = preview
+            shape_preview = MiniWavePreview(wave_type, size=QSize(112, 54))
+            shape_preview.set_amplitude(db_to_gain(default_start[wave_type]))
+            self.wave_mix_previews[wave_type] = shape_preview
 
-            left_preview = MiniWavePreview(wave_type, channel="left", size=QSize(66, 34))
-            right_preview = MiniWavePreview(wave_type, channel="right", size=QSize(66, 34))
+            envelope_preview = EnvelopePreview(size=QSize(250, 54))
+            self.wave_envelope_previews[wave_type] = envelope_preview
+
+            stereo_field_preview = StereoFieldPreview(wave_type, size=QSize(230, 54))
+            self.wave_stereo_field_previews[wave_type] = stereo_field_preview
+
+            left_preview = MiniWavePreview(wave_type, channel="left", size=QSize(62, 34))
+            right_preview = MiniWavePreview(wave_type, channel="right", size=QSize(62, 34))
             self.wave_stereo_previews[wave_type] = (left_preview, right_preview)
             ear_preview_row = QHBoxLayout()
             ear_preview_row.setContentsMargins(0, 0, 0, 0)
-            ear_preview_row.setSpacing(4)
-            ear_preview_row.addWidget(QLabel("L"))
+            ear_preview_row.setSpacing(3)
             ear_preview_row.addWidget(left_preview)
-            ear_preview_row.addWidget(QLabel("R"))
             ear_preview_row.addWidget(right_preview)
 
-            stereo_preview = QWidget()
-            stereo_preview.setObjectName("earPreviewCell")
-            stereo_preview_layout = QVBoxLayout(stereo_preview)
-            stereo_preview_layout.setContentsMargins(0, 0, 0, 0)
-            stereo_preview_layout.setSpacing(2)
-            stereo_title = QLabel("Ear Waves")
-            stereo_title.setObjectName("controlCaption")
-            stereo_preview_layout.addWidget(stereo_title)
-            stereo_preview_layout.addLayout(ear_preview_row)
+            output_visual = QWidget()
+            output_visual.setObjectName("earPreviewCell")
+            output_layout = QVBoxLayout(output_visual)
+            output_layout.setContentsMargins(0, 0, 0, 0)
+            output_layout.setSpacing(2)
+            output_layout.addWidget(QLabel("L / R"), 0, Qt.AlignCenter)
+            output_layout.addLayout(ear_preview_row)
 
-            card_layout.addWidget(name, 0, 0, 2, 1)
-            card_layout.addWidget(preview, 0, 1, 2, 1, Qt.AlignCenter)
-            card_layout.addWidget(make_slider_cell(start_label, start_slider, "Start"), 0, 2)
-            card_layout.addWidget(make_slider_cell(end_label, end_slider, "End"), 0, 3)
-            card_layout.addWidget(make_slider_cell(time_label, time_slider, "Time"), 0, 4)
-            card_layout.addWidget(make_slider_cell(pan_label, pan_slider, "Place"), 1, 2)
-            card_layout.addWidget(make_slider_cell(width_label, width_slider, "Spread"), 1, 3)
-            card_layout.addWidget(make_slider_cell(dance_label, dance_slider, "Dance"), 1, 4)
-            card_layout.addWidget(stereo_preview, 0, 5, 2, 2)
+            shape_stage = make_stage("Shape", shape_preview)
+            shape_stage.layout().insertWidget(1, name)
+            envelope_stage = make_stage(
+                "Envelope",
+                envelope_preview,
+                [
+                    make_slider_cell(start_label, start_slider, "Start"),
+                    make_slider_cell(end_label, end_slider, "End"),
+                    make_slider_cell(time_label, time_slider, "Time"),
+                ],
+            )
+            stereo_stage = make_stage(
+                "Stereo",
+                stereo_field_preview,
+                [
+                    make_slider_cell(pan_label, pan_slider, "Place"),
+                    make_slider_cell(width_label, width_slider, "Spread"),
+                    make_slider_cell(dance_label, dance_slider, "Dance"),
+                ],
+            )
+            output_stage = make_stage("Output", output_visual)
+
+            card_layout.addWidget(shape_stage, 0, 0)
+            card_layout.addWidget(make_flow_arrow(), 0, 1)
+            card_layout.addWidget(envelope_stage, 0, 2)
+            card_layout.addWidget(make_flow_arrow(), 0, 3)
+            card_layout.addWidget(stereo_stage, 0, 4)
+            card_layout.addWidget(make_flow_arrow(), 0, 5)
+            card_layout.addWidget(output_stage, 0, 6)
             wave_layout.addWidget(card)
 
         left.addWidget(wave_box)
@@ -1424,7 +1688,7 @@ class WaveToyWindow(QMainWindow):
 
         right.addWidget(paul_box)
 
-        stereo_box = self._toy_group("4. Stereo Space")
+        stereo_box = self._toy_group("5. Whole-Mix Stereo Space")
         stereo_box.setMinimumWidth(280)
         stereo_layout = QGridLayout(stereo_box)
         stereo_layout.setHorizontalSpacing(12)
@@ -1445,22 +1709,26 @@ class WaveToyWindow(QMainWindow):
         self.width_label = QLabel("↔️ Medium")
         self.auto_pan_depth_label = QLabel("😴 Still")
         self.auto_pan_rate_label = QLabel("🐢 Slow")
+        global_stereo_hint = QLabel("Per-wave cards place each ingredient. These controls move the entire mix after ingredients combine.")
+        global_stereo_hint.setObjectName("symbolHint")
+        global_stereo_hint.setWordWrap(True)
 
-        stereo_layout.addWidget(QLabel("Start Place"), 0, 0)
-        stereo_layout.addWidget(self.pan_start_label, 0, 1)
-        stereo_layout.addWidget(self.pan_start_slider, 1, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("End Place"), 2, 0)
-        stereo_layout.addWidget(self.pan_end_label, 2, 1)
-        stereo_layout.addWidget(self.pan_end_slider, 3, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("Ear Spread"), 4, 0)
-        stereo_layout.addWidget(self.width_label, 4, 1)
-        stereo_layout.addWidget(self.width_slider, 5, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("Ear Dance"), 6, 0)
-        stereo_layout.addWidget(self.auto_pan_depth_label, 6, 1)
-        stereo_layout.addWidget(self.auto_pan_depth_slider, 7, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("Dance Speed"), 8, 0)
-        stereo_layout.addWidget(self.auto_pan_rate_label, 8, 1)
-        stereo_layout.addWidget(self.auto_pan_rate, 9, 0, 1, 2)
+        stereo_layout.addWidget(global_stereo_hint, 0, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("Start Place"), 1, 0)
+        stereo_layout.addWidget(self.pan_start_label, 1, 1)
+        stereo_layout.addWidget(self.pan_start_slider, 2, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("End Place"), 3, 0)
+        stereo_layout.addWidget(self.pan_end_label, 3, 1)
+        stereo_layout.addWidget(self.pan_end_slider, 4, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("Ear Spread"), 5, 0)
+        stereo_layout.addWidget(self.width_label, 5, 1)
+        stereo_layout.addWidget(self.width_slider, 6, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("Ear Dance"), 7, 0)
+        stereo_layout.addWidget(self.auto_pan_depth_label, 7, 1)
+        stereo_layout.addWidget(self.auto_pan_depth_slider, 8, 0, 1, 2)
+        stereo_layout.addWidget(QLabel("Dance Speed"), 9, 0)
+        stereo_layout.addWidget(self.auto_pan_rate_label, 9, 1)
+        stereo_layout.addWidget(self.auto_pan_rate, 10, 0, 1, 2)
 
         right.addWidget(stereo_box)
 
@@ -1657,12 +1925,22 @@ class WaveToyWindow(QMainWindow):
                 border: 3px solid rgba(0, 0, 0, 0.10);
                 border-radius: 16px;
             }
-            QWidget#sliderCell, QWidget#earPreviewCell {
+            QWidget#sliderCell, QWidget#earPreviewCell, QWidget#signalStage {
                 background: transparent;
             }
             QLabel#waveCardTitle {
                 font-size: 13px;
                 font-weight: 900;
+            }
+            QLabel#signalStageTitle {
+                font-size: 12px;
+                font-weight: 900;
+                color: #455a64;
+            }
+            QLabel#signalFlowArrow {
+                font-size: 22px;
+                font-weight: 900;
+                color: #90a4ae;
             }
             QLabel#controlCaption {
                 font-size: 11px;
@@ -2691,6 +2969,8 @@ class WaveToyWindow(QMainWindow):
     def _set_preview_motion(self, active: bool) -> None:
         for preview in self.wave_mix_previews.values():
             preview.set_motion(active)
+        for preview in self.wave_stereo_field_previews.values():
+            preview.set_motion(active)
         for left_preview, right_preview in self.wave_stereo_previews.values():
             left_preview.set_motion(active)
             right_preview.set_motion(active)
@@ -2706,8 +2986,7 @@ class WaveToyWindow(QMainWindow):
 
     def _update_all_wave_previews(self) -> None:
         for wave_type in WAVE_ORDER:
-            self._update_mix_preview(wave_type)
-            self._update_stereo_preview(wave_type)
+            self._update_wave_previews(wave_type)
 
     def _wave_preview_amplitude(self, wave_type: str) -> float:
         if wave_type not in self.wave_start_sliders or wave_type not in self.wave_end_sliders:
@@ -2716,26 +2995,45 @@ class WaveToyWindow(QMainWindow):
         end_db = self.wave_end_sliders[wave_type].value() / DB_SLIDER_SCALE
         return max(db_to_gain(start_db), db_to_gain(end_db))
 
-    def _update_mix_preview(self, wave_type: str) -> None:
-        preview = self.wave_mix_previews.get(wave_type)
-        if preview is None:
-            return
+    def _update_wave_previews(self, wave_type: str) -> None:
         preview_samples = self._preview_samples_for_wave(wave_type)
-        preview.set_wave_type(wave_type)
-        preview.set_amplitude(float(preview_samples["metadata"].get("amplitude", self._wave_preview_amplitude(wave_type))))
-        preview.set_samples(preview_samples["mono"])
+        metadata = preview_samples["metadata"]
+        amplitude = float(metadata.get("amplitude", self._wave_preview_amplitude(wave_type)))
+
+        preview = self.wave_mix_previews.get(wave_type)
+        if preview is not None:
+            preview.set_wave_type(wave_type)
+            preview.set_amplitude(amplitude)
+            preview.set_samples(preview_samples["shape"])
+
+        envelope_preview = self.wave_envelope_previews.get(wave_type)
+        if envelope_preview is not None:
+            envelope_preview.set_envelope(preview_samples["envelope"], metadata)
+
+        stereo_field_preview = self.wave_stereo_field_previews.get(wave_type)
+        if stereo_field_preview is not None:
+            stereo_field_preview.set_wave_type(wave_type)
+            stereo_field_preview.set_stereo_data(
+                preview_samples["left_level"],
+                preview_samples["right_level"],
+                preview_samples["pan"],
+                metadata,
+            )
+
+        previews = self.wave_stereo_previews.get(wave_type)
+        if previews is not None:
+            dance = float(metadata.get("dance", 0.0))
+            for output_preview, key in zip(previews, ["left", "right"]):
+                output_preview.set_wave_type(wave_type)
+                output_preview.set_amplitude(amplitude)
+                output_preview.set_samples(preview_samples[key])
+                output_preview.set_motion_depth(dance)
+
+    def _update_mix_preview(self, wave_type: str) -> None:
+        self._update_wave_previews(wave_type)
 
     def _update_stereo_preview(self, wave_type: str) -> None:
-        previews = self.wave_stereo_previews.get(wave_type)
-        if previews is None:
-            return
-        preview_samples = self._preview_samples_for_wave(wave_type)
-        dance = float(preview_samples["metadata"].get("dance", 0.0))
-        for preview, key in zip(previews, ["left", "right"]):
-            preview.set_wave_type(wave_type)
-            preview.set_amplitude(float(preview_samples["metadata"].get("amplitude", self._wave_preview_amplitude(wave_type))))
-            preview.set_samples(preview_samples[key])
-            preview.set_motion_depth(dance)
+        self._update_wave_previews(wave_type)
 
     def _update_wave_stereo_labels(self, wave_type: str) -> None:
         if wave_type not in self.wave_pan_sliders:
@@ -2753,8 +3051,7 @@ class WaveToyWindow(QMainWindow):
         self.wave_start_labels[wave_type].setText(self._slider_picture_text(start_value, "loudness"))
         self.wave_end_labels[wave_type].setText(self._slider_picture_text(end_value, "loudness"))
         self.wave_time_labels[wave_type].setText(self._slider_picture_text(time_percent, "time"))
-        self._update_mix_preview(wave_type)
-        self._update_stereo_preview(wave_type)
+        self._update_wave_previews(wave_type)
 
     def _sync_duration_slider_to_spin(self, value: int) -> None:
         self._update_symbolic_labels()
