@@ -83,6 +83,16 @@ PERCENT_SLIDER_SCALE = 10      # 0..1000 => 0.0%..100.0%
 RATE_SLIDER_SCALE = 100        # 5..800 => 0.05Hz..8.00Hz
 PAULSTRETCH_SCALE = 100        # 100..3000 => 1.00x..30.00x
 
+# Centralized touch-friendly slider metrics. These affect only Qt styling and
+# widget hit area; they do not change synthesis ranges, saved recipe values, or
+# audio generation behavior.
+SLIDER_MIN_HEIGHT = 44
+SLIDER_GROOVE_HEIGHT = 18
+SLIDER_GROOVE_RADIUS = 9
+SLIDER_HANDLE_SIZE = 34
+SLIDER_HANDLE_RADIUS = 17
+SLIDER_HANDLE_MARGIN = -8
+
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 NOTE_TO_INDEX = {name: i for i, name in enumerate(NOTE_NAMES)}
 
@@ -1311,9 +1321,37 @@ class WaveToyWindow(QMainWindow):
             "square": "🧱",
         }.get(wave_type, "〰️")
 
+    def _slider_style_sheet(self) -> str:
+        """Return centralized slider styling for larger, rounder controls."""
+        return f"""
+            QSlider {{
+                min-height: {SLIDER_MIN_HEIGHT}px;
+            }}
+            QSlider::groove:horizontal {{
+                height: {SLIDER_GROOVE_HEIGHT}px;
+                background: #d7f3ff;
+                border-radius: {SLIDER_GROOVE_RADIUS}px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: #7bdff2;
+                border-radius: {SLIDER_GROOVE_RADIUS}px;
+            }}
+            QSlider::handle:horizontal {{
+                background: #ff4fa3;
+                border: 3px solid white;
+                width: {SLIDER_HANDLE_SIZE}px;
+                height: {SLIDER_HANDLE_SIZE}px;
+                margin: {SLIDER_HANDLE_MARGIN}px 0;
+                border-radius: {SLIDER_HANDLE_RADIUS}px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: #ff2f91;
+            }}
+        """
+
     def _apply_style(self) -> None:
         self.setStyleSheet(
-            """
+            f"""
             QMainWindow {
                 background: #7bdff2;
             }
@@ -1380,19 +1418,7 @@ class WaveToyWindow(QMainWindow):
                 font-size: 14px;
                 background: #f9fbff;
             }
-            QSlider::groove:horizontal {
-                height: 16px;
-                background: #d7f3ff;
-                border-radius: 8px;
-            }
-            QSlider::handle:horizontal {
-                background: #ff4fa3;
-                border: 3px solid white;
-                width: 28px;
-                height: 28px;
-                margin: -8px 0;
-                border-radius: 14px;
-            }
+            {self._slider_style_sheet()}
             QPushButton {
                 min-height: 34px;
                 border-radius: 14px;
