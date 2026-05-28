@@ -286,7 +286,7 @@ def frequency_for_note(
     return root_frequency * (2.0 ** octave_delta) * ratio * (2.0 ** (cents / 1200.0))
 
 
-def wave_effective_frequency_env(settings: SynthSettings, wave_type: str, global_freq_env: np.ndarray) -> np.ndarray:
+def effective_wave_frequency_env(settings: SynthSettings, wave_type: str, global_freq_env: np.ndarray) -> np.ndarray:
     """Return the global pitch curve or a per-wave custom pitch curve."""
     follow_map = settings.wave_follow_main_pitch or {name: True for name in WAVE_ORDER}
     if follow_map.get(wave_type, True):
@@ -316,6 +316,11 @@ def wave_effective_frequency_env(settings: SynthSettings, wave_type: str, global
         settings.tuning_reference_hz,
     )
     return np.full_like(global_freq_env, max(1.0, float(frequency)), dtype=np.float64)
+
+
+def wave_effective_frequency_env(settings: SynthSettings, wave_type: str, global_freq_env: np.ndarray) -> np.ndarray:
+    """Backward-compatible alias for the per-wave pitch helper."""
+    return effective_wave_frequency_env(settings, wave_type, global_freq_env)
 
 
 def make_curve(start: float, end: float, samples: int, curve_type: str) -> np.ndarray:
@@ -401,7 +406,7 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
     # the audio engine. The phase count is intentionally display-oriented rather
     # than SAMPLE_RATE-sized, so paintEvent never performs full synthesis.
     global_freq = make_curve(float(settings.pitch_start_hz), float(settings.pitch_end_hz), sample_count, settings.curve_type)
-    wave_freq = wave_effective_frequency_env(settings, wave_type, global_freq)
+    wave_freq = effective_wave_frequency_env(settings, wave_type, global_freq)
     preview_anchor = max(1.0, float(np.mean(global_freq))) if global_freq.size else 440.0
     cycles = 2.35 * max(0.25, min(4.0, float(np.mean(wave_freq)) / preview_anchor))
     phase = np.linspace(0.0, 2.0 * np.pi * cycles, sample_count, dtype=np.float64)
@@ -620,7 +625,15 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
         if float(np.max(gain_env)) <= 0.0:
             continue
 
-        wave_freq_env = wave_effective_frequency_env(settings, wave_type, freq_env)
+        wave_freq_env = effective_wave_frequency_env(settings, wave_type, freq_env)
+        if not (settings.wave_follow_main_pitch or {}).get(wave_type, True):
+            note_map = settings.wave_note or {}
+            octave_map = settings.wave_octave or {}
+            print(
+                f"[WaveToy] pitch {wave_type} follow_main=False "
+                f"note={note_map.get(wave_type, settings.note)}{octave_map.get(wave_type, settings.octave)} "
+                f"freq≈{float(np.mean(wave_freq_env)):.1f}"
+            )
         phase = np.cumsum(2.0 * np.pi * wave_freq_env / SAMPLE_RATE)
         mono_wave = waveform_from_phase(wave_type, phase) * gain_env
         individual_pan = np.clip(float(wave_pan.get(wave_type, default_pan_offsets[wave_type])), -1.0, 1.0)
@@ -1542,6 +1555,7 @@ class WaveToyWindow(QMainWindow):
         self.wave_octave_spins: Dict[str, QSpinBox] = {}
         self.wave_cents_sliders: Dict[str, QSlider] = {}
         self.wave_pitch_labels: Dict[str, QLabel] = {}
+        self.wave_pitch_panels: Dict[str, QWidget] = {}
         self.wave_explorer: WaveExplorerWindow | None = None
         self._preview_stop_timer = QTimer(self)
         self._preview_stop_timer.setSingleShot(True)
@@ -1628,28 +1642,54 @@ class WaveToyWindow(QMainWindow):
             layout.addWidget(slider)
             return cell
 
-        def make_pitch_cell(label: QLabel, follow: QCheckBox, note_combo: QComboBox, octave_spin: QSpinBox, cents_slider: QSlider) -> QWidget:
+        def make_pitch_cell(
+            wave_type: str,
+            label: QLabel,
+            follow: QCheckBox,
+            note_combo: QComboBox,
+            octave_spin: QSpinBox,
+            cents_slider: QSlider,
+        ) -> QWidget:
             cell = QWidget()
             cell.setObjectName("sliderCell")
             layout = QVBoxLayout(cell)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(2)
-            title = QLabel("Pitch")
+            title = QLabel("Pitch Toy")
             title.setObjectName("controlCaption")
             label.setObjectName("controlValue")
-            label.setMinimumWidth(110)
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(3)
-            note_combo.setMaximumWidth(54)
-            octave_spin.setMaximumWidth(48)
-            row.addWidget(note_combo)
-            row.addWidget(octave_spin)
+            label.setMinimumWidth(92)
+            label.setToolTip("👯 Main means this wave follows the big pitch controls. 🎯 means this wave has its own note.")
+
+            follow.setMinimumWidth(112)
             layout.addWidget(title)
             layout.addWidget(label)
             layout.addWidget(follow)
-            layout.addLayout(row)
-            layout.addWidget(cents_slider)
+
+            note_panel = QWidget()
+            note_panel.setObjectName("pitchNotePanel")
+            note_panel_layout = QGridLayout(note_panel)
+            note_panel_layout.setContentsMargins(6, 4, 6, 4)
+            note_panel_layout.setHorizontalSpacing(4)
+            note_panel_layout.setVerticalSpacing(1)
+
+            note_label = QLabel("🎵 Note")
+            size_label = QLabel("🧸 Size")
+            wiggle_label = QLabel("🎯 Wiggle")
+            for tiny_label in (note_label, size_label, wiggle_label):
+                tiny_label.setObjectName("tinyPitchLabel")
+
+            note_combo.setMaximumWidth(54)
+            octave_spin.setMaximumWidth(48)
+            cents_slider.setMinimumWidth(94)
+            note_panel_layout.addWidget(note_label, 0, 0)
+            note_panel_layout.addWidget(size_label, 0, 1)
+            note_panel_layout.addWidget(note_combo, 1, 0)
+            note_panel_layout.addWidget(octave_spin, 1, 1)
+            note_panel_layout.addWidget(wiggle_label, 2, 0, 1, 2)
+            note_panel_layout.addWidget(cents_slider, 3, 0, 1, 2)
+            layout.addWidget(note_panel)
+            self.wave_pitch_panels[wave_type] = note_panel
             return cell
 
         def make_stage(title_text: str, visual: QWidget, controls: List[QWidget] | None = None) -> QWidget:
@@ -1720,7 +1760,7 @@ class WaveToyWindow(QMainWindow):
             pitch_label = QLabel("👯 Follow Main")
             follow_pitch = QCheckBox("👯 Follow Main")
             follow_pitch.setChecked(True)
-            follow_pitch.setToolTip("Let this wave follow the main note or choose its own note.")
+            follow_pitch.setToolTip("Click to switch between 👯 Follow Main and 🎯 My Note for this wave.")
             note_combo = QComboBox()
             note_combo.addItems(NOTE_NAMES)
             note_combo.setCurrentText("A")
@@ -1728,11 +1768,11 @@ class WaveToyWindow(QMainWindow):
             octave_spin = QSpinBox()
             octave_spin.setRange(0, 8)
             octave_spin.setValue(4)
-            octave_spin.setToolTip("Octave for this wave's own note.")
+            octave_spin.setToolTip("🧸 Size: octave for this wave's own note.")
             cents_slider = QSlider(Qt.Horizontal)
             cents_slider.setRange(-50 * 100, 50 * 100)
             cents_slider.setValue(0)
-            cents_slider.setToolTip("Fine-tune this wave in cents when Follow Main is off.")
+            cents_slider.setToolTip("🎯 Wiggle: fine-tune this wave in cents when My Note is on.")
             follow_pitch.stateChanged.connect(lambda state, wt=wave_type: self._update_wave_pitch_label(wt))
             note_combo.currentTextChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
             octave_spin.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_pitch_label(wt))
@@ -1839,7 +1879,7 @@ class WaveToyWindow(QMainWindow):
             output_layout.addWidget(QLabel("L / R"), 0, Qt.AlignCenter)
             output_layout.addLayout(ear_preview_row)
 
-            pitch_cell = make_pitch_cell(pitch_label, follow_pitch, note_combo, octave_spin, cents_slider)
+            pitch_cell = make_pitch_cell(wave_type, pitch_label, follow_pitch, note_combo, octave_spin, cents_slider)
             shape_stage = make_stage("Shape", shape_preview, [mute_button, solo_button, pitch_cell])
             shape_stage.layout().insertWidget(1, name)
             envelope_stage = make_stage(
@@ -2334,6 +2374,16 @@ class WaveToyWindow(QMainWindow):
             QWidget#sliderCell, QWidget#earPreviewCell, QWidget#signalStage {
                 background: transparent;
             }
+            QWidget#pitchNotePanel {
+                background: #fff3c4;
+                border: 2px solid rgba(255, 209, 102, 0.85);
+                border-radius: 10px;
+            }
+            QLabel#tinyPitchLabel {
+                font-size: 10px;
+                font-weight: 900;
+                color: #6d4c41;
+            }
             QLabel#waveCardTitle {
                 font-size: 13px;
                 font-weight: 900;
@@ -2703,11 +2753,18 @@ class WaveToyWindow(QMainWindow):
         octave = self.wave_octave_spins.get(wave_type).value() if wave_type in self.wave_octave_spins else 4
         cents = self.wave_cents_sliders.get(wave_type).value() / 100.0 if wave_type in self.wave_cents_sliders else 0.0
         if follows:
-            text = "👯 Follow Main"
+            text = "👯 Main"
         else:
             sign = "+" if cents > 0 else ""
-            text = f"🎯 {note}{octave} {sign}{cents:.0f}¢"
+            cents_text = f" {sign}{cents:.0f}¢" if abs(cents) >= 0.5 else ""
+            text = f"🎯 {note}{octave}{cents_text}"
         self.wave_pitch_labels[wave_type].setText(text)
+        button = self.wave_follow_pitch_buttons.get(wave_type)
+        if button is not None:
+            button.setText("👯 Follow Main" if follows else "🎯 My Note")
+        panel = self.wave_pitch_panels.get(wave_type)
+        if panel is not None:
+            panel.setVisible(not follows)
         for widget in (self.wave_note_combos.get(wave_type), self.wave_octave_spins.get(wave_type), self.wave_cents_sliders.get(wave_type)):
             if widget is not None:
                 widget.setEnabled(not follows)
@@ -3486,7 +3543,16 @@ class WaveToyWindow(QMainWindow):
             "Grown-up words: frequency, amplitude, waveform, envelope, stereo field.",
         )
 
+    def _reset_wave_pitch_to_follow_main(self) -> None:
+        """Return all wave cards to the backward-compatible main-pitch mode."""
+        for wave_type, button in self.wave_follow_pitch_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(True)
+            button.blockSignals(False)
+            self._update_wave_pitch_label(wave_type)
+
     def _preset_pure_a4(self) -> None:
+        self._reset_wave_pitch_to_follow_main()
         self._set_wave_levels(
             {"sine": 0, "triangle": -20, "sawtooth": -20, "square": -20},
         )
@@ -3506,6 +3572,7 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_rocket_pitch(self) -> None:
+        self._reset_wave_pitch_to_follow_main()
         self._set_wave_levels(
             {"sine": -18, "triangle": -20, "sawtooth": -18, "square": -24},
             {"sine": -30, "triangle": -20, "sawtooth": 0, "square": -36},
@@ -3524,6 +3591,7 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_robot_beep(self) -> None:
+        self._reset_wave_pitch_to_follow_main()
         self._set_wave_levels(
             {"sine": -30, "triangle": -20, "sawtooth": -24, "square": 0},
             {"sine": -20, "triangle": -20, "sawtooth": -18, "square": -12},
@@ -3541,6 +3609,7 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_falling_star(self) -> None:
+        self._reset_wave_pitch_to_follow_main()
         self._set_wave_levels(
             {"sine": 0, "triangle": -18, "sawtooth": -20, "square": -20},
             {"sine": -24, "triangle": -36, "sawtooth": -20, "square": -20},
@@ -3558,6 +3627,7 @@ class WaveToyWindow(QMainWindow):
         self._generate()
 
     def _preset_fade_in_triangle(self) -> None:
+        self._reset_wave_pitch_to_follow_main()
         self._set_wave_levels(
             {"sine": -20, "triangle": -20, "sawtooth": -20, "square": -20},
             {"sine": -24, "triangle": 0, "sawtooth": -20, "square": -20},
