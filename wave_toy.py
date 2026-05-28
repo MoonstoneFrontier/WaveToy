@@ -111,6 +111,83 @@ CURVE_LABELS = {
     "logarithmic": "Fast Then Slow",
 }
 
+TUNING_METHODS = {
+    "equal_temperament_12": {
+        "label": "Piano Steps",
+        "tooltip": "Modern piano-style tuning: 12 equal steps per octave.",
+        "kind": "equal",
+        "divisions": 12,
+    },
+    "just_intonation_major": {
+        "label": "Sweet Simple Ratios",
+        "tooltip": "Simple whole-number ratios for sweet chords near the root note.",
+        "kind": "ratios12",
+        "ratios": [1, 16/15, 9/8, 6/5, 5/4, 4/3, 45/32, 3/2, 8/5, 5/3, 9/5, 15/8],
+    },
+    "pythagorean": {
+        "label": "Stacked Fifths",
+        "tooltip": "Built from stacked perfect fifths.",
+        "kind": "ratios12",
+        "ratios": [1, 256/243, 9/8, 32/27, 81/64, 4/3, 729/512, 3/2, 128/81, 27/16, 16/9, 243/128],
+    },
+    "quarter_comma_meantone": {
+        "label": "Old Keyboard Glow",
+        "tooltip": "Historical keyboard temperament with smooth thirds.",
+        "kind": "cents12",
+        "cents": [0, 76, 193, 310, 386, 503, 579, 697, 773, 890, 1007, 1083],
+    },
+    "werkmeister_iii": {
+        "label": "Baroque Adventure",
+        "tooltip": "Historical well temperament often associated with Baroque keyboard color.",
+        "kind": "cents12",
+        "cents": [0, 90, 192, 294, 390, 498, 588, 696, 792, 888, 996, 1092],
+    },
+    "kirnberger_iii": {
+        "label": "Old Harpsichord",
+        "tooltip": "Historical well temperament with gentler home-key color.",
+        "kind": "cents12",
+        "cents": [0, 90, 193, 294, 386, 498, 590, 697, 792, 890, 996, 1088],
+    },
+    "pelog": {
+        "label": "Island Bells",
+        "tooltip": "Approximate Indonesian pelog-inspired scale; a playful approximation, not an authoritative model.",
+        "kind": "cents12",
+        "cents": [0, 70, 140, 270, 400, 520, 650, 680, 820, 950, 1080, 1120],
+    },
+    "slendro": {
+        "label": "Five Smooth Steps",
+        "tooltip": "Approximate Indonesian slendro-inspired five-tone scale; a playful approximation, not an authoritative model.",
+        "kind": "subset_equal",
+        "steps": [0, 2, 5, 7, 10],
+        "divisions": 5,
+    },
+    "pentatonic_equal": {
+        "label": "Five-Step Playground",
+        "tooltip": "Five evenly spaced notes per octave, mapped to the nearest toy note step.",
+        "kind": "subset_equal",
+        "steps": [0, 2, 4, 7, 9],
+        "divisions": 5,
+    },
+    "nineteen_equal": {
+        "label": "Tiny 19-Step Ladder",
+        "tooltip": "19 equal steps per octave, with note names mapped to nearby steps.",
+        "kind": "equal_mapped",
+        "divisions": 19,
+    },
+    "twenty_four_equal": {
+        "label": "Quarter-Tone Sprinkle",
+        "tooltip": "24 equal steps per octave, with note names mapped to quarter-tone positions.",
+        "kind": "equal_mapped",
+        "divisions": 24,
+    },
+    "harmonic_series": {
+        "label": "Nature Ladder",
+        "tooltip": "Notes based on natural harmonic ratios.",
+        "kind": "ratios12",
+        "ratios": [1, 17/16, 9/8, 19/16, 5/4, 21/16, 11/8, 3/2, 13/8, 5/3, 7/4, 15/8],
+    },
+}
+
 
 @dataclass
 class SynthSettings:
@@ -134,6 +211,12 @@ class SynthSettings:
     wave_pan: Dict[str, float] | None = None
     wave_width: Dict[str, float] | None = None
     wave_dance: Dict[str, float] | None = None
+    wave_muted: Dict[str, bool] | None = None
+    solo_wave: str | None = None
+    muted_modules: Dict[str, bool] | None = None
+    tuning_method: str = "equal_temperament_12"
+    tuning_root_note: str = "A"
+    tuning_reference_hz: float = 440.0
     paulstretch_enabled: bool = False
     paulstretch_amount: float = 1.0
     paulstretch_evolution: float = 0.0
@@ -147,6 +230,56 @@ def midi_note(note: str, octave: int) -> int:
 def frequency_from_note(note: str, octave: int, cents: float = 0.0, a4: float = 440.0) -> float:
     base = a4 * (2.0 ** ((midi_note(note, octave) - 69) / 12.0))
     return base * (2.0 ** (cents / 1200.0))
+
+
+def _nearest_subset_degree(chromatic_degree: int, available_steps: List[int]) -> int:
+    return min(available_steps, key=lambda step: min((chromatic_degree - step) % 12, (step - chromatic_degree) % 12))
+
+
+def frequency_for_note(
+    note: str,
+    octave: int,
+    cents: float,
+    tuning_method: str,
+    root_note: str,
+    reference_hz: float,
+) -> float:
+    """Return note frequency with a selectable tuning map and cents fine-tune."""
+    if note not in NOTE_TO_INDEX or root_note not in NOTE_TO_INDEX:
+        return frequency_from_note("A", 4, cents, reference_hz)
+
+    method = TUNING_METHODS.get(tuning_method, TUNING_METHODS["equal_temperament_12"])
+    if tuning_method == "equal_temperament_12" or method.get("kind") == "equal":
+        return frequency_from_note(note, octave, cents, reference_hz)
+
+    root_midi = midi_note(root_note, 4)
+    target_midi = midi_note(note, octave)
+    semitone_delta = target_midi - root_midi
+    octave_delta, chromatic_degree = divmod(semitone_delta, 12)
+    root_frequency = frequency_from_note(root_note, 4, 0.0, reference_hz)
+    kind = str(method.get("kind", "equal"))
+
+    if kind == "ratios12":
+        ratios = method.get("ratios", [])
+        ratio = float(ratios[chromatic_degree]) if len(ratios) == 12 else 2.0 ** (chromatic_degree / 12.0)
+    elif kind == "cents12":
+        cent_map = method.get("cents", [])
+        degree_cents = float(cent_map[chromatic_degree]) if len(cent_map) == 12 else chromatic_degree * 100.0
+        ratio = 2.0 ** (degree_cents / 1200.0)
+    elif kind == "equal_mapped":
+        divisions = max(1, int(method.get("divisions", 12)))
+        mapped_step = round(chromatic_degree * divisions / 12.0)
+        ratio = 2.0 ** (mapped_step / divisions)
+    elif kind == "subset_equal":
+        divisions = max(1, int(method.get("divisions", 5)))
+        steps = [int(step) for step in method.get("steps", [0, 2, 4, 7, 9])]
+        nearest = _nearest_subset_degree(chromatic_degree, steps)
+        subset_index = steps.index(nearest)
+        ratio = 2.0 ** (subset_index / divisions)
+    else:
+        return frequency_from_note(note, octave, cents, reference_hz)
+
+    return root_frequency * (2.0 ** octave_delta) * ratio * (2.0 ** (cents / 1200.0))
 
 
 def make_curve(start: float, end: float, samples: int, curve_type: str) -> np.ndarray:
@@ -216,6 +349,9 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
     start_levels = settings.wave_start_db or {"sine": 0.0, "triangle": -20.0, "sawtooth": -20.0, "square": -20.0}
     end_levels = settings.wave_end_db or dict(start_levels)
     delta_times = settings.wave_delta_time or {name: duration for name in WAVE_ORDER}
+    muted = settings.wave_muted or {name: False for name in WAVE_ORDER}
+    solo_wave = settings.solo_wave if settings.solo_wave in WAVE_ORDER else None
+    is_audible = not muted.get(wave_type, False) and (solo_wave is None or solo_wave == wave_type)
 
     start_db = float(start_levels.get(wave_type, -20.0))
     end_db = float(end_levels.get(wave_type, start_db))
@@ -232,6 +368,9 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
     phase = np.linspace(0.0, 2.0 * np.pi * cycles, sample_count, dtype=np.float64)
     raw_wave = waveform_from_phase(wave_type, phase)
     mono = raw_wave * gain_env
+    if not is_audible:
+        mono = np.zeros_like(mono)
+        gain_env = np.zeros_like(gain_env)
 
     default_pan_offsets = {"sine": -0.45, "triangle": 0.45, "sawtooth": -0.85, "square": 0.85}
     wave_pan = settings.wave_pan or {name: default_pan_offsets[name] for name in WAVE_ORDER}
@@ -266,7 +405,9 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
         "left": (stereo[:, 0] / peak).astype(np.float32),
         "right": (stereo[:, 1] / peak).astype(np.float32),
         "metadata": {
-            "active": bool(np.max(gain_env) > 0.0),
+            "active": bool(is_audible and np.max(gain_env) > 0.0),
+            "muted": bool(muted.get(wave_type, False)),
+            "soloed": bool(solo_wave == wave_type),
             "amplitude": float(np.max(gain_env)) if gain_env.size else 0.0,
             "start_gain": float(gain_env[0]) if gain_env.size else 0.0,
             "end_gain": float(gain_env[-1]) if gain_env.size else 0.0,
@@ -361,10 +502,15 @@ MODULE_DESCRIPTIONS = {
 
 
 def apply_modules(audio: np.ndarray, settings: SynthSettings) -> np.ndarray:
-    """Apply enabled audio-processing modules in order."""
-    modules = settings.enabled_modules or {}
+    """Apply enabled audio-processing modules in order.
 
-    if modules.get("paulstretch", False) and settings.paulstretch_amount > 1.01:
+    Future effects can follow the same pattern: keep slider state in settings,
+    then skip processing when the module is listed in muted_modules.
+    """
+    modules = settings.enabled_modules or {}
+    muted_modules = settings.muted_modules or {}
+
+    if modules.get("paulstretch", False) and not muted_modules.get("paulstretch", False) and settings.paulstretch_amount > 1.01:
         audio = paulstretch_process(
             audio,
             stretch=settings.paulstretch_amount,
@@ -411,6 +557,8 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
     wave_pan = settings.wave_pan or {wave_type: default_pan_offsets[wave_type] for wave_type in WAVE_ORDER}
     wave_width = settings.wave_width or {wave_type: 1.0 for wave_type in WAVE_ORDER}
     wave_dance = settings.wave_dance or {wave_type: 0.0 for wave_type in WAVE_ORDER}
+    wave_muted = settings.wave_muted or {wave_type: False for wave_type in WAVE_ORDER}
+    solo_wave = settings.solo_wave if settings.solo_wave in WAVE_ORDER else None
 
     pan_base = make_curve(float(settings.pan_start), float(settings.pan_end), total_samples, settings.curve_type)
 
@@ -421,6 +569,9 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
     active_gain_total = 0.0
 
     for wave_type in WAVE_ORDER:
+        if wave_muted.get(wave_type, False) or (solo_wave is not None and solo_wave != wave_type):
+            continue
+
         start_db = float(start_levels.get(wave_type, -20.0))
         end_db = float(end_levels.get(wave_type, start_db))
 
@@ -1265,6 +1416,9 @@ class WaveToyWindow(QMainWindow):
         self.wave_envelope_previews: Dict[str, EnvelopePreview] = {}
         self.wave_stereo_field_previews: Dict[str, StereoFieldPreview] = {}
         self.wave_stereo_previews: Dict[str, Tuple[MiniWavePreview, MiniWavePreview]] = {}
+        self.wave_cards: Dict[str, QWidget] = {}
+        self.wave_mute_buttons: Dict[str, QCheckBox] = {}
+        self.wave_solo_buttons: Dict[str, QCheckBox] = {}
         self._preview_stop_timer = QTimer(self)
         self._preview_stop_timer.setSingleShot(True)
         self._preview_stop_timer.timeout.connect(lambda: self._set_preview_motion(False))
@@ -1393,6 +1547,7 @@ class WaveToyWindow(QMainWindow):
         for wave_type in WAVE_ORDER:
             card = QWidget()
             card.setObjectName("waveCard")
+            self.wave_cards[wave_type] = card
             card_layout = QGridLayout(card)
             card_layout.setContentsMargins(10, 8, 10, 8)
             card_layout.setHorizontalSpacing(6)
@@ -1404,6 +1559,15 @@ class WaveToyWindow(QMainWindow):
             name.setObjectName("waveCardTitle")
             name.setWordWrap(True)
             name.setAlignment(Qt.AlignCenter)
+
+            mute_button = QCheckBox("🎵 On")
+            mute_button.setToolTip("Turn this wave off without changing its sliders.")
+            mute_button.stateChanged.connect(lambda state, wt=wave_type: self._set_wave_muted(wt, bool(state)))
+            solo_button = QCheckBox("⭐ Only Me")
+            solo_button.setToolTip("Hear just this wave.")
+            solo_button.stateChanged.connect(lambda state, wt=wave_type: self._set_wave_solo(wt, bool(state)))
+            self.wave_mute_buttons[wave_type] = mute_button
+            self.wave_solo_buttons[wave_type] = solo_button
 
             start_label = QLabel(self._slider_picture_text(default_start[wave_type] * DB_SLIDER_SCALE, "loudness"))
             start_slider = QSlider(Qt.Horizontal)
@@ -1496,7 +1660,7 @@ class WaveToyWindow(QMainWindow):
             output_layout.addWidget(QLabel("L / R"), 0, Qt.AlignCenter)
             output_layout.addLayout(ear_preview_row)
 
-            shape_stage = make_stage("Shape", shape_preview)
+            shape_stage = make_stage("Shape", shape_preview, [mute_button, solo_button])
             shape_stage.layout().insertWidget(1, name)
             envelope_stage = make_stage(
                 "Envelope",
@@ -1527,6 +1691,11 @@ class WaveToyWindow(QMainWindow):
             card_layout.addWidget(output_stage, 0, 6)
             wave_layout.addWidget(card)
 
+        self.clear_solo_button = QPushButton("🌈 All Waves")
+        self.clear_solo_button.setToolTip("Clear solo so the full mix plays again.")
+        self.clear_solo_button.clicked.connect(self._clear_solo)
+        wave_layout.addWidget(self.clear_solo_button, 0, Qt.AlignRight)
+
         left.addWidget(wave_box)
 
         pitch_box = self._toy_group("2. Choose Pitch")
@@ -1554,6 +1723,26 @@ class WaveToyWindow(QMainWindow):
         self.base_pitch_label = QLabel("Pitch: 🎵 ready")
         self.base_pitch_label.setObjectName("symbolHint")
 
+        self.tuning_method_combo = QComboBox()
+        for method_id, method in TUNING_METHODS.items():
+            self.tuning_method_combo.addItem(str(method["label"]), method_id)
+            index = self.tuning_method_combo.count() - 1
+            self.tuning_method_combo.setItemData(index, str(method["tooltip"]), Qt.ToolTipRole)
+        self.tuning_method_combo.setToolTip("Choose how notes are spaced.")
+
+        self.tuning_root_combo = QComboBox()
+        self.tuning_root_combo.addItems(NOTE_NAMES)
+        self.tuning_root_combo.setCurrentText("A")
+        self.tuning_root_combo.setToolTip("Pick the home note for tunings that lean around a root.")
+
+        self.tuning_reference_spin = QDoubleSpinBox()
+        self.tuning_reference_spin.setRange(220.0, 880.0)
+        self.tuning_reference_spin.setDecimals(1)
+        self.tuning_reference_spin.setSingleStep(0.5)
+        self.tuning_reference_spin.setValue(440.0)
+        self.tuning_reference_spin.setSuffix(" Hz")
+        self.tuning_reference_spin.setToolTip("Reference pitch for A4. Default is 440 Hz.")
+
         pitch_layout.addWidget(QLabel("Note"), 0, 0)
         pitch_layout.addWidget(self.note_combo, 0, 1)
         pitch_layout.addWidget(QLabel("Voice Size"), 1, 0)
@@ -1562,7 +1751,16 @@ class WaveToyWindow(QMainWindow):
         pitch_layout.addWidget(QLabel("Tiny Wiggle"), 3, 0)
         pitch_layout.addWidget(self.cents_label, 3, 1)
         pitch_layout.addWidget(self.cents_slider, 4, 0, 1, 2)
-        pitch_layout.addWidget(self.base_pitch_label, 5, 0, 1, 2)
+        tuning_title = QLabel("🎼 Tuning Playground")
+        tuning_title.setObjectName("symbolHint")
+        pitch_layout.addWidget(tuning_title, 5, 0, 1, 2)
+        pitch_layout.addWidget(QLabel("🎼 Tuning Map"), 6, 0)
+        pitch_layout.addWidget(self.tuning_method_combo, 6, 1)
+        pitch_layout.addWidget(QLabel("Home Note"), 7, 0)
+        pitch_layout.addWidget(self.tuning_root_combo, 7, 1)
+        pitch_layout.addWidget(QLabel("A4 Sparkle"), 8, 0)
+        pitch_layout.addWidget(self.tuning_reference_spin, 8, 1)
+        pitch_layout.addWidget(self.base_pitch_label, 9, 0, 1, 2)
 
         left.addWidget(pitch_box)
 
@@ -1662,7 +1860,8 @@ class WaveToyWindow(QMainWindow):
         )
         self.modules_label.setWordWrap(True)
 
-        self.paulstretch_enabled = QCheckBox("🌌 Paulstretch Dream Space")
+        self.paulstretch_enabled = QCheckBox("😴 Effect Nap")
+        self.paulstretch_enabled.setToolTip("Put this effect to sleep without changing its sliders.")
 
         self.paul_amount_slider = QSlider(Qt.Horizontal)
         self.paul_amount_slider.setRange(1 * PAULSTRETCH_SCALE, 30 * PAULSTRETCH_SCALE)
@@ -1801,11 +2000,18 @@ class WaveToyWindow(QMainWindow):
             self.paulstretch_enabled,
             self.paul_amount_slider,
             self.paul_evolution_slider,
+            self.tuning_method_combo,
+            self.tuning_root_combo,
+            self.tuning_reference_spin,
         ]
 
         self.note_combo.currentTextChanged.connect(self._sync_note_to_pitch)
         self.octave_slider.valueChanged.connect(self._sync_note_to_pitch)
         self.cents_slider.valueChanged.connect(self._sync_note_to_pitch)
+        self.tuning_method_combo.currentIndexChanged.connect(self._sync_note_to_pitch)
+        self.tuning_root_combo.currentTextChanged.connect(self._sync_note_to_pitch)
+        self.tuning_reference_spin.valueChanged.connect(self._sync_note_to_pitch)
+        self.paulstretch_enabled.stateChanged.connect(self._update_module_labels)
 
         for widget in widgets_to_regenerate:
             if isinstance(widget, QComboBox):
@@ -1923,6 +2129,16 @@ class WaveToyWindow(QMainWindow):
             QWidget#waveCard {
                 background: #f9fbff;
                 border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: 16px;
+            }
+            QWidget#waveCardMuted {
+                background: #eef1f4;
+                border: 3px dashed rgba(69, 90, 100, 0.25);
+                border-radius: 16px;
+            }
+            QWidget#waveCardSolo {
+                background: #fff8d9;
+                border: 4px solid #ffd166;
                 border-radius: 16px;
             }
             QWidget#sliderCell, QWidget#earPreviewCell, QWidget#signalStage {
@@ -2131,9 +2347,94 @@ class WaveToyWindow(QMainWindow):
         if hasattr(self, "paul_amount_label"):
             self.paul_amount_label.setText(self._stretch_picture_text(self.paul_amount_slider.value()))
             self.paul_evolution_label.setText(self._evolution_picture_text(self.paul_evolution_slider.value()))
+            self._update_module_labels()
         for wave_type in WAVE_ORDER:
             if wave_type in self.wave_pan_sliders:
                 self._update_wave_stereo_labels(wave_type)
+
+    def _wave_muted_from_ui(self) -> Dict[str, bool]:
+        return {
+            wave_type: button.isChecked()
+            for wave_type, button in self.wave_mute_buttons.items()
+        }
+
+    def _solo_wave_from_ui(self) -> str | None:
+        for wave_type, button in self.wave_solo_buttons.items():
+            if button.isChecked():
+                return wave_type
+        return None
+
+    def _set_wave_muted(self, wave_type: str, muted: bool) -> None:
+        button = self.wave_mute_buttons.get(wave_type)
+        if button is not None:
+            button.setText("🤫 Quiet" if muted else "🎵 On")
+        self._update_wave_card_state(wave_type)
+        self._update_wave_previews(wave_type)
+        self._schedule_generate("wave_mute_toggle")
+
+    def _set_wave_solo(self, wave_type: str, soloed: bool) -> None:
+        if soloed:
+            for other_wave, button in self.wave_solo_buttons.items():
+                if other_wave != wave_type and button.isChecked():
+                    button.blockSignals(True)
+                    button.setChecked(False)
+                    button.setText("⭐ Only Me")
+                    button.blockSignals(False)
+        button = self.wave_solo_buttons.get(wave_type)
+        if button is not None:
+            button.setText("👑 Star Sound" if soloed else "⭐ Only Me")
+        self._refresh_all_wave_card_states()
+        self._update_all_wave_previews()
+        self._schedule_generate("wave_solo_toggle")
+
+    def _clear_solo(self) -> None:
+        for button in self.wave_solo_buttons.values():
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.setText("⭐ Only Me")
+            button.blockSignals(False)
+        self._refresh_all_wave_card_states()
+        self._update_all_wave_previews()
+        self._schedule_generate("clear_solo")
+
+    def _update_wave_card_state(self, wave_type: str) -> None:
+        card = self.wave_cards.get(wave_type)
+        if card is None:
+            return
+        muted = self.wave_mute_buttons.get(wave_type).isChecked() if wave_type in self.wave_mute_buttons else False
+        soloed = self.wave_solo_buttons.get(wave_type).isChecked() if wave_type in self.wave_solo_buttons else False
+        card.setObjectName("waveCardSolo" if soloed else "waveCardMuted" if muted else "waveCard")
+        card.style().unpolish(card)
+        card.style().polish(card)
+        card.update()
+
+    def _refresh_all_wave_card_states(self) -> None:
+        for wave_type in WAVE_ORDER:
+            self._update_wave_card_state(wave_type)
+
+    def _update_module_labels(self) -> None:
+        if hasattr(self, "paulstretch_enabled"):
+            self.paulstretch_enabled.setText("✨ Effect On" if self.paulstretch_enabled.isChecked() else "😴 Effect Nap")
+
+    def _tuning_ratio_from_ui(self) -> float:
+        note = self.note_combo.currentText()
+        octave = int(round(self.octave_slider.value() / OCTAVE_SLIDER_SCALE))
+        cents = float(self.cents_slider.value()) / 100.0
+        root_note = self.tuning_root_combo.currentText() if hasattr(self, "tuning_root_combo") else "A"
+        method = self.tuning_method_combo.currentData() if hasattr(self, "tuning_method_combo") else "equal_temperament_12"
+        reference = self.tuning_reference_spin.value() if hasattr(self, "tuning_reference_spin") else 440.0
+        equal_base = frequency_for_note(note, octave, 0.0, "equal_temperament_12", "A", reference)
+        tuned_base = frequency_for_note(note, octave, cents, str(method), root_note, reference)
+        return tuned_base / max(1.0, equal_base)
+
+    def _tuned_slider_midi_to_hz(self, midi_value: int) -> float:
+        return self._slider_midi_to_hz(midi_value) * self._tuning_ratio_from_ui()
+
+    def _set_tuning_method(self, method_id: str) -> None:
+        if not hasattr(self, "tuning_method_combo"):
+            return
+        index = self.tuning_method_combo.findData(method_id)
+        self.tuning_method_combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _wave_start_db_from_ui(self) -> Dict[str, float]:
         return {
@@ -2187,8 +2488,8 @@ class WaveToyWindow(QMainWindow):
             note=self.note_combo.currentText(),
             octave=int(round(self.octave_slider.value() / OCTAVE_SLIDER_SCALE)),
             cents=float(self.cents_slider.value()) / 100.0,
-            pitch_start_hz=self._slider_midi_to_hz(self.pitch_start.value()),
-            pitch_end_hz=self._slider_midi_to_hz(self.pitch_end.value()),
+            pitch_start_hz=self._tuned_slider_midi_to_hz(self.pitch_start.value()),
+            pitch_end_hz=self._tuned_slider_midi_to_hz(self.pitch_end.value()),
             loudness_start=self.loud_start.value() / (100.0 * PERCENT_SLIDER_SCALE),
             loudness_end=self.loud_end.value() / (100.0 * PERCENT_SLIDER_SCALE),
             duration_seconds=self._clip_duration_seconds(),
@@ -2201,6 +2502,12 @@ class WaveToyWindow(QMainWindow):
             wave_pan=self._wave_pan_from_ui(),
             wave_width=self._wave_width_from_ui(),
             wave_dance=self._wave_dance_from_ui(),
+            wave_muted=self._wave_muted_from_ui(),
+            solo_wave=self._solo_wave_from_ui(),
+            muted_modules={"paulstretch": not self.paulstretch_enabled.isChecked()},
+            tuning_method=str(self.tuning_method_combo.currentData()),
+            tuning_root_note=self.tuning_root_combo.currentText(),
+            tuning_reference_hz=float(self.tuning_reference_spin.value()),
             paulstretch_enabled=self.paulstretch_enabled.isChecked(),
             paulstretch_amount=self.paul_amount_slider.value() / PAULSTRETCH_SCALE,
             paulstretch_evolution=self.paul_evolution_slider.value() / (100.0 * PERCENT_SLIDER_SCALE),
@@ -2214,10 +2521,22 @@ class WaveToyWindow(QMainWindow):
         octave = int(round(octave_float))
         cents = self.cents_slider.value()
         midi_value = midi_note(self.note_combo.currentText(), octave)
+        tuning_name = "Piano Steps"
+        base_frequency = frequency_from_note(self.note_combo.currentText(), octave, cents / 100.0)
+        if hasattr(self, "tuning_method_combo"):
+            tuning_name = self.tuning_method_combo.currentText()
+            base_frequency = frequency_for_note(
+                self.note_combo.currentText(),
+                octave,
+                cents / 100.0,
+                str(self.tuning_method_combo.currentData()),
+                self.tuning_root_combo.currentText(),
+                float(self.tuning_reference_spin.value()),
+            )
 
         self.octave_label.setText(self._octave_picture_text(octave))
         self.cents_label.setText(self._cents_picture_text(cents))
-        self.base_pitch_label.setText("Pitch: " + self._pitch_picture_text(midi_value))
+        self.base_pitch_label.setText(f"Pitch: {self._pitch_picture_text(midi_value)} • {tuning_name} • {base_frequency:.1f} Hz")
 
         self.pitch_start.blockSignals(True)
         self.pitch_end.blockSignals(True)
@@ -2240,8 +2559,14 @@ class WaveToyWindow(QMainWindow):
             spread = self.wave_width_sliders.get(wave_type).value() / (100.0 * PERCENT_SLIDER_SCALE) if wave_type in self.wave_width_sliders else 0.0
             dance = self.wave_dance_sliders.get(wave_type).value() / (100.0 * PERCENT_SLIDER_SCALE) if wave_type in self.wave_dance_sliders else 0.0
 
+            muted = self.wave_mute_buttons.get(wave_type).isChecked() if wave_type in self.wave_mute_buttons else False
+            solo_wave = self._solo_wave_from_ui()
+            audible = not muted and (solo_wave is None or solo_wave == wave_type)
+
             conditions[wave_type] = {
-                "active": start_db > -20.0 or end_db > -20.0,
+                "active": audible and (start_db > -20.0 or end_db > -20.0),
+                "muted": muted,
+                "soloed": solo_wave == wave_type,
                 "start_db": start_db,
                 "end_db": end_db,
                 "change_fraction": change_fraction,
@@ -2298,10 +2623,14 @@ class WaveToyWindow(QMainWindow):
 
         self.current_audio = audio
 
+        wave_muted = self.current_settings.wave_muted or {}
+        solo_wave = self.current_settings.solo_wave if self.current_settings.solo_wave in WAVE_ORDER else None
         active_count = sum(
             1
             for wave_type, db in (self.current_settings.wave_start_db or {}).items()
-            if db > -20 or (self.current_settings.wave_end_db or {}).get(wave_type, -20) > -20
+            if not wave_muted.get(wave_type, False)
+            and (solo_wave is None or solo_wave == wave_type)
+            and (db > -20 or (self.current_settings.wave_end_db or {}).get(wave_type, -20) > -20)
         )
 
         if self.current_settings.auto_pan_depth > 0:
@@ -2587,6 +2916,8 @@ class WaveToyWindow(QMainWindow):
                 "note": self.note_combo.currentText(),
                 "octave": self.octave_slider.value(),
                 "cents": self.cents_slider.value(),
+                "pitch_start_slider": self.pitch_start.value(),
+                "pitch_end_slider": self.pitch_end.value(),
                 "loudness_start_slider": self.loud_start.value(),
                 "loudness_end_slider": self.loud_end.value(),
                 "duration_slider": self.duration_slider.value(),
@@ -2596,6 +2927,14 @@ class WaveToyWindow(QMainWindow):
                 "auto_pan_depth_slider": self.auto_pan_depth_slider.value(),
                 "auto_pan_rate": self.auto_pan_rate.value(),
                 "curve_type": self.curve_combo.currentData(),
+                "tuning_method": self.tuning_method_combo.currentData(),
+                "tuning_root_note": self.tuning_root_combo.currentText(),
+                "tuning_reference_hz": self.tuning_reference_spin.value(),
+                "muted_modules": {"paulstretch": not self.paulstretch_enabled.isChecked()},
+                "paulstretch_enabled": self.paulstretch_enabled.isChecked(),
+                "paulstretch_amount": self.paul_amount_slider.value(),
+                "paulstretch_evolution": self.paul_evolution_slider.value(),
+                "solo_wave": self._solo_wave_from_ui(),
                 "waves": {
                     wave_type: {
                         "start_db": self.wave_start_sliders[wave_type].value(),
@@ -2604,6 +2943,7 @@ class WaveToyWindow(QMainWindow):
                         "pan": self.wave_pan_sliders[wave_type].value(),
                         "spread": self.wave_width_sliders[wave_type].value(),
                         "dance": self.wave_dance_sliders[wave_type].value(),
+                        "muted": self.wave_mute_buttons[wave_type].isChecked(),
                     }
                     for wave_type in WAVE_ORDER
                 },
@@ -2697,8 +3037,11 @@ class WaveToyWindow(QMainWindow):
         self.octave_slider.setValue(int(loaded_octave * OCTAVE_SLIDER_SCALE))
         loaded_cents = float(ui.get("cents", settings.get("cents", 0.0)))
         self.cents_slider.setValue(int(loaded_cents * 100))
-        self.pitch_start.setValue(int(round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_start_hz", 440.0))) / 440.0)) * MIDI_SLIDER_SCALE)))
-        self.pitch_end.setValue(int(round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_end_hz", 440.0))) / 440.0)) * MIDI_SLIDER_SCALE)))
+        self._set_tuning_method(str(ui.get("tuning_method", settings.get("tuning_method", "equal_temperament_12"))))
+        self.tuning_root_combo.setCurrentText(str(ui.get("tuning_root_note", settings.get("tuning_root_note", "A"))))
+        self.tuning_reference_spin.setValue(float(ui.get("tuning_reference_hz", settings.get("tuning_reference_hz", 440.0))))
+        self.pitch_start.setValue(int(ui.get("pitch_start_slider", round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_start_hz", 440.0))) / 440.0)) * MIDI_SLIDER_SCALE))))
+        self.pitch_end.setValue(int(ui.get("pitch_end_slider", round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_end_hz", 440.0))) / 440.0)) * MIDI_SLIDER_SCALE))))
         self.duration_slider.setValue(int(round(float(settings.get("duration_seconds", 1.5)) * SECONDS_SLIDER_SCALE)))
         self.loud_start.setValue(self._load_scaled_value(ui.get("loudness_start_slider", 40), PERCENT_SLIDER_SCALE, 0, 100))
         self.loud_end.setValue(self._load_scaled_value(ui.get("loudness_end_slider", 40), PERCENT_SLIDER_SCALE, 0, 100))
@@ -2707,7 +3050,12 @@ class WaveToyWindow(QMainWindow):
         self.width_slider.setValue(self._load_scaled_value(ui.get("width_slider", 45), PERCENT_SLIDER_SCALE, 0, 100))
         self.auto_pan_depth_slider.setValue(self._load_scaled_value(ui.get("auto_pan_depth_slider", 0), PERCENT_SLIDER_SCALE, 0, 100))
         self.auto_pan_rate.setValue(self._load_scaled_value(ui.get("auto_pan_rate", 5), RATE_SLIDER_SCALE / 10, 0.05, 8.0))
-        self.paulstretch_enabled.setChecked(bool(ui.get("paulstretch_enabled", False)))
+        muted_modules = ui.get("muted_modules", settings.get("muted_modules", {}))
+        if not isinstance(muted_modules, dict):
+            muted_modules = {}
+        paul_enabled_default = bool(settings.get("paulstretch_enabled", False))
+        self.paulstretch_enabled.setChecked(bool(ui.get("paulstretch_enabled", paul_enabled_default)) and not bool(muted_modules.get("paulstretch", False)))
+        self._update_module_labels()
         self.paul_amount_slider.setValue(self._load_scaled_value(ui.get("paulstretch_amount", 10), PAULSTRETCH_SCALE / 10, 1, 30))
         self.paul_evolution_slider.setValue(self._load_scaled_value(ui.get("paulstretch_evolution", 15), PERCENT_SLIDER_SCALE, 0, 100))
 
@@ -2719,6 +3067,7 @@ class WaveToyWindow(QMainWindow):
         wave_pan: Dict[str, int] = {}
         wave_width: Dict[str, int] = {}
         wave_dance: Dict[str, int] = {}
+        wave_muted: Dict[str, bool] = {}
 
         for wave_type in WAVE_ORDER:
             wave_data = waves.get(wave_type, {})
@@ -2729,9 +3078,24 @@ class WaveToyWindow(QMainWindow):
                 wave_pan[wave_type] = int(wave_data.get("pan", self.wave_pan_sliders[wave_type].value()))
                 wave_width[wave_type] = int(wave_data.get("spread", self.wave_width_sliders[wave_type].value()))
                 wave_dance[wave_type] = int(wave_data.get("dance", self.wave_dance_sliders[wave_type].value()))
+                wave_muted[wave_type] = bool(wave_data.get("muted", (settings.get("wave_muted", {}) if isinstance(settings.get("wave_muted", {}), dict) else {}).get(wave_type, False)))
 
         self._set_wave_levels(start_levels, end_levels, times)
         self._set_wave_stereo(wave_pan, wave_width, wave_dance)
+        for wave_type in WAVE_ORDER:
+            button = self.wave_mute_buttons.get(wave_type)
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(bool(wave_muted.get(wave_type, False)))
+                button.setText("🤫 Quiet" if button.isChecked() else "🎵 On")
+                button.blockSignals(False)
+        solo_wave = ui.get("solo_wave", settings.get("solo_wave"))
+        for wave_type, button in self.wave_solo_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(solo_wave == wave_type)
+            button.setText("👑 Star Sound" if button.isChecked() else "⭐ Only Me")
+            button.blockSignals(False)
+        self._refresh_all_wave_card_states()
         self._generate()
 
 
