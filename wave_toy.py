@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -92,6 +93,7 @@ SLIDER_GROOVE_RADIUS = 9
 SLIDER_HANDLE_SIZE = 34
 SLIDER_HANDLE_RADIUS = 17
 SLIDER_HANDLE_MARGIN = -8
+GENERATION_DEBOUNCE_MS = 90
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 NOTE_TO_INDEX = {name: i for i, name in enumerate(NOTE_NAMES)}
@@ -808,6 +810,11 @@ class WaveToyWindow(QMainWindow):
         self.live_loop_is_refreshing = False
         self.live_loop_timer = QTimer(self)
         self.live_loop_timer.timeout.connect(self._live_loop_tick)
+        self.render_dirty = False
+        self.last_generate_reason = "startup"
+        self._generate_timer = QTimer(self)
+        self._generate_timer.setSingleShot(True)
+        self._generate_timer.timeout.connect(self._run_scheduled_generate)
 
         self.user_presets_path = Path.home() / ".wave_toy_sound_experiments.json"
         self.user_preset_buttons: List[QPushButton] = []
@@ -831,7 +838,7 @@ class WaveToyWindow(QMainWindow):
         self._build_shortcuts()
         self._apply_style()
         self._sync_note_to_pitch()
-        self._generate(update_message=True)
+        self._generate_now(reason="startup", update_message=True, force=True)
 
     def _build_actions(self) -> None:
         about = QAction("About Wave Toy", self)
@@ -923,7 +930,7 @@ class WaveToyWindow(QMainWindow):
             start_slider.setTickInterval(2 * DB_SLIDER_SCALE)
             start_slider.setMinimumWidth(90)
             start_slider.setToolTip("Starting size of this wave.")
-            start_slider.valueChanged.connect(self._generate)
+            self._connect_scheduled_generate(start_slider.valueChanged, "wave_start_slider")
             start_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
             end_label = QLabel(self._slider_picture_text(default_end[wave_type], "loudness"))
@@ -933,7 +940,7 @@ class WaveToyWindow(QMainWindow):
             end_slider.setTickInterval(2 * DB_SLIDER_SCALE)
             end_slider.setMinimumWidth(90)
             end_slider.setToolTip("Ending size of this wave.")
-            end_slider.valueChanged.connect(self._generate)
+            self._connect_scheduled_generate(end_slider.valueChanged, "wave_end_slider")
             end_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
             time_label = QLabel("🐢 Slow")
@@ -943,7 +950,7 @@ class WaveToyWindow(QMainWindow):
             time_slider.setTickInterval(10 * PERCENT_SLIDER_SCALE)
             time_slider.setMinimumWidth(90)
             time_slider.setToolTip("How slowly or quickly this wave changes.")
-            time_slider.valueChanged.connect(self._generate)
+            self._connect_scheduled_generate(time_slider.valueChanged, "wave_time_slider")
             time_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
             self.wave_start_sliders[wave_type] = start_slider
@@ -1180,7 +1187,7 @@ class WaveToyWindow(QMainWindow):
             pan_slider.setRange(-100 * PERCENT_SLIDER_SCALE, 100 * PERCENT_SLIDER_SCALE)
             pan_slider.setValue(default_wave_pan[wave_type] * PERCENT_SLIDER_SCALE)
             pan_slider.setToolTip("Where this wave sits between the left and right ear.")
-            pan_slider.valueChanged.connect(self._generate)
+            self._connect_scheduled_generate(pan_slider.valueChanged, "wave_pan_slider")
             pan_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
             width_label = QLabel("↔️ Medium")
@@ -1188,7 +1195,7 @@ class WaveToyWindow(QMainWindow):
             width_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             width_slider.setValue(65 * PERCENT_SLIDER_SCALE)
             width_slider.setToolTip("How wide this wave feels in stereo space.")
-            width_slider.valueChanged.connect(self._generate)
+            self._connect_scheduled_generate(width_slider.valueChanged, "wave_width_slider")
             width_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
             dance_label = QLabel("😴 Still")
@@ -1196,7 +1203,7 @@ class WaveToyWindow(QMainWindow):
             dance_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             dance_slider.setValue(0)
             dance_slider.setToolTip("How much this wave dances between ears.")
-            dance_slider.valueChanged.connect(self._generate)
+            self._connect_scheduled_generate(dance_slider.valueChanged, "wave_dance_slider")
             dance_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
             self.wave_pan_sliders[wave_type] = pan_slider
@@ -1267,9 +1274,6 @@ class WaveToyWindow(QMainWindow):
         self.load_button.clicked.connect(self._load_sound)
 
         widgets_to_regenerate = [
-            self.note_combo,
-            self.octave_slider,
-            self.cents_slider,
             self.duration_slider,
             self.pitch_start,
             self.pitch_end,
@@ -1292,13 +1296,13 @@ class WaveToyWindow(QMainWindow):
 
         for widget in widgets_to_regenerate:
             if isinstance(widget, QComboBox):
-                widget.currentIndexChanged.connect(self._generate)
+                self._connect_scheduled_generate(widget.currentIndexChanged, "combo_change")
             elif isinstance(widget, QSlider):
-                widget.valueChanged.connect(self._generate)
+                self._connect_scheduled_generate(widget.valueChanged, "slider_change")
             elif isinstance(widget, QCheckBox):
-                widget.stateChanged.connect(self._generate)
+                self._connect_scheduled_generate(widget.stateChanged, "checkbox_change")
             elif hasattr(widget, "valueChanged"):
-                widget.valueChanged.connect(self._generate)
+                self._connect_scheduled_generate(widget.valueChanged, "slider_change")
 
     def _toy_group(self, title: str) -> QGroupBox:
         box = QGroupBox(title)
@@ -1350,8 +1354,7 @@ class WaveToyWindow(QMainWindow):
         """
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            f"""
+        base_style = """
             QMainWindow {
                 background: #7bdff2;
             }
@@ -1418,7 +1421,6 @@ class WaveToyWindow(QMainWindow):
                 font-size: 14px;
                 background: #f9fbff;
             }
-            {self._slider_style_sheet()}
             QPushButton {
                 min-height: 34px;
                 border-radius: 14px;
@@ -1432,7 +1434,7 @@ class WaveToyWindow(QMainWindow):
                 background: #e2f2ff;
             }
             """
-        )
+        self.setStyleSheet(base_style + self._slider_style_sheet())
 
     def _db_text(self, value: int) -> str:
         db_value = value / DB_SLIDER_SCALE
@@ -1661,7 +1663,7 @@ class WaveToyWindow(QMainWindow):
         self.pitch_end.blockSignals(False)
 
         self._update_symbolic_labels()
-        self._generate()
+        self._schedule_generate("pitch_controls")
 
     def _visual_conditions_from_ui(self) -> Dict[str, Dict[str, float | bool]]:
         conditions: Dict[str, Dict[str, float | bool]] = {}
@@ -1686,7 +1688,45 @@ class WaveToyWindow(QMainWindow):
 
         return conditions
 
+    def _connect_scheduled_generate(self, signal, reason: str) -> None:
+        signal.connect(lambda *args, reason=reason: self._schedule_generate(reason))
+
+    def _schedule_generate(self, reason: str = "ui_change") -> None:
+        was_pending = self._generate_timer.isActive()
+        self.render_dirty = True
+        self.last_generate_reason = str(reason)
+        if not was_pending:
+            print(
+                f"[WaveToy] Scheduled debounced generation in {GENERATION_DEBOUNCE_MS} ms "
+                f"(reason={self.last_generate_reason})."
+            )
+        self._generate_timer.start(GENERATION_DEBOUNCE_MS)
+
+    def _run_scheduled_generate(self) -> None:
+        if not self.render_dirty:
+            return
+        self._generate_now(reason=f"debounced:{self.last_generate_reason}", force=True)
+
+    def _generate_now(self, reason: str = "direct", update_message: bool = False, force: bool = False) -> None:
+        if self._generate_timer.isActive():
+            self._generate_timer.stop()
+
+        if not self.render_dirty and not force:
+            return
+
+        generation_type = "debounced" if str(reason).startswith("debounced") else "direct"
+        start_time = time.perf_counter()
+        print(f"[WaveToy] Starting {generation_type} generation (reason={reason}).")
+        self._render_current_sound(update_message=update_message)
+        self.render_dirty = False
+        self.last_generate_reason = str(reason)
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        print(f"[WaveToy] Completed {generation_type} generation in {duration_ms:.1f} ms (reason={reason}).")
+
     def _generate(self, update_message: bool = False) -> None:
+        self._generate_now(reason="direct", update_message=update_message, force=True)
+
+    def _render_current_sound(self, update_message: bool = False) -> None:
         self._update_symbolic_labels()
         self.current_settings = self._settings_from_ui()
         audio, time_axis, freq_env, loud_env = generate_audio(self.current_settings)
@@ -2372,11 +2412,11 @@ class WaveToyWindow(QMainWindow):
 
     def _sync_duration_slider_to_spin(self, value: int) -> None:
         self._update_symbolic_labels()
-        self._generate()
+        self._schedule_generate("duration_slider")
 
     def _sync_duration_shadow_to_slider(self, value: float) -> None:
         self._update_symbolic_labels()
-        self._generate()
+        self._schedule_generate("duration_shadow")
 
     def _set_curve(self, curve_type: str) -> None:
         for index in range(self.curve_combo.count()):
