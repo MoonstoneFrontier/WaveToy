@@ -1,0 +1,52 @@
+{% macro lead_actions(lead) %}
+  <div class="lead-inline-actions" aria-label="Lead workflow actions">
+    <a class="disabled-placeholder-link" aria-disabled="true" href="#" title="Lead detail view is not available yet">
+      View Lead (detail route pending)
+    </a>
+
+    <form class="lead-action-form" method="post" action="{{ url_for('update_lead_stage', lead_id=lead.id) }}">
+      <label>
+        Update Stage
+        <select name="acquisition_stage">
+          {% for stage in ["new", "screening", "due_diligence", "offer", "closed"] %}
+            <option value="{{ stage }}" {% if lead.acquisition_stage == stage %}selected{% endif %}>{{ stage|replace('_', ' ')|title }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <input name="reason" type="text" placeholder="Reason for stage update" required>
+      <input name="actor" type="hidden" value="manual_user">
+      <input name="source" type="hidden" value="queue_ui">
+      <button class="lead-action-button" type="submit">Update Stage</button>
+    </form>
+
+    <form class="lead-action-form" method="post" action="{{ url_for('add_lead_note', lead_id=lead.id) }}">
+      <label>
+        Add Note
+        <select name="note_type">
+          <option value="general">General</option>
+          <option value="follow_up">Follow Up</option>
+          <option value="risk">Risk</option>
+        </select>
+      </label>
+      <input name="note" type="text" placeholder="Note text" required>
+      <input name="actor" type="hidden" value="manual_user">
+      <input name="source" type="hidden" value="queue_ui">
+      <button class="lead-action-button" type="submit">Add Note</button>
+    </form>
+
+    <form class="lead-action-form" method="post" action="{{ url_for('update_lead_stage', lead_id=lead.id) }}">
+      <input name="acquisition_stage" type="hidden" value="due_diligence">
+      <input name="reason" type="hidden" value="Moved from queue action to due-diligence review.">
+      <input name="actor" type="hidden" value="manual_user">
+      <input name="source" type="hidden" value="queue_ui">
+      <button class="lead-action-button" type="submit">Move To Due Diligence</button>
+    </form>
+
+    <form class="lead-action-form risk-flag-form" method="post" action="{{ url_for('flag_lead_risk', lead_id=lead.id) }}">
+      <input name="reason" type="text" placeholder="Risk reason" required>
+      <input name="actor" type="hidden" value="manual_user">
+      <input name="source" type="hidden" value="queue_ui">
+      <button class="lead-action-button" type="submit">Flag Risk</button>
+    </form>
+  </div>
+{% endmacro %}

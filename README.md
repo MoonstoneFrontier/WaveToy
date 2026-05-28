@@ -2,68 +2,62 @@
 
 WaveToy is a Python desktop audio/sci-fi soundscape generator centered on a single PySide6 GUI script. It is currently an educational waveform synthesizer for exploring sound waves, musical tuning, stereo motion, file export, and experimental Paulstretch-style ambience.
 
-This repository is intentionally being stabilized before larger playback, cancellation, debug logging, and responsiveness work. Avoid major redesigns until the audio lifecycle issues are addressed in focused follow-up tasks.
+This repository also includes a small localhost-first Flask lead workflow used for operational UI cleanup tasks. It stores lead workflow state in local JSON and does not add scraping, OCR, GIS overlays, email sending, external databases, or live source integrations.
 
-## Current entry point
+## Current WaveToy entry point
 
-Run the app from:
+Run the desktop audio app from:
 
 ```bash
 python wave_toy.py
 ```
 
-`wave_toy.py` defines `main()` and executes it under the standard `if __name__ == "__main__"` guard. Preserve this script name as the primary entry point unless a future task explicitly changes it.
+`wave_toy.py` defines `main()` and executes it under the standard `if __name__ == "__main__"` guard. Preserve this script name as the primary WaveToy entry point unless a future task explicitly changes it.
 
-`wave_toy_single_module.py` is also present and appears to contain a similar single-file implementation snapshot. Treat `wave_toy.py` as the active entry point for now.
+`wave_toy_single_module.py` is also present and appears to contain a similar single-file implementation snapshot. Treat `wave_toy.py` as the active WaveToy entry point for now.
+
+## Local lead workflow entry point
+
+Run the localhost workflow UI from:
+
+```bash
+python run_dev.py
+```
+
+Copy `.env.example` to `.env` for local development if you need to override the default host, port, logging flags, browser behavior, or Flask secret key.
 
 ## Dependencies
 
-Imports in the current Python files indicate these runtime dependencies:
+Install dependencies from `requirements.txt` before running tests. The `pytest` command requires the Flask, python-dotenv, and pytest dependencies from `requirements.txt` to be installed in the active environment.
 
-Required:
+WaveToy runtime dependencies include:
 
 - `PySide6` — GUI framework
 - `numpy` — audio/waveform array processing
+- `sounddevice` — optional direct audio playback; the app falls back when unavailable
 
-Optional:
+Optional export support for MP3/OGG/FLAC requires installing the `ffmpeg` executable with your operating system package manager and ensuring it is available on `PATH`.
 
-- `sounddevice` — direct audio playback; the app falls back when unavailable
-- `ffmpeg` executable — MP3, OGG, and FLAC export support through subprocess calls
-
-The remaining imports are from the Python standard library.
-
-## Setup with `.venv`
+## Quick start
 
 From the repository root:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install PySide6 numpy
-```
-
-Optional direct playback support:
-
-```bash
-python -m pip install sounddevice
-```
-
-Optional export support for MP3/OGG/FLAC requires installing `ffmpeg` with your operating system package manager and ensuring it is available on `PATH`.
-
-## Run
-
-```bash
-source .venv/bin/activate
-python wave_toy.py
+pip install -r requirements.txt
+pytest
+python run_dev.py
 ```
 
 ## Safe verification
 
-Before finalizing code changes, run:
+Before finalizing Python changes, run syntax checks for the touched modules:
 
 ```bash
 python -m py_compile wave_toy.py
+python3 -m py_compile app/main.py app/services/lead_pipeline_service.py app/services/lead_dedupe_service.py app/services/lead_transition_service.py
 ```
 
 For dependency visibility in a fresh environment, check whether the imported third-party packages are installed:
@@ -71,7 +65,7 @@ For dependency visibility in a fresh environment, check whether the imported thi
 ```bash
 python - <<'PY'
 import importlib.util
-for package in ['numpy', 'PySide6', 'sounddevice']:
+for package in ['numpy', 'PySide6', 'sounddevice', 'flask', 'dotenv', 'pytest']:
     print(f'{package}:', 'found' if importlib.util.find_spec(package) else 'missing')
 PY
 ```
