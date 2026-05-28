@@ -40,3 +40,5 @@ logs/
 *~
 .DS_Store
 Thumbs.db
+audio_files/
+deprecated/
