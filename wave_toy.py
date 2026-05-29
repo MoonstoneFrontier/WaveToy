@@ -100,6 +100,55 @@ GENERATION_DEBOUNCE_MS = 90
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 NOTE_TO_INDEX = {name: i for i, name in enumerate(NOTE_NAMES)}
 
+NOTE_EMOTIONS = {
+    "C": {"emoji": "🙂", "label": "Balanced", "color": "#F4F1DE"},
+    "G": {"emoji": "😁", "label": "Confident", "color": "#FFD166"},
+    "D": {"emoji": "🚀", "label": "Adventurous", "color": "#F8961E"},
+    "A": {"emoji": "🔥", "label": "Energetic", "color": "#F94144"},
+    "E": {"emoji": "⚡", "label": "Excited", "color": "#F3722C"},
+    "B": {"emoji": "🤩", "label": "Brilliant", "color": "#F9C74F"},
+    "F#": {"emoji": "🌌", "label": "Cosmic", "color": "#577590"},
+    "C#": {"emoji": "🔮", "label": "Mysterious", "color": "#6A4C93"},
+    "G#": {"emoji": "🌙", "label": "Dreamy", "color": "#4361EE"},
+    "D#": {"emoji": "🥲", "label": "Melancholy", "color": "#4D908E"},
+    "A#": {"emoji": "😢", "label": "Sad", "color": "#277DA1"},
+    "F": {"emoji": "🫂", "label": "Warm", "color": "#90BE6D"},
+}
+
+
+def note_emotion(note: str) -> Dict[str, str]:
+    return NOTE_EMOTIONS.get(note, NOTE_EMOTIONS["A"])
+
+
+def note_relationship(note: str, main_note: str) -> str:
+    fifths_order = ["C", "G", "D", "A", "E", "B", "F#", "C#", "G#", "D#", "A#", "F"]
+    if note not in fifths_order or main_note not in fifths_order:
+        return "🧭 Far Away"
+    forward = (fifths_order.index(note) - fifths_order.index(main_note)) % len(fifths_order)
+    backward = (fifths_order.index(main_note) - fifths_order.index(note)) % len(fifths_order)
+    if forward == 0:
+        return "🏠 Home"
+    if forward == 1:
+        return "🤝 Best Friend"
+    if backward == 1:
+        return "🫂 Comfort"
+    if forward == 2:
+        return "🚶 Adventure"
+    if forward == 3:
+        return "🔥 Energy"
+    if forward == 4:
+        return "⚡ Excitement"
+    if backward == 2:
+        return "😢 Tension"
+    if forward in (5, 6, 7) or backward in (5, 6, 7):
+        return "🧭 Far Away"
+    return "🌈 Partner"
+
+
+def emotional_note_text(note: str) -> str:
+    emotion = note_emotion(note)
+    return f"{emotion['emoji']} {note}"
+
 WAVE_LABELS = {
     "sine": "Smooth Wave",
     "triangle": "Mountain Wave",
@@ -1852,17 +1901,29 @@ class CircleOfFifthsNotePicker(QWidget):
     def __init__(self, accent_color: QColor | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._selected_note = "A"
+        self._main_note = "A"
         self._accent_color = QColor(accent_color or QColor("#ff8cc6"))
         self._note_bubbles: Dict[str, QRectF] = {}
-        self.setMinimumSize(QSize(310, 310))
+        self.setMinimumSize(QSize(330, 330))
+        self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setToolTip("The wheel picks the note. The Tuning Map decides how the note is spaced.")
+        self.setToolTip("The wheel picks the note. Each note has a color, mood, and relationship to Home.")
 
     def sizeHint(self) -> QSize:
         return QSize(330, 330)
 
     def selected_note(self) -> str:
         return self._selected_note
+
+    def main_note(self) -> str:
+        return self._main_note
+
+    def set_main_note(self, note: str) -> None:
+        if note not in NOTE_TO_INDEX:
+            note = "A"
+        if note != self._main_note:
+            self._main_note = note
+            self.update()
 
     def set_note(self, note: str) -> None:
         if note not in NOTE_TO_INDEX:
@@ -1881,7 +1942,8 @@ class CircleOfFifthsNotePicker(QWidget):
             angle = -math.pi / 2.0 + index * 2.0 * math.pi / len(self.FIFTHS_ORDER)
             x = center.x() + math.cos(angle) * radius
             y = center.y() + math.sin(angle) * radius
-            bubble_rects[note] = QRectF(x - bubble_radius, y - bubble_radius, bubble_radius * 2.0, bubble_radius * 2.0)
+            size = bubble_radius * (2.35 if note == self._selected_note else 2.0)
+            bubble_rects[note] = QRectF(x - size / 2.0, y - size / 2.0, size, size)
         return bubble_rects
 
     def paintEvent(self, event) -> None:
@@ -1915,29 +1977,33 @@ class CircleOfFifthsNotePicker(QWidget):
         for index, note in enumerate(self.FIFTHS_ORDER):
             bubble = self._note_bubbles[note]
             selected = note == self._selected_note
-            hue = int((index / len(self.FIFTHS_ORDER)) * 359)
-            base = QColor.fromHsv(hue, 95, 255)
-            fill = QColor(self._accent_color) if selected else QColor(base.red(), base.green(), base.blue(), 205)
-            outline = QColor("#263238") if selected else QColor(255, 255, 255, 230)
-            pen_width = 4 if selected else 2
+            emotion = note_emotion(note)
+            fill = QColor(emotion["color"])
+            if selected:
+                fill = fill.lighter(118)
+                glow = QColor(fill)
+                glow.setAlpha(115)
+                painter.setPen(QPen(glow, 9))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(bubble.adjusted(-4, -4, 4, 4))
+            outline = QColor("#263238") if selected else QColor(255, 255, 255, 235)
+            pen_width = 5 if selected else 2
 
             painter.setPen(QPen(outline, pen_width))
             painter.setBrush(fill)
-            if selected:
-                pressed = bubble.adjusted(2, 3, -2, -1)
-                painter.drawEllipse(pressed)
-                text_rect = pressed
-            else:
-                painter.drawEllipse(bubble)
-                text_rect = bubble
+            painter.drawEllipse(bubble)
 
             painter.setPen(QColor("#263238"))
-            painter.setFont(QFont("Arial", 12, QFont.Bold))
-            painter.drawText(text_rect, Qt.AlignCenter, note)
+            painter.setFont(QFont("Arial", 13 if selected else 11, QFont.Bold))
+            painter.drawText(bubble.adjusted(0, 3, 0, -16), Qt.AlignCenter, emotion["emoji"])
+            painter.setFont(QFont("Arial", 12 if selected else 10, QFont.Bold))
+            painter.drawText(bubble.adjusted(0, 20, 0, -2), Qt.AlignCenter, note)
 
-        painter.setFont(QFont("Arial", 22, QFont.Bold))
+        selected_emotion = note_emotion(self._selected_note)
+        center_text = f"Home: {emotional_note_text(self._main_note)}\n{self._selected_note} • {selected_emotion['label']}"
+        painter.setFont(QFont("Arial", 12, QFont.Bold))
         painter.setPen(QColor("#263238"))
-        painter.drawText(QRectF(center.x() - 58, center.y() - 32, 116, 64), Qt.AlignCenter, self._selected_note)
+        painter.drawText(QRectF(center.x() - 76, center.y() - 42, 152, 84), Qt.AlignCenter, center_text)
 
     def mousePressEvent(self, event) -> None:
         for note, bubble in self._bubble_rects().items():
@@ -1947,6 +2013,15 @@ class CircleOfFifthsNotePicker(QWidget):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        for note, bubble in self._bubble_rects().items():
+            if bubble.contains(event.position()):
+                emotion = note_emotion(note)
+                self.setToolTip(f"{note} — {emotion['label']} • {note_relationship(note, self._main_note)}")
+                return
+        self.setToolTip("The wheel picks the note. Each note has a color, mood, and relationship to Home.")
+        super().mouseMoveEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key_Left, Qt.Key_Up, Qt.Key_Right, Qt.Key_Down):
@@ -1965,29 +2040,60 @@ class CircleOfFifthsNotePicker(QWidget):
 
 
 class NoteWheelDialog(QDialog):
-    """Small popup dialog that hosts the circular note picker."""
+    """Small popup dialog that hosts the circular emotional note picker."""
 
-    def __init__(self, wave_name: str, selected_note: str, accent_color: QColor, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        wave_name: str,
+        selected_note: str,
+        accent_color: QColor,
+        main_note: str = "A",
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"🎡 Note Wheel - {wave_name}")
+        self.setWindowTitle(f"🎡 Emotional Note Wheel - {wave_name}")
         self.setModal(True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        helper = QLabel("Pick a note bubble. The Tuning Map decides how the note is spaced.")
+        helper = QLabel("Pick a note character. Colors show mood; relationship hints compare each note to Home.")
         helper.setObjectName("subtitle")
         helper.setWordWrap(True)
         layout.addWidget(helper)
 
+        self.center_label = QLabel()
+        self.center_label.setObjectName("symbolHint")
+        layout.addWidget(self.center_label)
+
         self.picker = CircleOfFifthsNotePicker(accent_color)
+        self.picker.set_main_note(main_note)
         self.picker.set_note(selected_note)
         layout.addWidget(self.picker)
+
+        self.selected_label = QLabel()
+        self.selected_label.setObjectName("symbolHint")
+        self.selected_label.setWordWrap(True)
+        layout.addWidget(self.selected_label)
+
+        self.picker.noteSelected.connect(lambda note: self.refresh_labels(note, self.picker.main_note()))
+        self.refresh_labels(selected_note, main_note)
 
         close_button = QPushButton("Done")
         close_button.clicked.connect(self.accept)
         layout.addWidget(close_button, 0, Qt.AlignRight)
+
+    def refresh_labels(self, selected_note: str | None = None, main_note: str | None = None) -> None:
+        if selected_note is not None:
+            self.picker.set_note(selected_note)
+        if main_note is not None:
+            self.picker.set_main_note(main_note)
+        note = self.picker.selected_note()
+        home = self.picker.main_note()
+        emotion = note_emotion(note)
+        self.center_label.setText(f"Home: {emotional_note_text(home)}")
+        self.selected_label.setText(f"Selected Note: {emotional_note_text(note)} • {emotion['label']} • {note_relationship(note, home)}")
 
 
 class WaveToyWindow(QMainWindow):
@@ -2041,6 +2147,7 @@ class WaveToyWindow(QMainWindow):
         self.wave_cents_sliders: Dict[str, QSlider] = {}
         self.wave_pitch_labels: Dict[str, QLabel] = {}
         self.wave_pitch_panels: Dict[str, QWidget] = {}
+        self.wave_emotion_labels: Dict[str, QLabel] = {}
         self.visual_panel_buttons: Dict[str, VisualPanelButton] = {}
         self.floating_toy_panels: Dict[str, QWidget] = {}
         self.note_wheel_dialogs: Dict[str, QDialog] = {}
@@ -2182,7 +2289,7 @@ class WaveToyWindow(QMainWindow):
 
             note_combo.setVisible(False)
             note_button.setMinimumWidth(76)
-            note_button.setToolTip("🎡 Pick this wave's note from the circle of fifths. The Tuning Map decides how the note is spaced.")
+            note_button.setToolTip("Energetic")
             octave_spin.setMaximumWidth(48)
             cents_slider.setMinimumWidth(94)
             note_panel_layout.addWidget(note_label, 0, 0)
@@ -2190,8 +2297,13 @@ class WaveToyWindow(QMainWindow):
             note_panel_layout.addWidget(note_combo, 1, 0)
             note_panel_layout.addWidget(note_button, 1, 0)
             note_panel_layout.addWidget(octave_spin, 1, 1)
+            emotion_label = QLabel("Mood: 🔥 Energetic • 🏠 Home")
+            emotion_label.setObjectName("tinyPitchLabel")
+            emotion_label.setWordWrap(True)
             note_panel_layout.addWidget(wiggle_label, 2, 0, 1, 2)
             note_panel_layout.addWidget(cents_slider, 3, 0, 1, 2)
+            note_panel_layout.addWidget(emotion_label, 4, 0, 1, 2)
+            self.wave_emotion_labels[wave_type] = emotion_label
             layout.addWidget(note_panel)
             self.wave_pitch_panels[wave_type] = note_panel
             return cell
@@ -2269,7 +2381,7 @@ class WaveToyWindow(QMainWindow):
             note_combo.addItems(NOTE_NAMES)
             note_combo.setCurrentText("A")
             note_combo.setToolTip("🎯 My Note for this wave when Follow Main is off.")
-            note_button = QPushButton("🎡 A")
+            note_button = QPushButton(f"🎡 {emotional_note_text('A')}")
             octave_spin = NoWheelSpinBox()
             octave_spin.setRange(0, 8)
             octave_spin.setValue(4)
@@ -2452,6 +2564,9 @@ class WaveToyWindow(QMainWindow):
 
         self.base_pitch_label = QLabel("Pitch: 🎵 ready")
         self.base_pitch_label.setObjectName("symbolHint")
+        self.note_emotion_label = QLabel("Selected Note: 🔥 A\nMood: Energetic\nRelationship: 🏠 Home")
+        self.note_emotion_label.setObjectName("symbolHint")
+        self.note_emotion_label.setWordWrap(True)
 
         self.tuning_method_combo = NoWheelComboBox()
         for method_id, method in TUNING_METHODS.items():
@@ -2491,6 +2606,7 @@ class WaveToyWindow(QMainWindow):
         pitch_layout.addWidget(QLabel("A4 Sparkle"), 8, 0)
         pitch_layout.addWidget(self.tuning_reference_spin, 8, 1)
         pitch_layout.addWidget(self.base_pitch_label, 9, 0, 1, 2)
+        pitch_layout.addWidget(self.note_emotion_label, 10, 0, 1, 2)
 
         left.addWidget(pitch_box)
 
@@ -4088,7 +4204,13 @@ class WaveToyWindow(QMainWindow):
         dialog = self.note_wheel_dialogs.get(wave_type)
         if dialog is None:
             accent = QColor(MiniWavePreview.COLORS.get(wave_type, QColor("#ff8cc6")))
-            dialog = NoteWheelDialog(WAVE_LABELS.get(wave_type, wave_type.title()), combo.currentText(), accent, self)
+            dialog = NoteWheelDialog(
+                WAVE_LABELS.get(wave_type, wave_type.title()),
+                combo.currentText(),
+                accent,
+                self.note_combo.currentText(),
+                self,
+            )
             dialog.setModal(False)
             dialog.setWindowFlag(Qt.Tool, True)
 
@@ -4101,7 +4223,7 @@ class WaveToyWindow(QMainWindow):
             dialog.picker.noteSelected.connect(choose_note)
             self.note_wheel_dialogs[wave_type] = dialog
         else:
-            dialog.picker.selected_note = combo.currentText()
+            dialog.refresh_labels(combo.currentText(), self.note_combo.currentText())
             dialog.picker.update()
 
         parent = self.floating_toy_panels.get("pitch") or self
@@ -4130,7 +4252,16 @@ class WaveToyWindow(QMainWindow):
             button.setText("👯 Follow Main" if follows else "🎯 My Note")
         note_button = self.wave_note_buttons.get(wave_type)
         if note_button is not None:
-            note_button.setText(f"🎡 {note}")
+            emotion = note_emotion(note)
+            relationship = note_relationship(note, self.note_combo.currentText() if hasattr(self, "note_combo") else note)
+            note_button.setText(f"🎡 {emotion['emoji']} {note}")
+            note_button.setToolTip(emotion["label"])
+            note_button.setStyleSheet(f"background-color: {emotion['color']}; color: #263238; font-weight: bold;")
+        emotion_label = self.wave_emotion_labels.get(wave_type)
+        if emotion_label is not None:
+            emotion = note_emotion(note)
+            relationship = note_relationship(note, self.note_combo.currentText() if hasattr(self, "note_combo") else note)
+            emotion_label.setText(f"Selected Note: {emotion['emoji']} {note}\nMood: {emotion['label']}\nRelationship: {relationship}")
         panel = self.wave_pitch_panels.get(wave_type)
         if panel is not None:
             panel.setVisible(not follows)
@@ -4212,7 +4343,20 @@ class WaveToyWindow(QMainWindow):
 
         self.octave_label.setText(self._octave_picture_text(octave))
         self.cents_label.setText(self._cents_picture_text(cents))
-        self.base_pitch_label.setText(f"Pitch: {self._pitch_picture_text(midi_value)} • {tuning_name} • {base_frequency:.1f} Hz")
+        note = self.note_combo.currentText()
+        emotion = note_emotion(note)
+        self.note_combo.setToolTip(f"{emotion['label']} • {note_relationship(note, note)}")
+        self.note_emotion_label.setText(
+            f"Selected Note: {emotional_note_text(note)}\nMood: {emotion['label']}\nRelationship: {note_relationship(note, note)}"
+        )
+        self.note_emotion_label.setStyleSheet(
+            f"background-color: {emotion['color']}; color: #263238; border-radius: 10px; padding: 6px; font-weight: bold;"
+        )
+        self.base_pitch_label.setText(
+            f"Pitch: {self._pitch_picture_text(midi_value)} • {emotional_note_text(note)} {emotion['label']} • {tuning_name} • {base_frequency:.1f} Hz"
+        )
+        for wave_type in list(self.wave_pitch_labels):
+            self._update_wave_pitch_label(wave_type)
 
         self.pitch_start.blockSignals(True)
         self.pitch_end.blockSignals(True)
