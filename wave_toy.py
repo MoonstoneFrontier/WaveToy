@@ -1077,6 +1077,69 @@ class ToyButton(QPushButton):
 
 
 
+class StoryboardClipWidget(QWidget):
+    """Large touch-friendly storyboard clip card for the Timeline tab."""
+
+    def __init__(self, icon: str, name: str, duration_text: str, wave_type: str, color: str) -> None:
+        super().__init__()
+        self.setObjectName("storyboardClip")
+        self.setCursor(Qt.OpenHandCursor)
+        self.setMinimumSize(QSize(260, 96))
+        self.setToolTip("Drag this big sound card to rearrange the storyboard. Duplicate, mute, and solo are finger-friendly buttons.")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(12)
+
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("storyboardClipIcon")
+        icon_label.setFixedSize(QSize(58, 58))
+        icon_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon_label)
+
+        waveform = MiniWavePreview(wave_type, size=QSize(108, 58))
+        waveform.set_amplitude(0.9)
+        layout.addWidget(waveform)
+
+        text_stack = QVBoxLayout()
+        text_stack.setSpacing(2)
+        name_label = QLabel(name)
+        name_label.setObjectName("storyboardClipName")
+        duration_label = QLabel(duration_text)
+        duration_label.setObjectName("storyboardClipDuration")
+        text_stack.addWidget(name_label)
+        text_stack.addWidget(duration_label)
+        layout.addLayout(text_stack, 1)
+
+        action_stack = QVBoxLayout()
+        action_stack.setSpacing(6)
+        for label in ("⧉", "🔇", "⭐"):
+            button = QPushButton(label)
+            button.setObjectName("storyboardTinyAction")
+            button.setMinimumSize(QSize(44, 44))
+            button.setToolTip({"⧉": "Duplicate this sound card.", "🔇": "Mute this sound card.", "⭐": "Solo this sound card."}[label])
+            action_stack.addWidget(button)
+        layout.addLayout(action_stack)
+        self.setStyleSheet(
+            f"""
+            QWidget#storyboardClip {{
+                background: #fff8d9;
+                border: 4px solid {color};
+                border-radius: 24px;
+            }}
+            """
+        )
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.setCursor(Qt.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+
 class NoWheelSlider(QSlider):
     """Slider that leaves mouse-wheel scrolling to parent scroll areas."""
 
@@ -2699,8 +2762,148 @@ class WaveToyWindow(QMainWindow):
 
         self._build_wave_explorer_tab()
         self._build_play_tab()
+        self._build_timeline_tab()
         if self.tabs is not None:
             self.tabs.setCurrentIndex(0)
+
+    def _make_story_button(self, icon: str, label: str, color: str, callback) -> QPushButton:
+        button = QPushButton(f"{icon}\n{label}")
+        button.setObjectName("storyTransportButton")
+        button.setMinimumSize(QSize(150, 76))
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip(label)
+        button.setStyleSheet(
+            f"""
+            QPushButton#storyTransportButton {{
+                background: {color};
+                color: #1d1d1d;
+                border: 4px solid rgba(0, 0, 0, 0.18);
+                border-radius: 24px;
+                font-size: 22px;
+                font-weight: 900;
+                min-height: 76px;
+                padding: 8px 14px;
+            }}
+            QPushButton#storyTransportButton:pressed {{
+                padding-top: 12px;
+            }}
+            """
+        )
+        button.clicked.connect(callback)
+        return button
+
+    def _build_timeline_tab(self) -> None:
+        if self.tabs is None:
+            return
+        tab = QWidget()
+        tab.setObjectName("timelineStoryboardTab")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(14)
+
+        title = QLabel("🎬 Timeline Storyboard")
+        title.setObjectName("timelineStoryboardTitle")
+        title.setAlignment(Qt.AlignCenter)
+        subtitle = QLabel("Wave Explorer → Build Sound → Drop Sound → arrange big sound cards → Mix Story.")
+        subtitle.setObjectName("timelineStoryboardSubtitle")
+        subtitle.setWordWrap(True)
+        subtitle.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        transport = QWidget()
+        transport.setObjectName("storyTransportBar")
+        transport.setMinimumHeight(64)
+        transport_layout = QHBoxLayout(transport)
+        transport_layout.setContentsMargins(12, 10, 12, 10)
+        transport_layout.setSpacing(12)
+        for button in (
+            self._make_story_button("▶️", "Play Story", "#5cdb95", self._play),
+            self._make_story_button("⏹", "Stop", "#ff6b6b", self._stop),
+            self._make_story_button("🎚", "Mix Story", "#ffd166", self._play),
+            self._make_story_button("➕", "Drop Sound", "#b8f2e6", self._drop_story_sound),
+            self._make_story_button("🛤️", "Add Lane", "#d7b9ff", self._add_story_lane),
+        ):
+            transport_layout.addWidget(button)
+        layout.addWidget(transport)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setObjectName("storyboardScroll")
+        lane_root = QWidget()
+        lane_root.setObjectName("storyboardLaneRoot")
+        self.timeline_lanes_layout = QVBoxLayout(lane_root)
+        self.timeline_lanes_layout.setContentsMargins(4, 4, 4, 4)
+        self.timeline_lanes_layout.setSpacing(12)
+        self.timeline_lane_count = 0
+        self.timeline_lane_clip_layouts: List[QHBoxLayout] = []
+        scroll.setWidget(lane_root)
+        layout.addWidget(scroll, 1)
+
+        starter_lanes = [
+            ("🎵", "Melody Lane", [("🚀", "Rocket Pitch", "2.4s", "sine", "#5cdb95"), ("⭐", "Falling Star", "1.8s", "triangle", "#ffd166")]),
+            ("🥁", "Rhythm Lane", [("🤖", "Robot Beep", "0.8s", "square", "#ff99c8")]),
+            ("🌌", "Atmosphere Lane", [("🌊", "Custom Wave", f"{self._clip_duration_seconds():.1f}s", "sawtooth", "#7bdff2")]),
+            ("✨", "Effects Lane", []),
+        ]
+        for icon, label, clips in starter_lanes:
+            self._add_story_lane(icon=icon, label=label, clips=clips)
+
+        self.tabs.insertTab(min(2, self.tabs.count()), tab, "🎬 Timeline")
+
+    def _add_story_lane(self, checked: bool = False, icon: str | None = None, label: str | None = None, clips: list | None = None) -> None:
+        if not hasattr(self, "timeline_lanes_layout"):
+            return
+        default_lanes = [("🎵", "Melody Lane"), ("🥁", "Rhythm Lane"), ("🌌", "Atmosphere Lane"), ("✨", "Effects Lane")]
+        if icon is None or label is None:
+            icon, label = default_lanes[self.timeline_lane_count % len(default_lanes)]
+        lane = QWidget()
+        lane.setObjectName("storyboardLane")
+        lane.setMinimumHeight(132)
+        lane_layout = QHBoxLayout(lane)
+        lane_layout.setContentsMargins(12, 12, 12, 12)
+        lane_layout.setSpacing(12)
+
+        header = QLabel(f"{icon}\n{label}")
+        header.setObjectName("storyboardLaneHeader")
+        header.setMinimumSize(QSize(170, 96))
+        header.setAlignment(Qt.AlignCenter)
+        lane_layout.addWidget(header)
+
+        clip_strip = QWidget()
+        clip_strip.setObjectName("storyboardClipStrip")
+        clip_layout = QHBoxLayout(clip_strip)
+        clip_layout.setContentsMargins(8, 8, 8, 8)
+        clip_layout.setSpacing(12)
+        lane_layout.addWidget(clip_strip, 1)
+        clip_layout.addStretch(1)
+        self.timeline_lanes_layout.addWidget(lane)
+        self.timeline_lane_clip_layouts.append(clip_layout)
+        self.timeline_lane_count += 1
+
+        for clip in clips or []:
+            self._add_story_clip(clip_layout, *clip)
+
+    def _add_story_clip(self, lane_layout: QHBoxLayout, icon: str, name: str, duration: str, wave_type: str, color: str) -> None:
+        clip = StoryboardClipWidget(icon, name, duration, wave_type, color)
+        lane_layout.insertWidget(max(0, lane_layout.count() - 1), clip)
+
+    def _drop_story_sound(self, checked: bool = False) -> None:
+        if not getattr(self, "timeline_lane_clip_layouts", None):
+            return
+        icons = ["🌊", "🚀", "⭐", "🤖"]
+        names = ["Custom Wave", "Rocket Pitch", "Falling Star", "Robot Beep"]
+        waves = ["sine", "triangle", "sawtooth", "square"]
+        index = sum(max(0, lane.count() - 1) for lane in self.timeline_lane_clip_layouts) % len(icons)
+        self._add_story_clip(
+            self.timeline_lane_clip_layouts[0],
+            icons[index],
+            names[index],
+            f"{self._clip_duration_seconds():.1f}s",
+            waves[index],
+            ["#7bdff2", "#5cdb95", "#ffd166", "#ff99c8"][index],
+        )
 
     def _build_play_tab(self) -> None:
         if self.tabs is None:
@@ -3334,8 +3537,80 @@ class WaveToyWindow(QMainWindow):
             QTabBar::tab:selected {
                 background: #ffffff;
             }
-            QWidget#waveExplorerTab, QWidget#playTab {
+            QWidget#waveExplorerTab, QWidget#playTab, QWidget#timelineStoryboardTab {
                 background: #7bdff2;
+            }
+            QLabel#timelineStoryboardTitle {
+                font-size: 48px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#timelineStoryboardSubtitle {
+                font-size: 20px;
+                font-weight: 900;
+                color: #37474f;
+            }
+            QWidget#storyTransportBar {
+                background: rgba(255, 255, 255, 0.72);
+                border: 5px solid rgba(255, 153, 200, 0.58);
+                border-radius: 28px;
+            }
+            QPushButton#storyTransportButton {
+                min-height: 64px;
+                font-size: 20px;
+                font-weight: 900;
+                border-radius: 24px;
+                padding: 8px 14px;
+            }
+            QScrollArea#storyboardScroll, QWidget#storyboardLaneRoot {
+                background: transparent;
+            }
+            QWidget#storyboardLane {
+                background: #eefbff;
+                border: 5px solid rgba(123, 223, 242, 0.78);
+                border-radius: 28px;
+            }
+            QLabel#storyboardLaneHeader {
+                background: #ffffff;
+                border: 4px solid rgba(0, 0, 0, 0.14);
+                border-radius: 24px;
+                color: #263238;
+                font-size: 22px;
+                font-weight: 900;
+                padding: 8px;
+            }
+            QWidget#storyboardClipStrip {
+                background: rgba(255, 255, 255, 0.62);
+                border: 3px dashed rgba(0, 0, 0, 0.12);
+                border-radius: 22px;
+            }
+            QWidget#storyboardClip {
+                background: #fff8d9;
+                border: 4px solid rgba(255, 153, 200, 0.82);
+                border-radius: 24px;
+            }
+            QLabel#storyboardClipIcon {
+                font-size: 42px;
+                background: #ffffff;
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: 18px;
+            }
+            QLabel#storyboardClipName {
+                font-size: 20px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#storyboardClipDuration {
+                font-size: 16px;
+                font-weight: 900;
+                color: #607d8b;
+            }
+            QPushButton#storyboardTinyAction {
+                min-width: 44px;
+                min-height: 44px;
+                border-radius: 16px;
+                font-size: 20px;
+                padding: 0;
             }
             QWidget#toyFloatingPanel {
                 background: #fff8d9;
