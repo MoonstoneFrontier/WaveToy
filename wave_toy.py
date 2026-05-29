@@ -36,10 +36,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import wave
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 
 import numpy as np
 
@@ -67,6 +68,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QDoubleSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -1913,6 +1915,599 @@ class NoteWheelDialog(QDialog):
         layout.addWidget(close_button, 0, Qt.AlignRight)
 
 
+DEFAULT_TIMELINE_TRACK_NAMES = ["🎵 Melody Lane", "🥁 Rhythm Lane", "🌌 Atmosphere Lane", "✨ Effects Lane"]
+
+
+@dataclass
+class TimelineClip:
+    """In-memory audio clip placed on the WaveToy timeline."""
+
+    id: str
+    name: str
+    audio_data: np.ndarray
+    sample_rate: int
+    start_time_seconds: float
+    duration_seconds: float
+    track_index: int
+    gain: float = 1.0
+    muted: bool = False
+    color: str = "#ff8fab"
+    source_recipe_snapshot: Dict[str, object] = field(default_factory=dict)
+    waveform_peaks: List[float] = field(default_factory=list)
+
+    def metadata(self) -> Dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "sample_rate": self.sample_rate,
+            "start_time_seconds": self.start_time_seconds,
+            "duration_seconds": self.duration_seconds,
+            "track_index": self.track_index,
+            "gain": self.gain,
+            "muted": self.muted,
+            "color": self.color,
+            "source_recipe_snapshot": self.source_recipe_snapshot,
+        }
+
+
+@dataclass
+class TimelineTrack:
+    index: int
+    name: str
+    muted: bool = False
+    soloed: bool = False
+    gain: float = 1.0
+
+
+@dataclass
+class TimelineArrangement:
+    clips: List[TimelineClip] = field(default_factory=list)
+    tracks: List[TimelineTrack] = field(default_factory=list)
+    total_duration_seconds: float = 8.0
+    bpm_optional_future: float | None = None
+    sample_rate: int = SAMPLE_RATE
+
+    def __post_init__(self) -> None:
+        if not self.tracks:
+            self.tracks = [TimelineTrack(index=i, name=name) for i, name in enumerate(DEFAULT_TIMELINE_TRACK_NAMES)]
+
+    def track_for_index(self, index: int) -> TimelineTrack | None:
+        for track in self.tracks:
+            if track.index == index:
+                return track
+        return None
+
+    def add_track(self) -> TimelineTrack:
+        next_index = max((track.index for track in self.tracks), default=-1) + 1
+        track = TimelineTrack(index=next_index, name=f"✨ Extra Lane {next_index + 1}")
+        self.tracks.append(track)
+        return track
+
+    def update_duration(self) -> None:
+        clip_end = max((clip.start_time_seconds + clip.duration_seconds for clip in self.clips), default=0.0)
+        self.total_duration_seconds = max(8.0, clip_end + 1.0)
+
+    def mixdown(self) -> np.ndarray:
+        self.update_duration()
+        total_samples = max(1, int(math.ceil(self.total_duration_seconds * self.sample_rate)))
+        mix = np.zeros((total_samples, 2), dtype=np.float32)
+        soloed_tracks = {track.index for track in self.tracks if track.soloed}
+
+        for clip in self.clips:
+            if clip.muted or clip.audio_data.size == 0:
+                continue
+            track = self.track_for_index(clip.track_index)
+            if track is None or track.muted or (soloed_tracks and track.index not in soloed_tracks):
+                continue
+
+            audio = np.asarray(clip.audio_data, dtype=np.float32)
+            if audio.ndim == 1:
+                audio = np.column_stack([audio, audio])
+            elif audio.shape[1] == 1:
+                audio = np.repeat(audio, 2, axis=1)
+            elif audio.shape[1] > 2:
+                audio = audio[:, :2]
+
+            start = max(0, int(round(clip.start_time_seconds * self.sample_rate)))
+            end = min(total_samples, start + audio.shape[0])
+            if end <= start:
+                continue
+            mix[start:end] += audio[: end - start] * float(clip.gain) * float(track.gain)
+
+        peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+        if peak > 0.98:
+            mix = mix * (0.98 / peak)
+        return mix.astype(np.float32)
+
+    def metadata(self) -> Dict[str, object]:
+        return {
+            "sample_rate": self.sample_rate,
+            "total_duration_seconds": self.total_duration_seconds,
+            "bpm_optional_future": self.bpm_optional_future,
+            "tracks": [asdict(track) for track in self.tracks],
+            "clips": [clip.metadata() for clip in self.clips],
+            "note": "Audio arrays are session-only and are intentionally not embedded in JSON metadata.",
+        }
+
+
+class TimelineCanvas(QWidget):
+    clipSelected = Signal(str)
+    clipMoved = Signal(str, float, int)
+    playheadChanged = Signal(float)
+
+    def __init__(self, arrangement: TimelineArrangement, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.arrangement = arrangement
+        self.selected_clip_id: str | None = None
+        self.playhead_seconds = 0.0
+        self.pixels_per_second = 110.0
+        self.header_width = 120
+        self.ruler_height = 34
+        self.track_height = 74
+        self._drag_clip_id: str | None = None
+        self._drag_offset_seconds = 0.0
+        self.setMinimumSize(QSize(760, 360))
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._refresh_size()
+
+    def set_zoom(self, pixels_per_second: float) -> None:
+        self.pixels_per_second = float(np.clip(pixels_per_second, 40.0, 360.0))
+        self._refresh_size()
+        self.update()
+
+    def set_playhead(self, seconds: float) -> None:
+        self.playhead_seconds = max(0.0, seconds)
+        self.update()
+
+    def _refresh_size(self) -> None:
+        self.arrangement.update_duration()
+        width = int(self.header_width + self.arrangement.total_duration_seconds * self.pixels_per_second + 180)
+        height = int(self.ruler_height + max(1, len(self.arrangement.tracks)) * self.track_height + 20)
+        self.setMinimumSize(QSize(width, height))
+        self.resize(width, height)
+
+    def _clip_rect(self, clip: TimelineClip) -> QRectF:
+        x = self.header_width + clip.start_time_seconds * self.pixels_per_second
+        y = self.ruler_height + clip.track_index * self.track_height + 9
+        w = max(18.0, clip.duration_seconds * self.pixels_per_second)
+        h = self.track_height - 18
+        return QRectF(x, y, w, h)
+
+    def _clip_at(self, pos) -> TimelineClip | None:
+        for clip in reversed(self.arrangement.clips):
+            if self._clip_rect(clip).contains(pos):
+                return clip
+        return None
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#eefbff"))
+
+        painter.fillRect(QRectF(0, 0, self.width(), self.ruler_height), QColor("#d7f3ff"))
+        painter.setPen(QPen(QColor("#455a64"), 1))
+        seconds = int(math.ceil(self.arrangement.total_duration_seconds)) + 1
+        for second in range(seconds + 1):
+            x = self.header_width + second * self.pixels_per_second
+            painter.drawLine(int(x), 0, int(x), self.ruler_height)
+            painter.drawText(QRectF(x + 4, 5, 80, 22), Qt.AlignLeft | Qt.AlignVCenter, f"{second}s")
+
+        for row, track in enumerate(self.arrangement.tracks):
+            y = self.ruler_height + row * self.track_height
+            bg = QColor("#ffffff") if row % 2 == 0 else QColor("#f7fbff")
+            if track.muted:
+                bg = QColor("#eceff1")
+            elif track.soloed:
+                bg = QColor("#fff8d9")
+            painter.fillRect(QRectF(0, y, self.width(), self.track_height), bg)
+            painter.setPen(QPen(QColor("#cfd8dc"), 1))
+            painter.drawLine(0, y, self.width(), y)
+            painter.fillRect(QRectF(0, y, self.header_width, self.track_height), QColor("#ffffff"))
+            painter.setPen(QColor("#263238"))
+            status = ""
+            if track.muted:
+                status = " 🔇"
+            elif track.soloed:
+                status = " ⭐"
+            painter.drawText(QRectF(10, y + 8, self.header_width - 18, 28), Qt.AlignLeft | Qt.AlignVCenter, track.name + status)
+            painter.setPen(QColor("#607d8b"))
+            painter.drawText(QRectF(10, y + 36, self.header_width - 18, 24), Qt.AlignLeft | Qt.AlignVCenter, f"Gain {track.gain:.2f}")
+
+        for clip in self.arrangement.clips:
+            rect = self._clip_rect(clip)
+            color = QColor(clip.color)
+            if clip.muted:
+                color = QColor("#b0bec5")
+            painter.setPen(QPen(QColor("#263238"), 3 if clip.id == self.selected_clip_id else 1))
+            painter.setBrush(color)
+            painter.drawRoundedRect(rect, 12, 12)
+            painter.setPen(QColor("#263238"))
+            painter.drawText(rect.adjusted(8, 4, -8, -rect.height() / 2), Qt.AlignLeft | Qt.AlignVCenter, clip.name)
+            self._draw_waveform_preview(painter, rect.adjusted(8, 26, -8, -8), clip)
+
+        play_x = self.header_width + self.playhead_seconds * self.pixels_per_second
+        painter.setPen(QPen(QColor("#ff2f91"), 3))
+        painter.drawLine(int(play_x), 0, int(play_x), self.height())
+
+    def _draw_waveform_preview(self, painter: QPainter, rect: QRectF, clip: TimelineClip) -> None:
+        if not clip.waveform_peaks or rect.width() <= 4:
+            return
+        painter.setPen(QPen(QColor(255, 255, 255, 190), 2))
+        center = rect.center().y()
+        for i, peak in enumerate(clip.waveform_peaks):
+            x = rect.left() + (i / max(1, len(clip.waveform_peaks) - 1)) * rect.width()
+            y = float(peak) * rect.height() * 0.45
+            painter.drawLine(QPointF(x, center - y), QPointF(x, center + y))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+        pos = event.position()
+        clip = self._clip_at(pos)
+        if clip is not None:
+            self.selected_clip_id = clip.id
+            self._drag_clip_id = clip.id
+            self._drag_offset_seconds = max(0.0, (pos.x() - self.header_width) / self.pixels_per_second) - clip.start_time_seconds
+            self.clipSelected.emit(clip.id)
+        else:
+            self.selected_clip_id = None
+            self._drag_clip_id = None
+            self.clipSelected.emit("")
+            seconds = max(0.0, (pos.x() - self.header_width) / self.pixels_per_second)
+            self.set_playhead(seconds)
+            self.playheadChanged.emit(seconds)
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self._drag_clip_id:
+            return super().mouseMoveEvent(event)
+        pos = event.position()
+        start = max(0.0, (pos.x() - self.header_width) / self.pixels_per_second - self._drag_offset_seconds)
+        track = int((pos.y() - self.ruler_height) // self.track_height)
+        track = int(np.clip(track, 0, max(0, len(self.arrangement.tracks) - 1)))
+        self.clipMoved.emit(self._drag_clip_id, start, track)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._drag_clip_id = None
+        self.arrangement.update_duration()
+        self.update()
+        super().mouseReleaseEvent(event)
+
+
+class TimelineEditorWidget(QWidget):
+    def __init__(
+        self,
+        get_current_audio: Callable[[], np.ndarray],
+        get_recipe_snapshot: Callable[[], Dict[str, object]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.get_current_audio = get_current_audio
+        self.get_recipe_snapshot = get_recipe_snapshot
+        self.arrangement = TimelineArrangement()
+        self.selected_clip_id: str | None = None
+        self.last_rendered_mix = np.zeros((1, 2), dtype=np.float32)
+        self._play_start_monotonic = 0.0
+        self._play_duration_seconds = 0.0
+        self._build_ui()
+
+        self.play_timer = QTimer(self)
+        self.play_timer.timeout.connect(self._advance_playhead)
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        transport = QHBoxLayout()
+        self.play_button = QPushButton("▶️ Play Story")
+        self.stop_button = QPushButton("⏹ Stop")
+        self.render_button = QPushButton("🎚 Mix Story")
+        self.add_clip_button = QPushButton("➕ Drop Current Sound")
+        self.add_track_button = QPushButton("➕ Add Lane")
+        self.zoom_in_button = QPushButton("🔍 Zoom In")
+        self.zoom_out_button = QPushButton("🔎 Zoom Out")
+        self.time_label = QLabel("Playhead: 0.00s")
+        for button in [self.play_button, self.stop_button, self.render_button, self.add_clip_button, self.add_track_button, self.zoom_in_button, self.zoom_out_button]:
+            transport.addWidget(button)
+        transport.addStretch(1)
+        transport.addWidget(self.time_label)
+        layout.addLayout(transport)
+
+        middle = QHBoxLayout()
+        self.track_header_panel = QWidget()
+        self.track_header_layout = QVBoxLayout(self.track_header_panel)
+        self.track_header_layout.setContentsMargins(0, 34, 4, 0)
+        self.track_header_layout.setSpacing(0)
+        middle.addWidget(self.track_header_panel, 0)
+
+        self.canvas = TimelineCanvas(self.arrangement)
+        self.canvas.clipSelected.connect(self._select_clip)
+        self.canvas.clipMoved.connect(self._move_clip)
+        self.canvas.playheadChanged.connect(self._set_playhead)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setWidget(self.canvas)
+        middle.addWidget(scroll, 1)
+        layout.addLayout(middle, 1)
+
+        inspector = self._build_inspector()
+        layout.addWidget(inspector)
+
+        self.play_button.clicked.connect(self.play_arrangement)
+        self.stop_button.clicked.connect(self.stop_arrangement)
+        self.render_button.clicked.connect(self.render_mix)
+        self.add_clip_button.clicked.connect(self.add_current_sound_as_clip)
+        self.add_track_button.clicked.connect(self.add_track)
+        self.zoom_in_button.clicked.connect(lambda: self.canvas.set_zoom(self.canvas.pixels_per_second * 1.25))
+        self.zoom_out_button.clicked.connect(lambda: self.canvas.set_zoom(self.canvas.pixels_per_second / 1.25))
+        self._refresh_track_headers()
+        self._refresh_inspector()
+
+    def _build_inspector(self) -> QGroupBox:
+        box = QGroupBox("Selected Sound Block / Lane Inspector")
+        box.setObjectName("toyGroup")
+        row = QHBoxLayout(box)
+        self.selected_label = QLabel("No clip selected")
+        self.gain_spin = NoWheelDoubleSpinBox()
+        self.gain_spin.setRange(0.0, 2.0)
+        self.gain_spin.setSingleStep(0.05)
+        self.gain_spin.setValue(1.0)
+        self.mute_clip_check = QCheckBox("Mute sound block")
+        self.duplicate_button = QPushButton("Duplicate Block")
+        self.delete_button = QPushButton("Delete Block")
+        self.export_button = QPushButton("Export Last Mix")
+        row.addWidget(self.selected_label, 2)
+        row.addWidget(QLabel("Gain"))
+        row.addWidget(self.gain_spin)
+        row.addWidget(self.mute_clip_check)
+        row.addWidget(self.duplicate_button)
+        row.addWidget(self.delete_button)
+        row.addWidget(self.export_button)
+        self.gain_spin.valueChanged.connect(self._update_selected_gain)
+        self.mute_clip_check.stateChanged.connect(self._update_selected_mute)
+        self.duplicate_button.clicked.connect(self.duplicate_selected_clip)
+        self.delete_button.clicked.connect(self.delete_selected_clip)
+        self.export_button.clicked.connect(self.export_last_mix)
+        return box
+
+    def _refresh_track_headers(self) -> None:
+        while self.track_header_layout.count():
+            item = self.track_header_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for track in self.arrangement.tracks:
+            row = QWidget()
+            row.setFixedHeight(self.canvas.track_height)
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(4, 4, 4, 4)
+            name = QLabel(track.name)
+            mute = QCheckBox("Mute")
+            solo = QCheckBox("Solo")
+            mute.setChecked(track.muted)
+            solo.setChecked(track.soloed)
+            mute.stateChanged.connect(lambda state, t=track: self._set_track_mute(t, state == Qt.CheckState.Checked.value))
+            solo.stateChanged.connect(lambda state, t=track: self._set_track_solo(t, state == Qt.CheckState.Checked.value))
+            toggles = QHBoxLayout()
+            toggles.addWidget(mute)
+            toggles.addWidget(solo)
+            row_layout.addWidget(name)
+            row_layout.addLayout(toggles)
+            self.track_header_layout.addWidget(row)
+        self.track_header_layout.addStretch(1)
+        self.canvas.update()
+
+    def _make_waveform_peaks(self, audio: np.ndarray, bins: int = 96) -> List[float]:
+        if audio.size == 0:
+            return []
+        mono = np.mean(np.asarray(audio, dtype=np.float32), axis=1) if audio.ndim > 1 else np.asarray(audio, dtype=np.float32)
+        chunks = np.array_split(np.abs(mono), bins)
+        return [float(np.max(chunk)) if chunk.size else 0.0 for chunk in chunks]
+
+    def _find_clip(self, clip_id: str | None) -> TimelineClip | None:
+        for clip in self.arrangement.clips:
+            if clip.id == clip_id:
+                return clip
+        return None
+
+    def _selected_track_index(self) -> int:
+        clip = self._find_clip(self.selected_clip_id)
+        if clip is not None:
+            return clip.track_index
+        return self.arrangement.tracks[0].index if self.arrangement.tracks else 0
+
+    def add_current_sound_as_clip(self) -> None:
+        audio = np.asarray(self.get_current_audio(), dtype=np.float32)
+        if audio.size == 0:
+            QMessageBox.warning(self, "No sound yet", "Make a sound first, then add it to the timeline.")
+            return
+        audio = np.array(audio, dtype=np.float32, copy=True)
+        if audio.ndim == 1:
+            audio = np.column_stack([audio, audio])
+        duration = audio.shape[0] / SAMPLE_RATE
+        colors = ["#ff8fab", "#ffd166", "#7bdff2", "#b8f7d4", "#cdb4db", "#ffafcc"]
+        clip = TimelineClip(
+            id=str(uuid.uuid4()),
+            name=f"WaveToy Clip {len(self.arrangement.clips) + 1}",
+            audio_data=audio,
+            sample_rate=SAMPLE_RATE,
+            start_time_seconds=self.canvas.playhead_seconds,
+            duration_seconds=duration,
+            track_index=self._selected_track_index(),
+            color=colors[len(self.arrangement.clips) % len(colors)],
+            source_recipe_snapshot=self.get_recipe_snapshot(),
+            waveform_peaks=self._make_waveform_peaks(audio),
+        )
+        self.arrangement.clips.append(clip)
+        self._select_clip(clip.id)
+        self.arrangement.update_duration()
+        self.canvas._refresh_size()
+        self.canvas.update()
+
+    def add_track(self) -> None:
+        self.arrangement.add_track()
+        self._refresh_track_headers()
+        self.canvas._refresh_size()
+
+    def _select_clip(self, clip_id: str) -> None:
+        self.selected_clip_id = clip_id or None
+        self.canvas.selected_clip_id = self.selected_clip_id
+        self._refresh_inspector()
+        self.canvas.update()
+
+    def _move_clip(self, clip_id: str, start: float, track_index: int) -> None:
+        clip = self._find_clip(clip_id)
+        if clip is None:
+            return
+        clip.start_time_seconds = max(0.0, start)
+        clip.track_index = int(track_index)
+        self.arrangement.update_duration()
+        self.canvas.update()
+
+    def _refresh_inspector(self) -> None:
+        clip = self._find_clip(self.selected_clip_id)
+        enabled = clip is not None
+        for widget in [self.gain_spin, self.mute_clip_check, self.duplicate_button, self.delete_button]:
+            widget.setEnabled(enabled)
+        if clip is None:
+            self.selected_label.setText("No clip selected")
+            self.gain_spin.blockSignals(True)
+            self.gain_spin.setValue(1.0)
+            self.gain_spin.blockSignals(False)
+            self.mute_clip_check.blockSignals(True)
+            self.mute_clip_check.setChecked(False)
+            self.mute_clip_check.blockSignals(False)
+            return
+        self.selected_label.setText(f"{clip.name} • Track {clip.track_index + 1} • {clip.start_time_seconds:.2f}s")
+        self.gain_spin.blockSignals(True)
+        self.gain_spin.setValue(float(clip.gain))
+        self.gain_spin.blockSignals(False)
+        self.mute_clip_check.blockSignals(True)
+        self.mute_clip_check.setChecked(clip.muted)
+        self.mute_clip_check.blockSignals(False)
+
+    def _update_selected_gain(self, value: float) -> None:
+        clip = self._find_clip(self.selected_clip_id)
+        if clip is not None:
+            clip.gain = float(value)
+            self.canvas.update()
+
+    def _update_selected_mute(self, state: int) -> None:
+        clip = self._find_clip(self.selected_clip_id)
+        if clip is not None:
+            clip.muted = state == Qt.CheckState.Checked.value
+            self.canvas.update()
+
+    def duplicate_selected_clip(self) -> None:
+        clip = self._find_clip(self.selected_clip_id)
+        if clip is None:
+            return
+        duplicate = TimelineClip(
+            id=str(uuid.uuid4()),
+            name=f"{clip.name} Copy",
+            audio_data=np.array(clip.audio_data, copy=True),
+            sample_rate=clip.sample_rate,
+            start_time_seconds=clip.start_time_seconds + clip.duration_seconds,
+            duration_seconds=clip.duration_seconds,
+            track_index=clip.track_index,
+            gain=clip.gain,
+            muted=clip.muted,
+            color=clip.color,
+            source_recipe_snapshot=dict(clip.source_recipe_snapshot),
+            waveform_peaks=list(clip.waveform_peaks),
+        )
+        self.arrangement.clips.append(duplicate)
+        self._select_clip(duplicate.id)
+        self.arrangement.update_duration()
+        self.canvas.update()
+
+    def delete_selected_clip(self) -> None:
+        if not self.selected_clip_id:
+            return
+        self.arrangement.clips = [clip for clip in self.arrangement.clips if clip.id != self.selected_clip_id]
+        self._select_clip("")
+        self.arrangement.update_duration()
+        self.canvas.update()
+
+    def _set_track_mute(self, track: TimelineTrack, muted: bool) -> None:
+        track.muted = muted
+        self.canvas.update()
+
+    def _set_track_solo(self, track: TimelineTrack, soloed: bool) -> None:
+        track.soloed = soloed
+        self.canvas.update()
+
+    def _set_playhead(self, seconds: float) -> None:
+        self.canvas.set_playhead(seconds)
+        self.time_label.setText(f"Playhead: {seconds:.2f}s")
+
+    def render_mix(self) -> np.ndarray:
+        self.last_rendered_mix = self.arrangement.mixdown()
+        duration = len(self.last_rendered_mix) / SAMPLE_RATE
+        self.time_label.setText(f"Mixed story: {duration:.2f}s, {len(self.arrangement.clips)} clips")
+        return self.last_rendered_mix
+
+    def play_arrangement(self) -> None:
+        if sd is None:
+            QMessageBox.warning(self, "Playback unavailable", "Arrangement playback requires sounddevice. Run: pip install sounddevice")
+            return
+        mix = self.render_mix()
+        if mix.size == 0:
+            return
+        try:
+            sd.stop()
+            sd.play(mix, SAMPLE_RATE, blocking=False)
+            self._play_start_monotonic = time.monotonic() - self.canvas.playhead_seconds
+            self._play_duration_seconds = len(mix) / SAMPLE_RATE
+            self.play_timer.start(30)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not play arrangement", str(exc))
+
+    def stop_arrangement(self) -> None:
+        self.play_timer.stop()
+        if sd is not None:
+            try:
+                sd.stop()
+            except Exception:
+                pass
+
+    def _advance_playhead(self) -> None:
+        seconds = max(0.0, time.monotonic() - self._play_start_monotonic)
+        self._set_playhead(seconds)
+        if seconds >= self._play_duration_seconds:
+            self.play_timer.stop()
+
+    def export_last_mix(self) -> None:
+        mix = self.render_mix()
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Timeline Mix",
+            "wave_toy_arrangement.wav",
+            "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.suffix:
+            if "Ogg" in selected_filter:
+                path = path.with_suffix(".ogg")
+            elif "MP3" in selected_filter:
+                path = path.with_suffix(".mp3")
+            elif "FLAC" in selected_filter:
+                path = path.with_suffix(".flac")
+            else:
+                path = path.with_suffix(".wav")
+        try:
+            save_audio_file(path, mix, SAMPLE_RATE)
+            metadata_path = path.with_suffix(path.suffix + ".wave-toy-arrangement.json")
+            metadata_path.write_text(json.dumps(self.arrangement.metadata(), indent=2), encoding="utf-8")
+            QMessageBox.information(self, "Timeline exported", f"Saved mix to:\n{path}\n\nSaved arrangement metadata to:\n{metadata_path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not export timeline mix", str(exc))
+
+
 class WaveToyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1999,10 +2594,48 @@ class WaveToyWindow(QMainWindow):
         loop_shortcut.activated.connect(self._toggle_live_loop)
 
     def _build_ui(self) -> None:
+        tabs = QTabWidget()
+        self.main_tabs = tabs
+        self.setCentralWidget(tabs)
+
+        play_tab = QWidget()
+        play_layout = QVBoxLayout(play_tab)
+        play_layout.setContentsMargins(16, 14, 16, 14)
+        play_layout.setSpacing(12)
+        play_title = QLabel("🎛 Play")
+        play_title.setObjectName("title")
+        play_subtitle = QLabel("Make, stop, save, and load WaveToy sounds. Space = play. Shift+Space = live loop.")
+        play_subtitle.setObjectName("subtitle")
+        play_hint = QLabel("Use the Wave Explorer and Classic Editor tabs to shape a sound, then drop it into the Timeline as a story block.")
+        play_hint.setObjectName("explain")
+        play_hint.setWordWrap(True)
+        play_layout.addWidget(play_title)
+        play_layout.addWidget(play_subtitle)
+        play_layout.addWidget(play_hint)
+        play_layout.addStretch(1)
+        tabs.addTab(play_tab, "🎛 Play")
+
+        explorer_scroll = QScrollArea()
+        explorer_scroll.setWidgetResizable(True)
+        explorer_scroll.setFrameShape(QScrollArea.NoFrame)
+        explorer_root = QWidget()
+        explorer_root.setMinimumSize(QSize(1060, 560))
+        explorer_scroll.setWidget(explorer_root)
+        explorer_outer = QVBoxLayout(explorer_root)
+        explorer_outer.setContentsMargins(16, 14, 16, 14)
+        explorer_outer.setSpacing(10)
+        explorer_title = QLabel("🌊 Wave Explorer")
+        explorer_title.setObjectName("title")
+        explorer_subtitle = QLabel("Watch the sound and open toy panels around the explorer without leaving this tab.")
+        explorer_subtitle.setObjectName("subtitle")
+        explorer_outer.addWidget(explorer_title)
+        explorer_outer.addWidget(explorer_subtitle)
+        self._build_visual_dashboard(explorer_outer)
+        tabs.addTab(explorer_scroll, "🌊 Wave Explorer")
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        self.setCentralWidget(scroll)
 
         root = QWidget()
         root.setMinimumSize(QSize(1060, 720))
@@ -2012,15 +2645,14 @@ class WaveToyWindow(QMainWindow):
         outer.setContentsMargins(16, 14, 16, 14)
         outer.setSpacing(10)
 
-        title = QLabel("🌈 Wave Toy")
+        title = QLabel("🧰 Classic Editor")
         title.setObjectName("title")
 
-        subtitle = QLabel("Build sounds by shaping waves! Space = play. Shift+Space = live loop. Fine sliders use picture labels.")
+        subtitle = QLabel("Full fallback editor for shaping waves, tuning, stereo motion, Paulstretch, presets, and recipes.")
         subtitle.setObjectName("subtitle")
 
         outer.addWidget(title)
         outer.addWidget(subtitle)
-        self._build_visual_dashboard(outer)
 
         body = QHBoxLayout()
         body.setSpacing(16)
@@ -2594,7 +3226,7 @@ class WaveToyWindow(QMainWindow):
 
         controls = QHBoxLayout()
         controls.setSpacing(12)
-        outer.addLayout(controls)
+        play_layout.addLayout(controls)
 
         self.make_button = ToyButton("▶ Make Sound!", "#5cdb95")
         self.stop_button = ToyButton("■ Stop!", "#ff6b6b")
@@ -2676,7 +3308,24 @@ class WaveToyWindow(QMainWindow):
             else:
                 widget.valueChanged.connect(lambda *args: self._update_all_wave_previews())
 
+        tabs.addTab(scroll, "🧰 Classic Editor")
+
+        self.timeline_editor = TimelineEditorWidget(
+            self._timeline_current_audio,
+            self._timeline_recipe_snapshot,
+            self,
+        )
+        tabs.insertTab(2, self.timeline_editor, "🎬 Timeline")
+
         self._activate_dashboard_workspace("shape")
+
+    def _timeline_current_audio(self) -> np.ndarray:
+        if self.current_audio.size <= 2:
+            self._generate()
+        return self.current_audio
+
+    def _timeline_recipe_snapshot(self) -> Dict[str, object]:
+        return self._settings_to_recipe("timeline_clip")
 
     def _build_visual_dashboard(self, outer: QVBoxLayout) -> None:
         dashboard = self._toy_group("🐙 Wave Explorer Dashboard")
