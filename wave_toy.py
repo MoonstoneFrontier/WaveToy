@@ -240,6 +240,36 @@ TUNING_METHODS = {
 }
 
 
+
+
+@dataclass
+class TimelineClip:
+    """Audio clip placed on the Timeline storyboard."""
+
+    clip_id: int
+    name: str
+    audio: np.ndarray
+    start_time_seconds: float
+    lane: int
+    sample_rate: int = SAMPLE_RATE
+    recipe: Dict[str, object] | None = None
+
+    @property
+    def duration_seconds(self) -> float:
+        return max(0.0, float(len(self.audio)) / float(self.sample_rate))
+
+    def metadata(self) -> Dict[str, object]:
+        return {
+            "id": self.clip_id,
+            "name": self.name,
+            "start_time_seconds": self.start_time_seconds,
+            "lane": self.lane,
+            "duration_seconds": self.duration_seconds,
+            "sample_rate": self.sample_rate,
+            "recipe": self.recipe or {},
+        }
+
+
 @dataclass
 class SynthSettings:
     wave_start_db: Dict[str, float] | None = None
@@ -1187,6 +1217,184 @@ class StoryboardClipWidget(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         self.setCursor(Qt.OpenHandCursor)
         super().mouseReleaseEvent(event)
+
+
+class TimelineCanvas(QWidget):
+    """Large draggable timeline canvas for arranging sound clips."""
+
+    lane_height = 112
+    header_width = 190
+    top_pad = 18
+    seconds_per_pixel_default = 0.018
+
+    def __init__(self, owner: "WaveToyWindow") -> None:
+        super().__init__()
+        self.owner = owner
+        self.setObjectName("timelineCanvas")
+        self.setMouseTracking(True)
+        self.setMinimumSize(QSize(980, 520))
+        self.setCursor(Qt.ArrowCursor)
+        self.seconds_per_pixel = self.seconds_per_pixel_default
+        self.selected_clip_id: int | None = None
+        self.drag_clip_id: int | None = None
+        self.drag_offset_seconds = 0.0
+        self.drag_started = False
+
+    def _refresh_size(self) -> None:
+        arrangement = self.owner.timeline_clips if hasattr(self.owner, "timeline_clips") else []
+        lane_count = max(1, getattr(self.owner, "timeline_lane_count", 4))
+        end_time = max([clip.start_time_seconds + clip.duration_seconds for clip in arrangement] or [8.0])
+        width = int(self.header_width + max(8.0, end_time + 2.0) / self.seconds_per_pixel + 80)
+        height = int(self.top_pad * 2 + lane_count * self.lane_height + 34)
+        self.setMinimumSize(QSize(max(980, width), max(520, height)))
+        self.resize(self.minimumSize())
+
+    def set_zoom(self, factor: float) -> None:
+        self.seconds_per_pixel = min(0.08, max(0.004, self.seconds_per_pixel * factor))
+        self._refresh_size()
+        self.update()
+
+    def _time_to_x(self, seconds: float) -> float:
+        return self.header_width + max(0.0, seconds) / self.seconds_per_pixel
+
+    def _x_to_time(self, x: float) -> float:
+        return max(0.0, (x - self.header_width) * self.seconds_per_pixel)
+
+    def _lane_top(self, lane: int) -> float:
+        return self.top_pad + lane * self.lane_height
+
+    def _lane_from_y(self, y: float) -> int:
+        lane_count = max(1, getattr(self.owner, "timeline_lane_count", 4))
+        return min(lane_count - 1, max(0, int((y - self.top_pad) // self.lane_height)))
+
+    def _clip_rect(self, clip: TimelineClip) -> QRectF:
+        x = self._time_to_x(clip.start_time_seconds)
+        y = self._lane_top(clip.lane) + 10
+        width = max(150.0, clip.duration_seconds / self.seconds_per_pixel)
+        height = 92.0
+        return QRectF(x, y, width, height)
+
+    def _clip_at(self, pos: QPoint) -> TimelineClip | None:
+        for clip in reversed(getattr(self.owner, "timeline_clips", [])):
+            if self._clip_rect(clip).contains(QPointF(pos)):
+                return clip
+        return None
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#dff8ff"))
+
+        lane_names = getattr(self.owner, "timeline_lane_names", ["🎵 Melody Lane", "🥁 Rhythm Lane", "🌌 Atmosphere Lane", "✨ Effects Lane"])
+        lane_count = max(1, getattr(self.owner, "timeline_lane_count", len(lane_names)))
+        canvas_right = self.width() - 18
+        for lane in range(lane_count):
+            top = self._lane_top(lane)
+            lane_rect = QRectF(14, top, canvas_right - 14, self.lane_height - 8)
+            painter.setPen(QPen(QColor(0, 0, 0, 40), 3))
+            painter.setBrush(QColor("#ffffff") if lane % 2 == 0 else QColor("#eefbff"))
+            painter.drawRoundedRect(lane_rect, 24, 24)
+
+            header_rect = QRectF(24, top + 10, self.header_width - 38, self.lane_height - 28)
+            painter.setPen(QPen(QColor(0, 0, 0, 55), 3))
+            painter.setBrush(QColor("#fff8d9"))
+            painter.drawRoundedRect(header_rect, 18, 18)
+            painter.setPen(QColor("#263238"))
+            painter.setFont(QFont("Arial", 20, QFont.Bold))
+            name = lane_names[lane] if lane < len(lane_names) else f"🛤️ Lane {lane + 1}"
+            painter.drawText(header_rect.adjusted(8, 0, -8, 0), Qt.AlignCenter | Qt.TextWordWrap, name)
+
+        # Time ruler and playhead.
+        painter.setPen(QPen(QColor("#78909c"), 2))
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        max_seconds = self._x_to_time(self.width())
+        for second in range(0, int(max_seconds) + 2):
+            x = self._time_to_x(float(second))
+            painter.drawLine(QPointF(x, 4), QPointF(x, self.height() - 10))
+            painter.drawText(QRectF(x + 4, 0, 70, 18), Qt.AlignLeft | Qt.AlignVCenter, f"{second}s")
+
+        playhead_x = self._time_to_x(getattr(self.owner, "timeline_playhead_seconds", 0.0))
+        painter.setPen(QPen(QColor("#ff2f91"), 5, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(playhead_x, 0), QPointF(playhead_x, self.height()))
+
+        for clip in getattr(self.owner, "timeline_clips", []):
+            rect = self._clip_rect(clip)
+            selected = clip.clip_id == self.selected_clip_id
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            gradient.setColorAt(0.0, QColor("#fff8d9"))
+            gradient.setColorAt(1.0, QColor("#b8f2e6" if not selected else "#ffd166"))
+            painter.setPen(QPen(QColor("#ff4fa3" if selected else "#5c6bc0"), 5 if selected else 4))
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(rect, 22, 22)
+
+            painter.setFont(QFont("Arial", 30, QFont.Bold))
+            painter.setPen(QColor("#263238"))
+            painter.drawText(QRectF(rect.left() + 12, rect.top() + 10, 48, 42), Qt.AlignCenter, "🌊")
+            painter.setFont(QFont("Arial", 16, QFont.Bold))
+            painter.drawText(QRectF(rect.left() + 66, rect.top() + 10, rect.width() - 80, 28), Qt.AlignLeft | Qt.AlignVCenter, clip.name)
+            painter.setFont(QFont("Arial", 12, QFont.Bold))
+            painter.setPen(QColor("#607d8b"))
+            painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, rect.width() - 80, 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • Lane {clip.lane + 1}")
+
+            wave_rect = rect.adjusted(14, 62, -14, -12)
+            painter.setPen(QPen(QColor("#00a8cc"), 3, Qt.SolidLine, Qt.RoundCap))
+            audio = np.asarray(clip.audio)
+            if audio.ndim == 2 and len(audio) > 1:
+                mono = audio.mean(axis=1)
+                steps = max(12, min(90, int(wave_rect.width() // 4)))
+                points = []
+                for i in range(steps):
+                    sample_index = min(len(mono) - 1, int(i * len(mono) / steps))
+                    x = wave_rect.left() + (wave_rect.width() * i / max(1, steps - 1))
+                    y = wave_rect.center().y() - float(mono[sample_index]) * wave_rect.height() * 0.42
+                    points.append(QPointF(x, y))
+                for a, b in zip(points, points[1:]):
+                    painter.drawLine(a, b)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+        clip = self._clip_at(event.pos())
+        if clip is not None:
+            self.selected_clip_id = clip.clip_id
+            self.drag_clip_id = clip.clip_id
+            self.drag_offset_seconds = self._x_to_time(event.position().x()) - clip.start_time_seconds
+            self.drag_started = False
+            self.setCursor(Qt.ClosedHandCursor)
+            self.owner._timeline_select_clip(clip.clip_id)
+        else:
+            self.selected_clip_id = None
+            self.drag_clip_id = None
+            self.owner._timeline_clear_selection(move_playhead_to=self._x_to_time(event.position().x()))
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.drag_clip_id is None:
+            self.setCursor(Qt.OpenHandCursor if self._clip_at(event.pos()) is not None else Qt.ArrowCursor)
+            return
+        clip = self.owner._timeline_clip_by_id(self.drag_clip_id)
+        if clip is None:
+            return
+        old_start, old_lane = clip.start_time_seconds, clip.lane
+        clip.start_time_seconds = max(0.0, self._x_to_time(event.position().x()) - self.drag_offset_seconds)
+        clip.lane = self._lane_from_y(event.position().y())
+        self.drag_started = True
+        self.owner._timeline_update_duration()
+        self.owner._timeline_update_inspector()
+        if abs(old_start - clip.start_time_seconds) > 0.001 or old_lane != clip.lane:
+            self.owner._timeline_debug(f"Clip moved id={clip.clip_id} start={clip.start_time_seconds:.3f}s lane={clip.lane}")
+        self._refresh_size()
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self.drag_clip_id is not None:
+            self.owner._timeline_update_duration()
+            self.owner._timeline_mark_mix_dirty()
+        self.drag_clip_id = None
+        self.drag_started = False
+        self.setCursor(Qt.OpenHandCursor)
+        self.update()
+
 
 
 class NoWheelSlider(QSlider):
@@ -2164,6 +2372,23 @@ class WaveToyWindow(QMainWindow):
         self._preview_stop_timer.setSingleShot(True)
         self._preview_stop_timer.timeout.connect(lambda: self._set_preview_motion(False))
 
+        self.timeline_clips: List[TimelineClip] = []
+        self.timeline_lane_names = ["🎵 Melody Lane", "🥁 Rhythm Lane", "🌌 Atmosphere Lane", "✨ Effects Lane"]
+        self.timeline_lane_count = len(self.timeline_lane_names)
+        self.timeline_next_clip_id = 1
+        self.timeline_selected_clip_id: int | None = None
+        self.timeline_playhead_seconds = 0.0
+        self.timeline_duration_seconds = 0.0
+        self.timeline_last_mix = np.zeros((0, 2), dtype=np.float32)
+        self.timeline_last_mix_path: Path | None = None
+        self.timeline_mix_dirty = True
+        self.timeline_playback_started_at: float | None = None
+        self.timeline_play_timer = QTimer(self)
+        self.timeline_play_timer.timeout.connect(self._timeline_playback_tick)
+        self.timeline_canvas: TimelineCanvas | None = None
+        self.timeline_status_label: QLabel | None = None
+        self.timeline_inspector_label: QLabel | None = None
+
         self._build_actions()
         self._build_ui()
         self._build_shortcuts()
@@ -2908,6 +3133,11 @@ class WaveToyWindow(QMainWindow):
         button.clicked.connect(callback)
         return button
 
+    def _timeline_debug(self, message: str) -> None:
+        print(f"[WaveToy Timeline] {message}")
+        if getattr(self, "timeline_status_label", None) is not None:
+            self.timeline_status_label.setText(message)
+
     def _build_timeline_tab(self) -> None:
         if self.tabs is None:
             return
@@ -2920,7 +3150,7 @@ class WaveToyWindow(QMainWindow):
         title = QLabel("🎬 Timeline Storyboard")
         title.setObjectName("timelineStoryboardTitle")
         title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel("Wave Explorer → Build Sound → Drop Sound → arrange big sound cards → Mix Story.")
+        subtitle = QLabel("Drop the current sound, drag big clips across lanes, play the story, then export the mix.")
         subtitle.setObjectName("timelineStoryboardSubtitle")
         subtitle.setWordWrap(True)
         subtitle.setAlignment(Qt.AlignCenter)
@@ -2929,97 +3159,353 @@ class WaveToyWindow(QMainWindow):
 
         transport = QWidget()
         transport.setObjectName("storyTransportBar")
-        transport.setMinimumHeight(64)
+        transport.setMinimumHeight(88)
         transport_layout = QHBoxLayout(transport)
         transport_layout.setContentsMargins(12, 10, 12, 10)
         transport_layout.setSpacing(12)
-        for button in (
-            self._make_story_button("▶️", "Play Story", "#5cdb95", self._play),
-            self._make_story_button("⏹", "Stop", "#ff6b6b", self._stop),
-            self._make_story_button("🎚", "Mix Story", "#ffd166", self._play),
+        buttons = [
+            self._make_story_button("▶️", "Play Story", "#5cdb95", self._timeline_play_story),
+            self._make_story_button("⏹", "Stop", "#ff6b6b", self._timeline_stop_story),
+            self._make_story_button("🎚", "Mix Story", "#ffd166", self._timeline_render_mix),
             self._make_story_button("➕", "Drop Sound", "#b8f2e6", self._drop_story_sound),
             self._make_story_button("🛤️", "Add Lane", "#d7b9ff", self._add_story_lane),
-        ):
+            self._make_story_button("🔍", "Zoom In", "#caffbf", lambda checked=False: self._timeline_zoom(0.72)),
+            self._make_story_button("🔎", "Zoom Out", "#ffc6ff", lambda checked=False: self._timeline_zoom(1.28)),
+        ]
+        for button in buttons:
+            button.setMinimumHeight(72)
             transport_layout.addWidget(button)
         layout.addWidget(transport)
 
+        edit_bar = QWidget()
+        edit_layout = QHBoxLayout(edit_bar)
+        edit_layout.setContentsMargins(0, 0, 0, 0)
+        edit_layout.setSpacing(10)
+        for icon, label, color, callback in (
+            ("⧉", "Duplicate Clip", "#f1c0e8", self._timeline_duplicate_selected),
+            ("🗑️", "Delete Clip", "#ffadad", self._timeline_delete_selected),
+            ("💾", "Export Last Mix", "#fdffb6", self._timeline_export_last_mix),
+        ):
+            button = self._make_story_button(icon, label, color, callback)
+            button.setMinimumHeight(66)
+            edit_layout.addWidget(button)
+        layout.addWidget(edit_bar)
+
+        split = QHBoxLayout()
+        split.setSpacing(12)
         scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        scroll.setWidgetResizable(False)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setObjectName("storyboardScroll")
-        lane_root = QWidget()
-        lane_root.setObjectName("storyboardLaneRoot")
-        self.timeline_lanes_layout = QVBoxLayout(lane_root)
-        self.timeline_lanes_layout.setContentsMargins(4, 4, 4, 4)
-        self.timeline_lanes_layout.setSpacing(12)
-        self.timeline_lane_count = 0
-        self.timeline_lane_clip_layouts: List[QHBoxLayout] = []
-        scroll.setWidget(lane_root)
-        layout.addWidget(scroll, 1)
+        self.timeline_canvas = TimelineCanvas(self)
+        self.timeline_canvas._refresh_size()
+        scroll.setWidget(self.timeline_canvas)
+        split.addWidget(scroll, 1)
 
-        starter_lanes = [
-            ("🎵", "Melody Lane", [("🚀", "Rocket Pitch", "2.4s", "sine", "#5cdb95"), ("⭐", "Falling Star", "1.8s", "triangle", "#ffd166")]),
-            ("🥁", "Rhythm Lane", [("🤖", "Robot Beep", "0.8s", "square", "#ff99c8")]),
-            ("🌌", "Atmosphere Lane", [("🌊", "Custom Wave", f"{self._clip_duration_seconds():.1f}s", "sawtooth", "#7bdff2")]),
-            ("✨", "Effects Lane", []),
-        ]
-        for icon, label, clips in starter_lanes:
-            self._add_story_lane(icon=icon, label=label, clips=clips)
+        inspector = QWidget()
+        inspector.setObjectName("timelineInspector")
+        inspector.setMinimumWidth(260)
+        inspector_layout = QVBoxLayout(inspector)
+        inspector_layout.setContentsMargins(12, 12, 12, 12)
+        inspector_layout.setSpacing(10)
+        inspector_title = QLabel("🔎 Selected Clip")
+        inspector_title.setObjectName("timelineInspectorTitle")
+        self.timeline_inspector_label = QLabel("No clip selected. Click a clip, or click empty time to move the playhead.")
+        self.timeline_inspector_label.setObjectName("timelineInspectorText")
+        self.timeline_inspector_label.setWordWrap(True)
+        self.timeline_status_label = QLabel("Timeline ready.")
+        self.timeline_status_label.setObjectName("timelineInspectorText")
+        self.timeline_status_label.setWordWrap(True)
+        inspector_layout.addWidget(inspector_title)
+        inspector_layout.addWidget(self.timeline_inspector_label)
+        inspector_layout.addStretch(1)
+        inspector_layout.addWidget(QLabel("🐞 Debug"))
+        inspector_layout.addWidget(self.timeline_status_label)
+        split.addWidget(inspector)
+        layout.addLayout(split, 1)
 
+        self._timeline_update_inspector()
         self.tabs.insertTab(min(2, self.tabs.count()), tab, "🎬 Timeline")
+        self._timeline_debug("Timeline tab constructed")
 
     def _add_story_lane(self, checked: bool = False, icon: str | None = None, label: str | None = None, clips: list | None = None) -> None:
-        if not hasattr(self, "timeline_lanes_layout"):
-            return
-        default_lanes = [("🎵", "Melody Lane"), ("🥁", "Rhythm Lane"), ("🌌", "Atmosphere Lane"), ("✨", "Effects Lane")]
-        if icon is None or label is None:
-            icon, label = default_lanes[self.timeline_lane_count % len(default_lanes)]
-        lane = QWidget()
-        lane.setObjectName("storyboardLane")
-        lane.setMinimumHeight(132)
-        lane_layout = QHBoxLayout(lane)
-        lane_layout.setContentsMargins(12, 12, 12, 12)
-        lane_layout.setSpacing(12)
-
-        header = QLabel(f"{icon}\n{label}")
-        header.setObjectName("storyboardLaneHeader")
-        header.setMinimumSize(QSize(170, 96))
-        header.setAlignment(Qt.AlignCenter)
-        lane_layout.addWidget(header)
-
-        clip_strip = QWidget()
-        clip_strip.setObjectName("storyboardClipStrip")
-        clip_layout = QHBoxLayout(clip_strip)
-        clip_layout.setContentsMargins(8, 8, 8, 8)
-        clip_layout.setSpacing(12)
-        lane_layout.addWidget(clip_strip, 1)
-        clip_layout.addStretch(1)
-        self.timeline_lanes_layout.addWidget(lane)
-        self.timeline_lane_clip_layouts.append(clip_layout)
-        self.timeline_lane_count += 1
-
-        for clip in clips or []:
-            self._add_story_clip(clip_layout, *clip)
+        if icon is not None and label is not None:
+            name = f"{icon} {label}"
+        else:
+            defaults = ["🎵 Melody Lane", "🥁 Rhythm Lane", "🌌 Atmosphere Lane", "✨ Effects Lane"]
+            name = defaults[self.timeline_lane_count % len(defaults)] if self.timeline_lane_count < len(defaults) else f"🛤️ Lane {self.timeline_lane_count + 1}"
+        self.timeline_lane_names.append(name)
+        self.timeline_lane_count = len(self.timeline_lane_names)
+        if self.timeline_canvas is not None:
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_debug(f"Lane added index={self.timeline_lane_count - 1} name={name}")
 
     def _add_story_clip(self, lane_layout: QHBoxLayout, icon: str, name: str, duration: str, wave_type: str, color: str) -> None:
-        clip = StoryboardClipWidget(icon, name, duration, wave_type, color)
-        lane_layout.insertWidget(max(0, lane_layout.count() - 1), clip)
+        # Kept for compatibility with older storyboard code paths; the active timeline uses TimelineClip objects.
+        pass
+
+    def _timeline_current_audio(self, force: bool = True) -> np.ndarray:
+        if force or self.current_audio.size <= 2 or len(self.current_audio) < 8:
+            self._timeline_debug("Rendering current sound for timeline drop")
+            self._generate_now(reason="timeline_drop", update_message=True, force=True)
+        audio = np.asarray(self.current_audio, dtype=np.float32)
+        if audio.ndim == 1:
+            audio = np.column_stack([audio, audio]).astype(np.float32)
+        if audio.ndim != 2 or audio.shape[0] == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        if audio.shape[1] == 1:
+            audio = np.repeat(audio, 2, axis=1)
+        if audio.shape[1] > 2:
+            audio = audio[:, :2]
+        duration = len(audio) / SAMPLE_RATE
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        self._timeline_debug(f"Current audio shape={audio.shape} duration={duration:.3f}s peak={peak:.4f}")
+        return np.array(audio, dtype=np.float32, copy=True)
+
+    def _timeline_recipe_snapshot(self) -> Dict[str, object]:
+        try:
+            return self._settings_to_recipe("Timeline Clip")
+        except Exception as exc:
+            self._timeline_debug(f"Recipe snapshot failed: {exc}")
+            return {"name": "Timeline Clip", "error": str(exc)}
 
     def _drop_story_sound(self, checked: bool = False) -> None:
-        if not getattr(self, "timeline_lane_clip_layouts", None):
+        self._timeline_debug("Drop Current Sound clicked")
+        audio = self._timeline_current_audio(force=True)
+        if audio.size == 0 or len(audio) < 8:
+            self._timeline_debug("Drop rejected: empty audio")
+            QMessageBox.warning(self, "Timeline drop failed", "Wave Toy could not find a rendered sound to drop. Try Make Sound, then Drop Sound again.")
             return
-        icons = ["🌊", "🚀", "⭐", "🤖"]
-        names = ["Custom Wave", "Rocket Pitch", "Falling Star", "Robot Beep"]
-        waves = ["sine", "triangle", "sawtooth", "square"]
-        index = sum(max(0, lane.count() - 1) for lane in self.timeline_lane_clip_layouts) % len(icons)
-        self._add_story_clip(
-            self.timeline_lane_clip_layouts[0],
-            icons[index],
-            names[index],
-            f"{self._clip_duration_seconds():.1f}s",
-            waves[index],
-            ["#7bdff2", "#5cdb95", "#ffd166", "#ff99c8"][index],
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        if peak <= 1e-6:
+            self._timeline_debug("Drop rejected: nearly silent audio")
+            QMessageBox.warning(self, "Timeline drop failed", "The current sound is silent. Turn up a wave or loudness, then drop it again.")
+            return
+        clip_id = self.timeline_next_clip_id
+        self.timeline_next_clip_id += 1
+        clip = TimelineClip(
+            clip_id=clip_id,
+            name=f"Sound {clip_id}",
+            audio=audio,
+            start_time_seconds=max(0.0, self.timeline_playhead_seconds),
+            lane=0,
+            recipe=self._timeline_recipe_snapshot(),
         )
+        self.timeline_clips.append(clip)
+        self.timeline_selected_clip_id = clip.clip_id
+        self._timeline_update_duration()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = clip.clip_id
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Clip created id={clip.clip_id} start={clip.start_time_seconds:.3f}s lane={clip.lane} duration={clip.duration_seconds:.3f}s")
+
+    def _timeline_clip_by_id(self, clip_id: int | None) -> TimelineClip | None:
+        for clip in self.timeline_clips:
+            if clip.clip_id == clip_id:
+                return clip
+        return None
+
+    def _timeline_select_clip(self, clip_id: int) -> None:
+        clip = self._timeline_clip_by_id(clip_id)
+        if clip is None:
+            return
+        self.timeline_selected_clip_id = clip_id
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = clip_id
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Clip selected id={clip.clip_id} start={clip.start_time_seconds:.3f}s lane={clip.lane}")
+
+    def _timeline_clear_selection(self, move_playhead_to: float | None = None) -> None:
+        self.timeline_selected_clip_id = None
+        if move_playhead_to is not None:
+            self.timeline_playhead_seconds = max(0.0, move_playhead_to)
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = None
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+
+    def _timeline_update_inspector(self) -> None:
+        if self.timeline_inspector_label is None:
+            return
+        clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if clip is None:
+            self.timeline_inspector_label.setText(f"No clip selected. Playhead: {self.timeline_playhead_seconds:.2f}s")
+            return
+        self.timeline_inspector_label.setText(
+            f"{clip.name}\nID: {clip.clip_id}\nStart: {clip.start_time_seconds:.2f}s\nLane: {clip.lane + 1}\nDuration: {clip.duration_seconds:.2f}s"
+        )
+
+    def _timeline_update_duration(self) -> None:
+        self.timeline_duration_seconds = max([clip.start_time_seconds + clip.duration_seconds for clip in self.timeline_clips] or [0.0])
+
+    def _timeline_mark_mix_dirty(self) -> None:
+        self.timeline_mix_dirty = True
+
+    def _timeline_zoom(self, factor: float) -> None:
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.set_zoom(factor)
+            self._timeline_debug(f"Timeline zoom changed seconds_per_pixel={self.timeline_canvas.seconds_per_pixel:.4f}")
+
+    def _timeline_duplicate_selected(self, checked: bool = False) -> None:
+        source = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if source is None:
+            QMessageBox.information(self, "Duplicate Clip", "Select a timeline clip first.")
+            return
+        clip_id = self.timeline_next_clip_id
+        self.timeline_next_clip_id += 1
+        duplicate = TimelineClip(
+            clip_id=clip_id,
+            name=f"{source.name} Copy",
+            audio=np.array(source.audio, dtype=np.float32, copy=True),
+            start_time_seconds=source.start_time_seconds + 0.25,
+            lane=source.lane,
+            recipe=source.recipe,
+        )
+        self.timeline_clips.append(duplicate)
+        self.timeline_selected_clip_id = duplicate.clip_id
+        self._timeline_update_duration()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = duplicate.clip_id
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Clip created id={duplicate.clip_id} start={duplicate.start_time_seconds:.3f}s lane={duplicate.lane} duration={duplicate.duration_seconds:.3f}s duplicate_of={source.clip_id}")
+
+    def _timeline_delete_selected(self, checked: bool = False) -> None:
+        clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if clip is None:
+            QMessageBox.information(self, "Delete Clip", "Select a timeline clip first.")
+            return
+        self.timeline_clips = [existing for existing in self.timeline_clips if existing.clip_id != clip.clip_id]
+        self.timeline_selected_clip_id = None
+        self._timeline_update_duration()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = None
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Clip deleted id={clip.clip_id}")
+
+    def _timeline_render_mix(self, checked: bool = False) -> np.ndarray:
+        self._timeline_update_duration()
+        if not self.timeline_clips:
+            self._timeline_debug("Arrangement mixdown clip_count=0 duration=0.000s peak=0.0000")
+            QMessageBox.warning(self, "Timeline mix", "Drop at least one sound before mixing the story.")
+            self.timeline_last_mix = np.zeros((0, 2), dtype=np.float32)
+            return self.timeline_last_mix
+        total_samples = max(1, int(math.ceil(self.timeline_duration_seconds * SAMPLE_RATE)))
+        mix = np.zeros((total_samples, 2), dtype=np.float32)
+        for clip in self.timeline_clips:
+            start = max(0, int(round(clip.start_time_seconds * SAMPLE_RATE)))
+            end = min(total_samples, start + len(clip.audio))
+            if end <= start:
+                continue
+            mix[start:end, :2] += np.asarray(clip.audio[: end - start, :2], dtype=np.float32)
+        peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+        if peak > 1.0:
+            mix = mix / peak
+        final_peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+        self.timeline_last_mix = mix.astype(np.float32, copy=False)
+        self.timeline_mix_dirty = False
+        self._timeline_debug(f"Arrangement mixdown clip_count={len(self.timeline_clips)} duration={len(mix) / SAMPLE_RATE:.3f}s peak={final_peak:.4f}")
+        return self.timeline_last_mix
+
+    def _timeline_play_story(self, checked: bool = False) -> None:
+        self._timeline_debug("Play Story clicked")
+        mix = self._timeline_render_mix(checked=False)
+        if mix.size == 0:
+            return
+        self.timeline_playhead_seconds = 0.0
+        self.timeline_playback_started_at = time.monotonic()
+        self.timeline_play_timer.start(33)
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.update()
+        if sd is None:
+            self._timeline_debug("Playback unavailable: sounddevice is not installed")
+            QMessageBox.warning(self, "Playback is not available", "Timeline mix was rendered, but sounddevice is not installed. Export still works.")
+            return
+        try:
+            sd.stop()
+            sd.play(mix, SAMPLE_RATE, blocking=False)
+        except Exception as exc:
+            self._timeline_debug(f"Playback failed: {exc}")
+            QMessageBox.warning(self, "Playback is not available", f"Timeline mix was rendered, but playback failed. Export still works.\n\nDetails: {exc}")
+
+    def _timeline_stop_story(self, checked: bool = False) -> None:
+        self._timeline_debug("Stop clicked")
+        self.timeline_play_timer.stop()
+        self.timeline_playback_started_at = None
+        if sd is not None:
+            try:
+                sd.stop()
+            except Exception as exc:
+                self._timeline_debug(f"sounddevice stop failed: {exc}")
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.update()
+
+    def _timeline_playback_tick(self) -> None:
+        if self.timeline_playback_started_at is None:
+            self.timeline_play_timer.stop()
+            return
+        elapsed = time.monotonic() - self.timeline_playback_started_at
+        duration = len(self.timeline_last_mix) / SAMPLE_RATE if self.timeline_last_mix.size else self.timeline_duration_seconds
+        self.timeline_playhead_seconds = min(max(0.0, elapsed), max(0.0, duration))
+        self._timeline_update_inspector()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.update()
+        if duration > 0 and elapsed >= duration:
+            self.timeline_play_timer.stop()
+            self.timeline_playback_started_at = None
+
+    def _timeline_export_last_mix(self, checked: bool = False) -> None:
+        self._timeline_debug("Export attempted")
+        mix = self._timeline_render_mix(checked=False)
+        if mix.size == 0:
+            self._timeline_debug("Export failed: empty mix")
+            return
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Timeline Mix",
+            "wave_toy_timeline_mix.wav",
+            "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
+        )
+        if not filename:
+            self._timeline_debug("Export failed: user cancelled")
+            return
+        path = Path(filename)
+        if not path.suffix:
+            if "Ogg" in selected_filter:
+                path = path.with_suffix(".ogg")
+            elif "MP3" in selected_filter:
+                path = path.with_suffix(".mp3")
+            elif "FLAC" in selected_filter:
+                path = path.with_suffix(".flac")
+            else:
+                path = path.with_suffix(".wav")
+        try:
+            save_audio_file(path, mix)
+            sidecar = path.with_suffix(path.suffix + ".wave-toy-arrangement.json")
+            data = {
+                "name": path.stem,
+                "version": 1,
+                "sample_rate": SAMPLE_RATE,
+                "duration_seconds": len(mix) / SAMPLE_RATE,
+                "clip_count": len(self.timeline_clips),
+                "clips": [clip.metadata() for clip in self.timeline_clips],
+            }
+            sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self.timeline_last_mix_path = path
+            self._timeline_debug(f"Export succeeded audio={path} sidecar={sidecar}")
+            QMessageBox.information(self, "Timeline Exported", f"Saved timeline mix:\n{path}\n\nSaved arrangement metadata:\n{sidecar}")
+        except Exception as exc:
+            self._timeline_debug(f"Export failed: {exc}")
+            QMessageBox.warning(self, "Could not export timeline", str(exc))
 
     def _build_play_tab(self) -> None:
         if self.tabs is None:
@@ -3645,10 +4131,10 @@ class WaveToyWindow(QMainWindow):
                 border-top-left-radius: 14px;
                 border-top-right-radius: 14px;
                 color: #263238;
-                font-size: 15px;
+                font-size: 18px;
                 font-weight: 900;
-                min-height: 34px;
-                padding: 8px 18px;
+                min-height: 46px;
+                padding: 10px 22px;
             }
             QTabBar::tab:selected {
                 background: #ffffff;
@@ -3672,14 +4158,34 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 28px;
             }
             QPushButton#storyTransportButton {
-                min-height: 64px;
-                font-size: 20px;
+                min-height: 72px;
+                font-size: 22px;
                 font-weight: 900;
                 border-radius: 24px;
                 padding: 8px 14px;
             }
             QScrollArea#storyboardScroll, QWidget#storyboardLaneRoot {
                 background: transparent;
+            }
+            QWidget#timelineCanvas {
+                background: #dff8ff;
+                border: 5px solid rgba(0, 0, 0, 0.12);
+                border-radius: 24px;
+            }
+            QWidget#timelineInspector {
+                background: #fff8d9;
+                border: 5px solid rgba(255, 153, 200, 0.72);
+                border-radius: 26px;
+            }
+            QLabel#timelineInspectorTitle {
+                font-size: 24px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#timelineInspectorText {
+                font-size: 16px;
+                font-weight: 800;
+                color: #37474f;
             }
             QWidget#storyboardLane {
                 background: #eefbff;
