@@ -63,3 +63,12 @@ def test_blank_reason_does_not_corrupt_lead(tmp_path):
     assert lead == before
     assert lead["lead_notes"] == []
     assert lead["timeline"] == []
+
+
+def test_flag_risk_handles_unparseable_existing_risk_score(tmp_path):
+    service = make_service(tmp_path, risk_score="needs review")
+
+    lead = service.flag_risk("lead-1", "Manual concern")
+
+    assert lead["risk_score"] == 0.75
+    assert lead["acquisition_priority"] == "high"

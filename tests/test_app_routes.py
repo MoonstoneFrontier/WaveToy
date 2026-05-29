@@ -33,17 +33,28 @@ def client(tmp_path):
 def test_env_example_contains_runtime_variables():
     env_text = Path(".env.example").read_text(encoding="utf-8")
 
-    assert "APP_ENV=development" in env_text
-    assert "PORT_RANGE_START=47000" in env_text
-    assert "FLASK_SECRET_KEY=dev-only-insecure-key" in env_text
+    expected_variables = [
+        "APP_ENV=development",
+        "APP_HOST=127.0.0.1",
+        "APP_PORT=",
+        "PORT_RANGE_START=47000",
+        "PORT_RANGE_END=48999",
+        "AUTO_OPEN_BROWSER=false",
+        "LOG_LEVEL=INFO",
+        "ENABLE_AGENT_TIMING=true",
+        "ENABLE_SOURCE_LOGGING=true",
+        "FLASK_SECRET_KEY=dev-only-insecure-key",
+    ]
+    for variable in expected_variables:
+        assert variable in env_text
 
 
 def test_requirements_contains_local_test_dependencies():
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
 
-    assert "Flask" in requirements
-    assert "python-dotenv" in requirements
-    assert "pytest" in requirements
+    expected_dependencies = ["Flask", "python-dotenv", "pytest"]
+    for dependency in expected_dependencies:
+        assert dependency in requirements
 
 
 def test_post_risk_with_reason_adds_visible_risk_state(client):
