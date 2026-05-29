@@ -309,7 +309,7 @@ class TimelineClip:
 
 @dataclass
 class ArticulationPhoneme:
-    """Reusable vowel-like articulation definition for the Articulation Lab."""
+    """Reusable toy articulation definition for vowels and consonants."""
 
     name: str
     ipa: str
@@ -321,10 +321,23 @@ class ArticulationPhoneme:
     voice_strength: float = 0.65
     duration_ms: int = 500
     preview_color: str = "#ffd166"
+    phoneme_family: str = "vowel"
+    air_pressure: float = 0.45
+    teeth_gap: float = 0.50
+    closure: float = 0.0
+    burst_strength: float = 0.0
+    nasal_open: float = 0.0
+    voiced: bool = True
+    noise_color: float = 0.50
+    attack_ms: int = 18
+    release_ms: int = 28
 
     def clamped(self) -> "ArticulationPhoneme":
+        family = str(self.phoneme_family or "vowel").lower()
+        if family not in {"vowel", "fricative", "stop", "nasal"}:
+            family = "vowel"
         return ArticulationPhoneme(
-            name=str(self.name or "untitled_vowel"),
+            name=str(self.name or "untitled_phoneme"),
             ipa=str(self.ipa or "?"),
             mouth_open=float(np.clip(self.mouth_open, 0.0, 1.0)),
             tongue_height=float(np.clip(self.tongue_height, 0.0, 1.0)),
@@ -332,8 +345,18 @@ class ArticulationPhoneme:
             lip_rounding=float(np.clip(self.lip_rounding, 0.0, 1.0)),
             voice_pitch=float(np.clip(self.voice_pitch, 60.0, 880.0)),
             voice_strength=float(np.clip(self.voice_strength, 0.0, 1.0)),
-            duration_ms=int(np.clip(self.duration_ms, 120, 5000)),
+            duration_ms=int(np.clip(self.duration_ms, 80, 5000)),
             preview_color=str(self.preview_color or "#ffd166"),
+            phoneme_family=family,
+            air_pressure=float(np.clip(self.air_pressure, 0.0, 1.0)),
+            teeth_gap=float(np.clip(self.teeth_gap, 0.0, 1.0)),
+            closure=float(np.clip(self.closure, 0.0, 1.0)),
+            burst_strength=float(np.clip(self.burst_strength, 0.0, 1.0)),
+            nasal_open=float(np.clip(self.nasal_open, 0.0, 1.0)),
+            voiced=bool(self.voiced),
+            noise_color=float(np.clip(self.noise_color, 0.0, 1.0)),
+            attack_ms=int(np.clip(self.attack_ms, 1, 250)),
+            release_ms=int(np.clip(self.release_ms, 1, 500)),
         )
 
     def to_json_dict(self) -> Dict[str, object]:
@@ -341,8 +364,10 @@ class ArticulationPhoneme:
 
     @classmethod
     def from_json_dict(cls, data: Dict[str, object]) -> "ArticulationPhoneme":
+        family = str(data.get("phoneme_family", data.get("family", "vowel"))).lower()
+        default_voiced = family in {"vowel", "nasal"}
         return cls(
-            name=str(data.get("name", "untitled_vowel")),
+            name=str(data.get("name", "untitled_phoneme")),
             ipa=str(data.get("ipa", "?")),
             mouth_open=float(data.get("mouth_open", 0.45)),
             tongue_height=float(data.get("tongue_height", 0.45)),
@@ -352,6 +377,16 @@ class ArticulationPhoneme:
             voice_strength=float(data.get("voice_strength", 0.65)),
             duration_ms=int(data.get("duration_ms", 500)),
             preview_color=str(data.get("preview_color", "#ffd166")),
+            phoneme_family=family,
+            air_pressure=float(data.get("air_pressure", 0.45)),
+            teeth_gap=float(data.get("teeth_gap", 0.50)),
+            closure=float(data.get("closure", 0.0)),
+            burst_strength=float(data.get("burst_strength", 0.0)),
+            nasal_open=float(data.get("nasal_open", 0.0)),
+            voiced=bool(data.get("voiced", default_voiced)),
+            noise_color=float(data.get("noise_color", 0.50)),
+            attack_ms=int(data.get("attack_ms", 18)),
+            release_ms=int(data.get("release_ms", 28)),
         ).clamped()
 
 
@@ -364,13 +399,52 @@ VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
     "UH": {"emoji": "😐", "ipa": "ə", "tongue_height": 0.45, "tongue_frontness": 0.50, "mouth_open": 0.45, "lip_rounding": 0.10, "preview_color": "#d7b9ff"},
 }
 
+FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
+    "S": {"emoji": "🦷", "ipa": "s", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.85, "teeth_gap": 0.15, "tongue_frontness": 0.85, "mouth_open": 0.28, "tongue_height": 0.72, "lip_rounding": 0.0, "duration_ms": 420, "noise_color": 0.85, "preview_color": "#d7f9ff"},
+    "Z": {"emoji": "🦷", "ipa": "z", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.75, "teeth_gap": 0.18, "tongue_frontness": 0.85, "mouth_open": 0.28, "tongue_height": 0.70, "duration_ms": 420, "noise_color": 0.80, "preview_color": "#c7f9cc"},
+    "SH": {"emoji": "🤫", "ipa": "ʃ", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.80, "teeth_gap": 0.25, "tongue_frontness": 0.45, "mouth_open": 0.32, "tongue_height": 0.62, "lip_rounding": 0.55, "duration_ms": 460, "noise_color": 0.62, "preview_color": "#bde0fe"},
+    "F": {"emoji": "🌬", "ipa": "f", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.75, "teeth_gap": 0.20, "tongue_frontness": 0.50, "mouth_open": 0.22, "tongue_height": 0.45, "lip_rounding": 0.15, "duration_ms": 380, "noise_color": 0.55, "preview_color": "#e0fbfc"},
+    "V": {"emoji": "🌬", "ipa": "v", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.65, "teeth_gap": 0.22, "tongue_frontness": 0.50, "mouth_open": 0.22, "tongue_height": 0.45, "duration_ms": 380, "noise_color": 0.50, "preview_color": "#caffbf"},
+    "H": {"emoji": "💨", "ipa": "h", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.60, "teeth_gap": 0.75, "tongue_frontness": 0.45, "mouth_open": 0.55, "tongue_height": 0.35, "duration_ms": 360, "noise_color": 0.35, "preview_color": "#f1faee"},
+}
+
+STOP_PRESETS: Dict[str, Dict[str, object]] = {
+    "P": {"emoji": "💥", "ipa": "p", "phoneme_family": "stop", "voiced": False, "closure": 1.0, "burst_strength": 0.75, "mouth_open": 0.12, "tongue_height": 0.35, "tongue_frontness": 0.50, "lip_rounding": 0.20, "duration_ms": 180, "noise_color": 0.50, "preview_color": "#ffd6a5"},
+    "B": {"emoji": "💥", "ipa": "b", "phoneme_family": "stop", "voiced": True, "closure": 1.0, "burst_strength": 0.55, "mouth_open": 0.12, "tongue_height": 0.35, "tongue_frontness": 0.50, "duration_ms": 200, "noise_color": 0.45, "preview_color": "#fdffb6"},
+    "T": {"emoji": "⚡", "ipa": "t", "phoneme_family": "stop", "voiced": False, "closure": 1.0, "burst_strength": 0.70, "tongue_frontness": 0.90, "mouth_open": 0.18, "tongue_height": 0.72, "duration_ms": 170, "noise_color": 0.85, "preview_color": "#ffadad"},
+    "D": {"emoji": "⚡", "ipa": "d", "phoneme_family": "stop", "voiced": True, "closure": 1.0, "burst_strength": 0.50, "tongue_frontness": 0.90, "mouth_open": 0.18, "tongue_height": 0.70, "duration_ms": 200, "noise_color": 0.78, "preview_color": "#ffc6ff"},
+    "K": {"emoji": "🪨", "ipa": "k", "phoneme_family": "stop", "voiced": False, "closure": 1.0, "burst_strength": 0.80, "tongue_frontness": 0.20, "mouth_open": 0.20, "tongue_height": 0.65, "duration_ms": 190, "noise_color": 0.38, "preview_color": "#a0c4ff"},
+    "G": {"emoji": "🪨", "ipa": "g", "phoneme_family": "stop", "voiced": True, "closure": 1.0, "burst_strength": 0.55, "tongue_frontness": 0.20, "mouth_open": 0.20, "tongue_height": 0.65, "duration_ms": 220, "noise_color": 0.34, "preview_color": "#bdb2ff"},
+}
+
+NASAL_PRESETS: Dict[str, Dict[str, object]] = {
+    "M": {"emoji": "👃", "ipa": "m", "phoneme_family": "nasal", "voiced": True, "nasal_open": 0.95, "closure": 0.90, "mouth_open": 0.10, "tongue_height": 0.45, "tongue_frontness": 0.45, "lip_rounding": 0.35, "duration_ms": 460, "preview_color": "#cdb4db"},
+    "N": {"emoji": "👃", "ipa": "n", "phoneme_family": "nasal", "voiced": True, "nasal_open": 0.90, "closure": 0.80, "tongue_frontness": 0.85, "mouth_open": 0.12, "tongue_height": 0.65, "duration_ms": 460, "preview_color": "#bde0fe"},
+    "NG": {"emoji": "👃", "ipa": "ŋ", "phoneme_family": "nasal", "voiced": True, "nasal_open": 0.90, "closure": 0.80, "tongue_frontness": 0.20, "mouth_open": 0.12, "tongue_height": 0.72, "duration_ms": 500, "preview_color": "#a2d2ff"},
+}
+
+CONSONANT_PRESET_SECTIONS: Tuple[Tuple[str, Dict[str, Dict[str, object]]], ...] = (
+    ("🌬 Friction Sounds", FRICATIVE_PRESETS),
+    ("💥 Pop Sounds", STOP_PRESETS),
+    ("👃 Nose Sounds", NASAL_PRESETS),
+)
+
+
 
 def articulation_summary(phoneme: ArticulationPhoneme) -> str:
+    family_word = phoneme.phoneme_family.title()
     open_word = "Open Mouth" if phoneme.mouth_open >= 0.66 else "Small Mouth" if phoneme.mouth_open <= 0.28 else "Medium Mouth"
     height_word = "High Tongue" if phoneme.tongue_height >= 0.66 else "Low Tongue" if phoneme.tongue_height <= 0.34 else "Mid Tongue"
     front_word = "Front Tongue" if phoneme.tongue_frontness >= 0.66 else "Back Tongue" if phoneme.tongue_frontness <= 0.34 else "Center Tongue"
     round_word = "Rounded Lips" if phoneme.lip_rounding >= 0.55 else "Relaxed Lips"
-    return f"{open_word} | {height_word} | {front_word} | {round_word}"
+    voice_word = "Voiced" if phoneme.voiced else "Unvoiced"
+    if phoneme.phoneme_family == "fricative":
+        return f"{family_word} | {voice_word} | Air {phoneme.air_pressure:.2f} | Teeth Gap {phoneme.teeth_gap:.2f}"
+    if phoneme.phoneme_family == "stop":
+        return f"{family_word} | {voice_word} | Closure {phoneme.closure:.2f} | Burst {phoneme.burst_strength:.2f}"
+    if phoneme.phoneme_family == "nasal":
+        return f"{family_word} | {voice_word} | Nose Open {phoneme.nasal_open:.2f} | {front_word}"
+    return f"{family_word} | {open_word} | {height_word} | {front_word} | {round_word}"
 
 
 def formants_from_articulation(phoneme: ArticulationPhoneme) -> Tuple[float, float, float]:
@@ -405,8 +479,90 @@ def apply_simple_formant_layer(audio: np.ndarray, phoneme: ArticulationPhoneme) 
     return np.column_stack([filtered, filtered]).astype(np.float32)
 
 
+def _fade_and_normalize_mono(mono: np.ndarray, attack_ms: int, release_ms: int, peak: float = 0.78) -> np.ndarray:
+    mono = np.asarray(mono, dtype=np.float64)
+    if mono.size == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    attack = min(max(1, int(SAMPLE_RATE * attack_ms / 1000.0)), max(1, mono.size // 2))
+    release = min(max(1, int(SAMPLE_RATE * release_ms / 1000.0)), max(1, mono.size // 2))
+    mono[:attack] *= np.linspace(0.0, 1.0, attack, dtype=np.float64)
+    mono[-release:] *= np.linspace(1.0, 0.0, release, dtype=np.float64)
+    current_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+    if current_peak > 0.0:
+        mono = mono / current_peak * peak
+    return np.column_stack([mono, mono]).astype(np.float32)
+
+
+def _colored_noise(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarray:
+    rng_seed = abs(hash((phoneme.name, phoneme.ipa, phoneme.phoneme_family))) % (2 ** 32)
+    rng = np.random.default_rng(rng_seed)
+    noise = rng.normal(0.0, 1.0, sample_count)
+    spectrum = np.fft.rfft(noise)
+    freqs = np.fft.rfftfreq(sample_count, 1.0 / SAMPLE_RATE)
+    brightness = float(np.clip((phoneme.noise_color + phoneme.tongue_frontness + (1.0 - phoneme.lip_rounding)) / 3.0, 0.0, 1.0))
+    center = 650.0 + brightness * 6100.0
+    width = 420.0 + phoneme.teeth_gap * 2400.0 + phoneme.air_pressure * 1200.0
+    envelope = 0.08 + np.exp(-0.5 * ((freqs - center) / max(180.0, width)) ** 2)
+    envelope += 0.35 * np.clip(freqs / 8000.0, 0.0, 1.0) * brightness
+    return np.fft.irfft(spectrum * envelope, n=sample_count)
+
+
+def _voiced_tone(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarray:
+    t = np.arange(sample_count, dtype=np.float64) / SAMPLE_RATE
+    pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
+    tone = np.sin(2.0 * np.pi * pitch * t)
+    tone += 0.35 * np.sin(2.0 * np.pi * pitch * 2.0 * t)
+    tone += 0.18 * np.sin(2.0 * np.pi * pitch * 3.0 * t)
+    return tone * float(np.clip(phoneme.voice_strength, 0.0, 1.0))
+
+
+def _render_fricative_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
+    duration = float(np.clip(phoneme.duration_ms / 1000.0, 0.30, 0.60))
+    sample_count = max(1, int(duration * SAMPLE_RATE))
+    mono = _colored_noise(sample_count, phoneme) * (0.20 + phoneme.air_pressure * 0.80)
+    if phoneme.voiced:
+        mono += _voiced_tone(sample_count, phoneme) * 0.32
+    return _fade_and_normalize_mono(mono, phoneme.attack_ms, phoneme.release_ms)
+
+
+def _render_stop_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
+    duration = float(np.clip(phoneme.duration_ms / 1000.0, 0.12, 0.25))
+    sample_count = max(1, int(duration * SAMPLE_RATE))
+    mono = np.zeros(sample_count, dtype=np.float64)
+    closure_samples = min(sample_count - 1, int(sample_count * (0.25 + phoneme.closure * 0.30)))
+    burst_samples = min(sample_count - closure_samples, max(1, int(SAMPLE_RATE * 0.045)))
+    burst = _colored_noise(burst_samples, phoneme) * (0.25 + phoneme.burst_strength)
+    mono[closure_samples:closure_samples + burst_samples] += burst
+    if phoneme.voiced and closure_samples < sample_count:
+        onset = _voiced_tone(sample_count - closure_samples, phoneme)
+        onset *= np.linspace(0.15, 1.0, onset.size)
+        mono[closure_samples:] += onset * 0.38
+    return _fade_and_normalize_mono(mono, 2, max(phoneme.release_ms, 35), peak=0.82)
+
+
+def _render_nasal_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
+    duration = float(np.clip(phoneme.duration_ms / 1000.0, 0.30, 0.60))
+    sample_count = max(1, int(duration * SAMPLE_RATE))
+    tone = _voiced_tone(sample_count, phoneme)
+    spectrum = np.fft.rfft(tone)
+    freqs = np.fft.rfftfreq(sample_count, 1.0 / SAMPLE_RATE)
+    nasal_center = 240.0 + (1.0 - phoneme.tongue_frontness) * 180.0
+    envelope = 0.18 + 1.55 * np.exp(-0.5 * ((freqs - nasal_center) / 95.0) ** 2)
+    envelope += 0.45 * np.exp(-0.5 * ((freqs - 950.0) / 260.0) ** 2)
+    envelope *= 1.0 / (1.0 + (freqs / (1500.0 + phoneme.nasal_open * 1200.0)) ** 2)
+    mono = np.fft.irfft(spectrum * envelope, n=sample_count) * (0.45 + phoneme.nasal_open * 0.55)
+    return _fade_and_normalize_mono(mono, phoneme.attack_ms, phoneme.release_ms, peak=0.70)
+
+
 def render_articulation_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
     phoneme = phoneme.clamped()
+    if phoneme.phoneme_family == "fricative":
+        return _render_fricative_phoneme(phoneme)
+    if phoneme.phoneme_family == "stop":
+        return _render_stop_phoneme(phoneme)
+    if phoneme.phoneme_family == "nasal":
+        return _render_nasal_phoneme(phoneme)
+
     duration = max(0.12, phoneme.duration_ms / 1000.0)
     settings = SynthSettings(
         wave_start_db={"sine": -7.0, "triangle": -12.0, "sawtooth": -10.0, "square": -20.0},
@@ -1063,6 +1219,9 @@ class WaveCanvas(QWidget):
         self.animation_phase = 0.0
         self.zoom_factor = 1.0
         self.zoom_center = 0.5
+        self.playhead_fraction: float | None = None
+        self.playhead_sample_index: int | None = None
+        self.playhead_sample_count = 0
         self.setMouseTracking(True)
 
         self.timer = QTimer(self)
@@ -1100,24 +1259,56 @@ class WaveCanvas(QWidget):
         self.update()
         event.accept()
 
-    def center_on_playback_fraction(self, fraction: float) -> None:
-        """Approximate playback-follow scrolling for zoomed Wave Explorer views."""
-        if self.zoom_factor <= 1.01:
-            return
-        self.zoom_center = float(np.clip(fraction, 0.02, 0.98))
+    def set_playhead_fraction(self, fraction: float | None) -> None:
+        """Set the displayed playback playhead without changing the user's zoom level."""
+        if fraction is None:
+            self.playhead_fraction = None
+            self.playhead_sample_index = None
+        else:
+            self.playhead_fraction = float(np.clip(fraction, 0.0, 1.0))
+            self.playhead_sample_count = int(max(1, self.audio.shape[0]))
+            self.playhead_sample_index = int(round(self.playhead_fraction * max(0, self.playhead_sample_count - 1)))
         self.update()
 
-    def _visible_slice(self, data: np.ndarray) -> np.ndarray:
-        if data.size == 0 or self.zoom_factor <= 1.01:
-            return data
+    def set_playhead_sample(self, sample_index: int | None, sample_count: int | None = None) -> None:
+        """Set playback playhead by sample index for callers that track sample counts."""
+        if sample_index is None:
+            self.set_playhead_fraction(None)
+            return
+        total = int(sample_count or self.audio.shape[0] or 1)
+        self.playhead_sample_count = max(1, total)
+        self.playhead_sample_index = int(np.clip(sample_index, 0, self.playhead_sample_count - 1))
+        self.playhead_fraction = self.playhead_sample_index / max(1, self.playhead_sample_count - 1)
+        self.update()
 
-        total = data.shape[0]
+    def center_on_playback_fraction(self, fraction: float) -> None:
+        """Approximate playback-follow scrolling for zoomed Wave Explorer views."""
+        fraction = float(np.clip(fraction, 0.0, 1.0))
+        self.set_playhead_fraction(fraction)
+        if self.zoom_factor > 1.01:
+            # Keep the current position visible while preserving zoom. A centered
+            # target feels stable for this vertical waveform time view.
+            self.zoom_center = float(np.clip(fraction, 0.02, 0.98))
+        self.update()
+
+    def center_on_sample(self, sample_index: int) -> None:
+        total = int(max(1, self.audio.shape[0]))
+        fraction = float(np.clip(sample_index, 0, total - 1)) / max(1, total - 1)
+        self.center_on_playback_fraction(fraction)
+
+    def _visible_bounds(self, total: int) -> Tuple[int, int]:
+        if total <= 0 or self.zoom_factor <= 1.01:
+            return 0, max(0, total)
         visible = max(32, int(total / self.zoom_factor))
         visible = min(visible, total)
-
         center = int(total * self.zoom_center)
         start = max(0, min(total - visible, center - visible // 2))
-        end = start + visible
+        return start, start + visible
+
+    def _visible_slice(self, data: np.ndarray) -> np.ndarray:
+        if data.size == 0:
+            return data
+        start, end = self._visible_bounds(data.shape[0])
         return data[start:end]
 
     def set_data(
@@ -1251,6 +1442,7 @@ class WaveCanvas(QWidget):
         self._draw_wave_column(painter, area, right_x, "Right", QColor("#ff4fa3"), right, 6)
 
         self._draw_condition_overlay(painter, area, left_x, common_x, right_x)
+        self._draw_playhead(painter, area)
 
         painter.setPen(QColor("#263238"))
         painter.setFont(QFont("Arial", 10, QFont.Bold))
@@ -1263,6 +1455,25 @@ class WaveCanvas(QWidget):
             Qt.AlignCenter,
             zoom_text,
         )
+
+    def _draw_playhead(self, painter: QPainter, area: QRectF) -> None:
+        if self.playhead_fraction is None or self.audio.size == 0:
+            return
+        total = int(max(1, self.audio.shape[0]))
+        start, end = self._visible_bounds(total)
+        sample_index = int(np.clip(round(self.playhead_fraction * max(0, total - 1)), 0, max(0, total - 1)))
+        if sample_index < start or sample_index > max(start, end - 1):
+            return
+        visible = max(1, end - start - 1)
+        y = area.top() + ((sample_index - start) / visible) * area.height()
+        painter.setPen(QPen(QColor("#ff2d55"), 4, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(area.left() - 6, y), QPointF(area.right() + 6, y))
+        painter.setBrush(QColor("#ff2d55"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(area.left() - 12, y), 6, 6)
+        painter.setPen(QColor("#7a0030"))
+        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        painter.drawText(QRectF(area.right() - 94, y - 22, 88, 18), Qt.AlignRight | Qt.AlignVCenter, "▶ playhead")
 
     def _draw_condition_overlay(
         self,
@@ -2066,8 +2277,10 @@ class WaveExplorerWindow(QWidget):
         self.resize(760, 520)
         self.setMinimumSize(QSize(620, 420))
 
-        self.playback_start_time: float | None = None
+        self.playback_start_monotonic: float | None = None
         self.playback_duration_seconds = 0.0
+        self.playback_audio_sample_count = 0
+        self.playback_sample_rate = SAMPLE_RATE
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -2104,25 +2317,29 @@ class WaveExplorerWindow(QWidget):
             f"{message}  •  {seconds:.2f}s sound-picture. Mouse wheel zooms; playback follow is approximate."
         )
 
-    def start_playback_follow(self, audio_samples: int) -> None:
-        self.playback_duration_seconds = max(0.0, float(audio_samples) / SAMPLE_RATE)
+    def start_playback_follow(self, audio_samples: int, sample_rate: int = SAMPLE_RATE) -> None:
+        self.playback_audio_sample_count = int(max(0, audio_samples))
+        self.playback_sample_rate = int(max(1, sample_rate))
+        self.playback_duration_seconds = max(0.0, float(self.playback_audio_sample_count) / self.playback_sample_rate)
         if self.playback_duration_seconds <= 0.0:
             self.stop_playback_follow()
             return
-        self.playback_start_time = time.monotonic()
-        self.follow_timer.start(45)
+        self.playback_start_monotonic = time.monotonic()
+        self.follow_timer.start(33)
+        print(f"[WaveToy Playback] scrolling enabled for Wave Explorer ({self.playback_duration_seconds:.2f}s)")
         self._follow_playback_tick()
 
     def stop_playback_follow(self) -> None:
-        self.playback_start_time = None
+        self.playback_start_monotonic = None
+        self.canvas.set_playhead_fraction(None)
         if self.follow_timer.isActive():
             self.follow_timer.stop()
 
     def _follow_playback_tick(self) -> None:
-        if self.playback_start_time is None or self.playback_duration_seconds <= 0.0:
+        if self.playback_start_monotonic is None or self.playback_duration_seconds <= 0.0:
             self.stop_playback_follow()
             return
-        elapsed = time.monotonic() - self.playback_start_time
+        elapsed = time.monotonic() - self.playback_start_monotonic
         if elapsed >= self.playback_duration_seconds:
             self.canvas.center_on_playback_fraction(1.0)
             self.stop_playback_follow()
@@ -2720,6 +2937,9 @@ class VocalTractCanvas(QWidget):
         tongue_height = float(np.clip(p.tongue_height, 0.0, 1.0))
         tongue_front = float(np.clip(p.tongue_frontness, 0.0, 1.0))
         rounding = float(np.clip(p.lip_rounding, 0.0, 1.0))
+        closure = float(np.clip(p.closure, 0.0, 1.0))
+        nasal_open = float(np.clip(p.nasal_open, 0.0, 1.0))
+        air_pressure = float(np.clip(p.air_pressure, 0.0, 1.0))
 
         face_rect = QRectF(rect.left() + 34, rect.top() + 8, rect.width() - 68, rect.height() - 16)
         painter.setPen(QPen(QColor("#5f4b32"), 5))
@@ -2750,6 +2970,37 @@ class VocalTractCanvas(QWidget):
         painter.setBrush(QColor("#ff8fa3"))
         painter.drawPath(tongue_path)
 
+        if closure > 0.08:
+            closure_y = mouth_rect.center().y()
+            painter.setPen(QPen(QColor("#ffb703"), 6 + int(closure * 10), Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(QPointF(mouth_rect.left() + 18, closure_y), QPointF(mouth_rect.right() - 18, closure_y))
+            painter.setFont(QFont("Sans Serif", 10, QFont.Bold))
+            painter.setPen(QColor("#7a4f00"))
+            painter.drawText(QRectF(mouth_rect.left(), mouth_rect.top() - 24, mouth_rect.width(), 20), Qt.AlignCenter, "closure")
+
+        if air_pressure > 0.05:
+            painter.setPen(QPen(QColor(78, 205, 196, 70 + int(air_pressure * 140)), 3, Qt.DashLine, Qt.RoundCap))
+            for i in range(3):
+                y = mouth_rect.center().y() - 24 + i * 24
+                painter.drawLine(QPointF(face_rect.left() + 38, y), QPointF(mouth_rect.left() - 10, y + (i - 1) * 6))
+
+        nose_rect = QRectF(face_rect.center().x() - 22, face_rect.top() + 136, 44, 48)
+        painter.setPen(QPen(QColor("#8d6e63"), 3))
+        painter.setBrush(QColor("#ffc8a2"))
+        painter.drawEllipse(nose_rect)
+        if nasal_open > 0.05:
+            painter.setPen(QPen(QColor("#6a4c93"), 3 + int(nasal_open * 6)))
+            painter.drawArc(nose_rect.adjusted(6, 12, -6, 10), 200 * 16, 140 * 16)
+            painter.setPen(QPen(QColor("#6a4c93"), 2, Qt.DotLine))
+            painter.drawLine(QPointF(nose_rect.center().x(), nose_rect.bottom()), QPointF(nose_rect.center().x(), mouth_rect.top()))
+
+        if p.voiced:
+            throat = QRectF(face_rect.left() + 36, face_rect.bottom() - 88, 58, 54)
+            painter.setPen(QPen(QColor("#4361ee"), 3))
+            painter.setBrush(QColor(67, 97, 238, 50))
+            painter.drawEllipse(throat)
+            painter.drawText(throat, Qt.AlignCenter, "voice")
+
         painter.setPen(QPen(QColor("#3a506b"), 4))
         painter.setBrush(QColor("#ffffff"))
         painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.30, face_rect.top() + 80, 32, 42))
@@ -2758,7 +3009,7 @@ class VocalTractCanvas(QWidget):
         painter.setPen(QPen(QColor("#2b2d42"), 2))
         painter.setFont(QFont("Sans Serif", 14, QFont.Bold))
         f1, f2, f3 = formants_from_articulation(p)
-        painter.drawText(rect.adjusted(10, rect.height() - 56, -10, -10), Qt.AlignLeft | Qt.AlignVCenter, f"F1 {f1:.0f}  F2 {f2:.0f}  F3 {f3:.0f} Hz")
+        painter.drawText(rect.adjusted(10, rect.height() - 56, -10, -10), Qt.AlignLeft | Qt.AlignVCenter, f"{p.phoneme_family.title()}  |  F1 {f1:.0f}  F2 {f2:.0f}  F3 {f3:.0f} Hz")
         painter.end()
 
 
@@ -2829,6 +3080,12 @@ class WaveToyWindow(QMainWindow):
         self._preview_stop_timer = QTimer(self)
         self._preview_stop_timer.setSingleShot(True)
         self._preview_stop_timer.timeout.connect(lambda: self._set_preview_motion(False))
+        self.playback_start_monotonic: float | None = None
+        self.playback_duration_seconds = 0.0
+        self.playback_audio_sample_count = 0
+        self.playback_sample_rate = SAMPLE_RATE
+        self.playback_timer = QTimer(self)
+        self.playback_timer.timeout.connect(self._playback_timer_tick)
 
         self.timeline_clips: List[TimelineClip] = []
         self.timeline_lane_names = ["🎵 Melody Lane", "🥁 Rhythm Lane", "🌌 Atmosphere Lane", "✨ Effects Lane"]
@@ -2865,6 +3122,7 @@ class WaveToyWindow(QMainWindow):
         self.phoneme_cards_widget: QWidget | None = None
         self.articulation_sliders: Dict[str, QSlider] = {}
         self.articulation_value_labels: Dict[str, QLabel] = {}
+        self.articulation_voiced_checkbox: QCheckBox | None = None
         self.phoneme_preview_audio = np.zeros((0, 2), dtype=np.float32)
         self.phoneme_loop_enabled = False
         self.phoneme_loop_timer = QTimer(self)
@@ -3602,7 +3860,7 @@ class WaveToyWindow(QMainWindow):
         title = QLabel("🗣 Articulation Lab")
         title.setObjectName("title")
         title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel("Design vowel phonemes by moving a toy mouth. Phase 1 makes approximate vowel sounds, not full speech.")
+        subtitle = QLabel("Design vowel and consonant phonemes by moving a toy vocal tract. Phase 2 adds approximate fricatives, stops, and nasals — still playful, not full speech.")
         subtitle.setObjectName("subtitle")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setWordWrap(True)
@@ -3651,6 +3909,11 @@ class WaveToyWindow(QMainWindow):
             ("lip_rounding", "💋 Lip Round", 0, 100, 0),
             ("voice_pitch", "🎤 Voice Pitch", 60, 880, 220),
             ("voice_strength", "🔊 Voice Strength", 0, 100, 65),
+            ("air_pressure", "🌬 Air Pressure", 0, 100, 45),
+            ("teeth_gap", "🦷 Teeth Gap", 0, 100, 50),
+            ("closure", "🔒 Closure", 0, 100, 0),
+            ("burst_strength", "💥 Burst", 0, 100, 0),
+            ("nasal_open", "👃 Nose Open", 0, 100, 0),
         )):
             text = QLabel(label)
             text.setObjectName("articulationControlLabel")
@@ -3667,6 +3930,10 @@ class WaveToyWindow(QMainWindow):
             controls.addWidget(text, row, 0)
             controls.addWidget(slider, row, 1)
             controls.addWidget(value_label, row, 2)
+        self.articulation_voiced_checkbox = QCheckBox("🎤 Voice On")
+        self.articulation_voiced_checkbox.setChecked(True)
+        self.articulation_voiced_checkbox.toggled.connect(lambda _checked: self._articulation_slider_changed("voiced"))
+        controls.addWidget(self.articulation_voiced_checkbox, controls.rowCount(), 0, 1, 3)
         explorer_layout.addLayout(controls)
         main.addWidget(explorer, 3)
 
@@ -3687,6 +3954,19 @@ class WaveToyWindow(QMainWindow):
             button.clicked.connect(lambda checked=False, preset_name=name: self._select_vowel_preset(preset_name))
             preset_layout.addWidget(button, index // 2, index % 2)
         side_layout.addWidget(preset_box)
+
+        for section_title, presets in CONSONANT_PRESET_SECTIONS:
+            consonant_box = self._toy_group(section_title)
+            consonant_layout = QGridLayout(consonant_box)
+            consonant_layout.setContentsMargins(12, 18, 12, 12)
+            consonant_layout.setSpacing(10)
+            for index, (name, data) in enumerate(presets.items()):
+                button = QPushButton(f"{data['emoji']}\n{name}")
+                button.setObjectName("articulationPresetButton")
+                button.setMinimumSize(QSize(132, 82))
+                button.clicked.connect(lambda checked=False, preset_name=name, preset_data=data: self._select_consonant_preset(preset_name, preset_data))
+                consonant_layout.addWidget(button, index // 2, index % 2)
+            side_layout.addWidget(consonant_box)
 
         save_button = self._make_story_button("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme)
         side_layout.addWidget(save_button)
@@ -3740,6 +4020,16 @@ class WaveToyWindow(QMainWindow):
             voice_strength=self._articulation_slider_value("voice_strength"),
             duration_ms=self.current_phoneme.duration_ms,
             preview_color=self.current_phoneme.preview_color,
+            phoneme_family=self.current_phoneme.phoneme_family,
+            air_pressure=self._articulation_slider_value("air_pressure"),
+            teeth_gap=self._articulation_slider_value("teeth_gap"),
+            closure=self._articulation_slider_value("closure"),
+            burst_strength=self._articulation_slider_value("burst_strength"),
+            nasal_open=self._articulation_slider_value("nasal_open"),
+            voiced=bool(self.articulation_voiced_checkbox.isChecked()) if self.articulation_voiced_checkbox is not None else self.current_phoneme.voiced,
+            noise_color=self.current_phoneme.noise_color,
+            attack_ms=self.current_phoneme.attack_ms,
+            release_ms=self.current_phoneme.release_ms,
         ).clamped()
 
     def _set_articulation_ui_from_phoneme(self, phoneme: ArticulationPhoneme) -> None:
@@ -3752,6 +4042,11 @@ class WaveToyWindow(QMainWindow):
             "lip_rounding": int(round(phoneme.lip_rounding * 100)),
             "voice_pitch": int(round(phoneme.voice_pitch)),
             "voice_strength": int(round(phoneme.voice_strength * 100)),
+            "air_pressure": int(round(phoneme.air_pressure * 100)),
+            "teeth_gap": int(round(phoneme.teeth_gap * 100)),
+            "closure": int(round(phoneme.closure * 100)),
+            "burst_strength": int(round(phoneme.burst_strength * 100)),
+            "nasal_open": int(round(phoneme.nasal_open * 100)),
         }
         for key, value in values.items():
             slider = self.articulation_sliders.get(key)
@@ -3759,6 +4054,10 @@ class WaveToyWindow(QMainWindow):
                 slider.blockSignals(True)
                 slider.setValue(value)
                 slider.blockSignals(False)
+        if self.articulation_voiced_checkbox is not None:
+            self.articulation_voiced_checkbox.blockSignals(True)
+            self.articulation_voiced_checkbox.setChecked(phoneme.voiced)
+            self.articulation_voiced_checkbox.blockSignals(False)
         self._update_articulation_preview(regenerate=True)
 
     def _articulation_slider_changed(self, key: str) -> None:
@@ -3771,7 +4070,8 @@ class WaveToyWindow(QMainWindow):
     def _update_articulation_preview(self, regenerate: bool = False) -> None:
         p = self.current_phoneme.clamped()
         if self.articulation_name_label is not None:
-            emoji = next((str(data["emoji"]) for data in VOWEL_PRESETS.values() if data.get("ipa") == p.ipa), "🗣")
+            all_preset_data = list(VOWEL_PRESETS.values()) + [data for _title, presets in CONSONANT_PRESET_SECTIONS for data in presets.values()]
+            emoji = next((str(data["emoji"]) for data in all_preset_data if data.get("ipa") == p.ipa), "🗣")
             self.articulation_name_label.setText(f"{emoji} {p.name}")
         if self.articulation_ipa_label is not None:
             self.articulation_ipa_label.setText(f"IPA /{p.ipa}/")
@@ -3791,7 +4091,15 @@ class WaveToyWindow(QMainWindow):
     def _select_vowel_preset(self, preset_name: str, play: bool = False) -> None:
         data = VOWEL_PRESETS[preset_name]
         pitch = self._settings_from_ui().pitch_start_hz if hasattr(self, "pitch_start") else 220.0
-        phoneme = ArticulationPhoneme.from_json_dict({**data, "name": preset_name, "voice_pitch": pitch, "voice_strength": 0.65, "duration_ms": 500})
+        phoneme = ArticulationPhoneme.from_json_dict({**data, "name": preset_name, "phoneme_family": "vowel", "voiced": True, "voice_pitch": pitch, "voice_strength": 0.65, "duration_ms": 500})
+        self._set_articulation_ui_from_phoneme(phoneme)
+        if play:
+            self._play_phoneme_preview()
+
+    def _select_consonant_preset(self, preset_name: str, preset_data: Dict[str, object], play: bool = False) -> None:
+        pitch = self._settings_from_ui().pitch_start_hz if hasattr(self, "pitch_start") else 220.0
+        data = {**preset_data, "name": preset_name, "voice_pitch": pitch, "voice_strength": 0.62}
+        phoneme = ArticulationPhoneme.from_json_dict(data)
         self._set_articulation_ui_from_phoneme(phoneme)
         if play:
             self._play_phoneme_preview()
@@ -3874,7 +4182,7 @@ class WaveToyWindow(QMainWindow):
                 if widget is not None:
                     widget.deleteLater()
         if not self.saved_phonemes:
-            empty = QLabel("Save a vowel to make a reusable phoneme card.")
+            empty = QLabel("Save a vowel or consonant to make a reusable phoneme card.")
             empty.setWordWrap(True)
             empty.setObjectName("symbolHint")
             layout.addWidget(empty)
@@ -6194,10 +6502,54 @@ class WaveToyWindow(QMainWindow):
         """Play the current sound once."""
         self._generate()
         self._play_current_audio_once()
-        if self.wave_explorer is not None:
-            self.wave_explorer.start_playback_follow(len(self.current_audio))
+        self._start_playback_tracking(len(self.current_audio), SAMPLE_RATE)
         if not self.live_loop_enabled:
             self._start_preview_motion_for_current_duration()
+
+    def _start_playback_tracking(self, audio_samples: int, sample_rate: int = SAMPLE_RATE) -> None:
+        self.playback_audio_sample_count = int(max(0, audio_samples))
+        self.playback_sample_rate = int(max(1, sample_rate))
+        self.playback_duration_seconds = max(0.0, self.playback_audio_sample_count / self.playback_sample_rate)
+        if self.playback_duration_seconds <= 0.0:
+            self._stop_playback_tracking(clear_playheads=True)
+            return
+        self.playback_start_monotonic = time.monotonic()
+        print(f"[WaveToy Playback] play started samples={self.playback_audio_sample_count} rate={self.playback_sample_rate}")
+        print(f"[WaveToy Playback] audio duration {self.playback_duration_seconds:.2f}s")
+        self.playback_timer.start(33)
+        print("[WaveToy Playback] playback timer started")
+        if self.wave_explorer is not None:
+            self.wave_explorer.start_playback_follow(self.playback_audio_sample_count, self.playback_sample_rate)
+        self._playback_timer_tick()
+
+    def _stop_playback_tracking(self, clear_playheads: bool = False) -> None:
+        self.playback_start_monotonic = None
+        if self.playback_timer.isActive():
+            self.playback_timer.stop()
+        if self.wave_explorer is not None:
+            self.wave_explorer.stop_playback_follow()
+        if clear_playheads:
+            for canvas in (getattr(self, "play_canvas", None), self.dashboard_canvas):
+                if canvas is not None:
+                    canvas.set_playhead_fraction(None)
+
+    def _playback_timer_tick(self) -> None:
+        if self.playback_start_monotonic is None or self.playback_duration_seconds <= 0.0:
+            self._stop_playback_tracking()
+            return
+        elapsed = time.monotonic() - self.playback_start_monotonic
+        if elapsed >= self.playback_duration_seconds:
+            fraction = 1.0
+            ended = True
+        else:
+            fraction = elapsed / self.playback_duration_seconds
+            ended = False
+        for canvas in (getattr(self, "play_canvas", None), self.dashboard_canvas):
+            if canvas is not None:
+                canvas.center_on_playback_fraction(fraction)
+        if ended:
+            print("[WaveToy Playback] playback ended")
+            self._stop_playback_tracking(clear_playheads=True)
 
     def _play_current_audio_once(self) -> None:
         """Play already-generated audio once."""
@@ -6244,8 +6596,7 @@ class WaveToyWindow(QMainWindow):
         self.loop_status_label.setText("Loop: On")
         self._preview_stop_timer.stop()
         self._set_preview_motion(True)
-        if self.wave_explorer is not None:
-            self.wave_explorer.start_playback_follow(len(self.current_audio))
+        self._start_playback_tracking(len(self.current_audio), SAMPLE_RATE)
         self._restart_live_loop(regenerate=True)
 
     def _disable_live_loop(self) -> None:
@@ -6254,8 +6605,7 @@ class WaveToyWindow(QMainWindow):
         self.live_loop_is_refreshing = False
         self._preview_stop_timer.stop()
         self._set_preview_motion(False)
-        if self.wave_explorer is not None:
-            self.wave_explorer.stop_playback_follow()
+        self._stop_playback_tracking(clear_playheads=True)
         if sd is not None:
             try:
                 sd.stop()
@@ -6280,8 +6630,7 @@ class WaveToyWindow(QMainWindow):
 
             sd.stop()
             sd.play(self.current_audio, SAMPLE_RATE, blocking=False)
-            if self.wave_explorer is not None:
-                self.wave_explorer.start_playback_follow(len(self.current_audio))
+            self._start_playback_tracking(len(self.current_audio), SAMPLE_RATE)
 
             duration_ms = max(100, int((len(self.current_audio) / SAMPLE_RATE) * 1000))
             self.live_loop_timer.start(duration_ms)
@@ -6329,6 +6678,8 @@ class WaveToyWindow(QMainWindow):
 
     def _stop(self) -> None:
         self._disable_live_loop()
+        self._stop_playback_tracking(clear_playheads=True)
+        print("[WaveToy Playback] playback stopped")
 
     def _save(self) -> None:
         self._generate()
