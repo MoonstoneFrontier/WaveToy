@@ -119,7 +119,10 @@ class LeadPipelineService:
 
         lead.setdefault("lead_notes", []).append(f"[risk_flag] {clean_reason}")
         self._append_timeline_event(lead, "risk_flag_added", clean_reason, actor, source)
-        existing_risk_score = float(lead.get("risk_score") or 0)
+        try:
+            existing_risk_score = float(lead.get("risk_score") or 0)
+        except (TypeError, ValueError):
+            existing_risk_score = 0.0
         lead["risk_score"] = max(existing_risk_score, 0.75)
         if lead["risk_score"] >= 0.75:
             lead["acquisition_priority"] = "high"
