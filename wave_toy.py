@@ -1074,6 +1074,269 @@ class ToyButton(QPushButton):
         )
 
 
+
+
+class NoWheelSlider(QSlider):
+    """Slider that leaves mouse-wheel scrolling to parent scroll areas."""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
+    """Combo box that cannot be accidentally changed by page scrolling."""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class NoWheelSpinBox(QSpinBox):
+    """Spin box that cannot be accidentally changed by page scrolling."""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """Double spin box that cannot be accidentally changed by page scrolling."""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class VisualPanelButton(QPushButton):
+    """Large dashboard launcher with a cheap cached symbolic preview."""
+
+    COLORS = {
+        "sine": QColor("#2ecc71"),
+        "triangle": QColor("#f1c40f"),
+        "sawtooth": QColor("#3498db"),
+        "square": QColor("#e84393"),
+    }
+
+    def __init__(self, label: str, kind: str, color: str) -> None:
+        super().__init__()
+        self.label = label
+        self.kind = kind
+        self.accent = QColor(color)
+        self.status_text = "Ready"
+        self.preview_data: Dict[str, object] = {}
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumSize(QSize(176, 132))
+        self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
+        self.setToolTip(f"Open {label} controls.")
+
+    def set_status(self, status_text: str, preview_data: Dict[str, object] | None = None) -> None:
+        self.status_text = status_text
+        self.preview_data = preview_data or {}
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0.0, QColor("#ffffff"))
+        gradient.setColorAt(0.58, QColor(self.accent.red(), self.accent.green(), self.accent.blue(), 95))
+        gradient.setColorAt(1.0, QColor("#fff7c7"))
+        border = QColor(0, 0, 0, 95 if self.isDown() else 45)
+        painter.setPen(QPen(border, 4 if self.isDown() else 3))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(rect, 24, 24)
+
+        title_rect = rect.adjusted(12, 8, -12, -rect.height() + 42)
+        painter.setPen(QColor("#263238"))
+        painter.setFont(QFont("Arial", 16, QFont.Bold))
+        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, self.label)
+
+        preview_rect = rect.adjusted(12, 45, -12, -38)
+        self._draw_preview(painter, preview_rect)
+
+        status_rect = rect.adjusted(12, rect.height() - 32, -12, -8)
+        painter.setPen(QColor("#455a64"))
+        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        painter.drawText(status_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, self.status_text)
+
+    def _draw_preview(self, painter: QPainter, rect: QRectF) -> None:
+        painter.setPen(QPen(QColor(255, 255, 255, 190), 2))
+        painter.setBrush(QColor(255, 255, 255, 95))
+        painter.drawRoundedRect(rect, 16, 16)
+        if self.kind == "shape":
+            self._draw_shape_mix(painter, rect)
+        elif self.kind == "pitch":
+            self._draw_pitch_orbit(painter, rect)
+        elif self.kind == "tuning":
+            self._draw_tuning_ladder(painter, rect)
+        elif self.kind == "stereo":
+            self._draw_stereo_field(painter, rect)
+        elif self.kind == "effects":
+            self._draw_effect_blobs(painter, rect)
+        elif self.kind == "presets":
+            self._draw_preset_cards(painter, rect)
+        else:
+            self._draw_save_card(painter, rect)
+
+    def _draw_sample_waveform(self, painter: QPainter, rect: QRectF, samples: object, color: QColor, pen_width: int = 3) -> bool:
+        values = np.asarray(samples, dtype=np.float32).reshape(-1) if samples is not None else np.zeros(0, dtype=np.float32)
+        if values.size < 2:
+            return False
+        values = np.clip(values, -1.0, 1.0)
+        path = QPainterPath()
+        for index, value in enumerate(values):
+            x = rect.left() + rect.width() * index / max(1, values.size - 1)
+            y = rect.center().y() - float(value) * rect.height() * 0.42
+            if index == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        painter.setPen(QPen(color, pen_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)
+        return True
+
+    def _draw_shape_mix(self, painter: QPainter, rect: QRectF) -> None:
+        live_samples = self.preview_data.get("samples")
+        if self._draw_sample_waveform(painter, rect.adjusted(8, 8, -8, -8), live_samples, QColor("#ff4fa3"), 4):
+            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.setPen(QColor("#455a64"))
+            painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignTop | Qt.AlignRight, "Live mix")
+            return
+        amps = self.preview_data.get("amps", {})
+        muted = self.preview_data.get("muted", {})
+        solo = self.preview_data.get("solo")
+        baseline = rect.center().y()
+        for index, wave in enumerate(WAVE_ORDER):
+            amp = float(amps.get(wave, 0.0))
+            dimmed = bool(muted.get(wave, False)) or (solo is not None and solo != wave)
+            color = QColor(self.COLORS[wave])
+            color.setAlpha(70 if dimmed else 235)
+            pen_width = 5 if solo == wave else 3
+            painter.setPen(QPen(color, pen_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            path = QPainterPath()
+            y_offset = (index - 1.5) * rect.height() * 0.11
+            for step in range(48):
+                x = rect.left() + rect.width() * step / 47.0
+                phase = step / 8.0
+                if wave == "square":
+                    value = 1.0 if (step // 6) % 2 == 0 else -1.0
+                elif wave == "sawtooth":
+                    value = (phase % 1.0) * 2.0 - 1.0
+                elif wave == "triangle":
+                    value = 1.0 - 4.0 * abs((phase % 1.0) - 0.5)
+                else:
+                    value = math.sin(phase * 2.0 * math.pi)
+                y = baseline + y_offset - value * rect.height() * 0.18 * amp
+                if step == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            painter.drawPath(path)
+
+    def _draw_pitch_orbit(self, painter: QPainter, rect: QRectF) -> None:
+        center = rect.center()
+        radius = min(rect.width(), rect.height()) * 0.34
+        painter.setPen(QPen(QColor("#7bdff2"), 4))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(center, radius, radius)
+        notes = self.preview_data.get("notes", [])
+        if not notes:
+            notes = [("Main", "A", QColor("#ff4fa3"))]
+        painter.setFont(QFont("Arial", 8, QFont.Bold))
+        for index, item in enumerate(notes):
+            name, note, color = item
+            angle = -math.pi / 2 + index * 2 * math.pi / max(1, len(notes))
+            point = QPointF(center.x() + math.cos(angle) * radius, center.y() + math.sin(angle) * radius)
+            painter.setPen(QPen(QColor("white"), 2))
+            painter.setBrush(color if isinstance(color, QColor) else QColor("#ff4fa3"))
+            painter.drawEllipse(point, 12, 12)
+            painter.setPen(QColor("#263238"))
+            painter.drawText(QRectF(point.x() - 16, point.y() - 9, 32, 18), Qt.AlignCenter, str(note)[:2])
+
+    def _draw_tuning_ladder(self, painter: QPainter, rect: QRectF) -> None:
+        root = str(self.preview_data.get("root", "A"))
+        method = str(self.preview_data.get("method", "Piano Steps"))
+        painter.setPen(QPen(QColor("#9b5de5"), 4, Qt.SolidLine, Qt.RoundCap))
+        path = QPainterPath()
+        for step in range(12):
+            x = rect.left() + rect.width() * (step + 0.5) / 12.0
+            y = rect.bottom() - 12 - math.sin(step / 11.0 * math.pi) * (rect.height() - 28)
+            if step == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        painter.drawPath(path)
+        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        painter.setPen(QColor("#263238"))
+        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignTop | Qt.AlignLeft, root)
+        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignBottom | Qt.AlignRight, method[:18])
+
+    def _draw_stereo_field(self, painter: QPainter, rect: QRectF) -> None:
+        painter.setPen(QPen(QColor("#90a4ae"), 2, Qt.DashLine))
+        for frac in (0.2, 0.5, 0.8):
+            x = rect.left() + rect.width() * frac
+            painter.drawLine(QPointF(x, rect.top() + 8), QPointF(x, rect.bottom() - 8))
+        positions = self.preview_data.get("positions", [])
+        for index, item in enumerate(positions):
+            wave, pan, width, dance = item
+            color = QColor(self.COLORS.get(wave, QColor("#ff4fa3")))
+            x = rect.center().x() + float(pan) * rect.width() * 0.38
+            y = rect.top() + rect.height() * (0.28 + 0.14 * (index % 4))
+            radius = 8 + float(width) * 12
+            painter.setPen(QPen(color, 3))
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 70))
+            painter.drawEllipse(QPointF(x, y), radius, radius)
+            if float(dance) > 0.05:
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 120), 2, Qt.DashLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(QPointF(x, y), radius + 8, radius + 8)
+
+    def _draw_effect_blobs(self, painter: QPainter, rect: QRectF) -> None:
+        active = bool(self.preview_data.get("paul_active", False))
+        amount = float(self.preview_data.get("amount", 1.0))
+        live_rect = rect.adjusted(8, rect.height() * 0.45, -8, -8)
+        self._draw_sample_waveform(painter, live_rect, self.preview_data.get("after_samples"), QColor("#9b5de5" if active else "#78909c"), 3)
+        blobs = 3 if active else 1
+        for index in range(blobs):
+            frac = (index + 1) / (blobs + 1)
+            radius = 12 + min(18.0, amount * 0.9) * (0.45 + index * 0.18)
+            center = QPointF(rect.left() + rect.width() * frac, rect.center().y())
+            color = QColor("#9b5de5" if active else "#b0bec5")
+            painter.setPen(QPen(QColor("white"), 3))
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 130))
+            painter.drawEllipse(center, radius, radius)
+        painter.setFont(QFont("Arial", 18, QFont.Bold))
+        painter.setPen(QColor("#263238"))
+        painter.drawText(rect.adjusted(0, 0, 0, -rect.height() * 0.25), Qt.AlignCenter, "✨" if active else "😴")
+
+    def _draw_preset_cards(self, painter: QPainter, rect: QRectF) -> None:
+        for index, color in enumerate(["#ffd166", "#7bdff2", "#ff99c8"]):
+            card = QRectF(rect.left() + 18 + index * 24, rect.top() + 14 + index * 8, rect.width() * 0.48, rect.height() * 0.56)
+            painter.setPen(QPen(QColor(0, 0, 0, 55), 2))
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(card, 10, 10)
+            painter.setPen(QPen(QColor("#263238"), 2))
+            y = card.center().y()
+            painter.drawLine(QPointF(card.left() + 10, y), QPointF(card.right() - 10, y - 8 + index * 5))
+
+    def _draw_save_card(self, painter: QPainter, rect: QRectF) -> None:
+        disk = QRectF(rect.left() + 20, rect.top() + 10, rect.height() * 0.74, rect.height() * 0.74)
+        painter.setPen(QPen(QColor("#263238"), 3))
+        painter.setBrush(QColor("#ffd166"))
+        painter.drawRoundedRect(disk, 8, 8)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRect(disk.adjusted(10, 8, -10, -disk.height() * 0.58))
+        painter.setPen(QPen(QColor("#ff4fa3"), 3, Qt.SolidLine, Qt.RoundCap))
+        path = QPainterPath()
+        for step in range(28):
+            x = rect.left() + rect.width() * (0.48 + 0.46 * step / 27.0)
+            y = rect.center().y() - math.sin(step / 3.0) * rect.height() * 0.18
+            if step == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        painter.drawPath(path)
+
+
 class WaveExplorerWindow(QWidget):
     """Large non-modal waveform popup that reuses WaveCanvas rendering."""
 
@@ -1706,6 +1969,12 @@ class WaveToyWindow(QMainWindow):
         self.wave_cents_sliders: Dict[str, QSlider] = {}
         self.wave_pitch_labels: Dict[str, QLabel] = {}
         self.wave_pitch_panels: Dict[str, QWidget] = {}
+        self.visual_panel_buttons: Dict[str, VisualPanelButton] = {}
+        self.dashboard_canvas: WaveCanvas | None = None
+        self.dashboard_workspace_panel: QWidget | None = None
+        self.dashboard_workspace_layout: QGridLayout | None = None
+        self.dashboard_workspace_title: QLabel | None = None
+        self.active_dashboard_workspace = "shape"
         self.wave_explorer: WaveExplorerWindow | None = None
         self._preview_stop_timer = QTimer(self)
         self._preview_stop_timer.setSingleShot(True)
@@ -1755,6 +2024,7 @@ class WaveToyWindow(QMainWindow):
 
         outer.addWidget(title)
         outer.addWidget(subtitle)
+        self._build_visual_dashboard(outer)
 
         body = QHBoxLayout()
         body.setSpacing(16)
@@ -1915,16 +2185,16 @@ class WaveToyWindow(QMainWindow):
             follow_pitch = QCheckBox("👯 Follow Main")
             follow_pitch.setChecked(True)
             follow_pitch.setToolTip("Click to switch between 👯 Follow Main and 🎯 My Note for this wave.")
-            note_combo = QComboBox()
+            note_combo = NoWheelComboBox()
             note_combo.addItems(NOTE_NAMES)
             note_combo.setCurrentText("A")
             note_combo.setToolTip("🎯 My Note for this wave when Follow Main is off.")
             note_button = QPushButton("🎡 A")
-            octave_spin = QSpinBox()
+            octave_spin = NoWheelSpinBox()
             octave_spin.setRange(0, 8)
             octave_spin.setValue(4)
             octave_spin.setToolTip("🧸 Size: octave for this wave's own note.")
-            cents_slider = QSlider(Qt.Horizontal)
+            cents_slider = NoWheelSlider(Qt.Horizontal)
             cents_slider.setRange(-50 * 100, 50 * 100)
             cents_slider.setValue(0)
             cents_slider.setToolTip("🎯 Wiggle: fine-tune this wave in cents when My Note is on.")
@@ -1946,7 +2216,7 @@ class WaveToyWindow(QMainWindow):
             self.wave_pitch_labels[wave_type] = pitch_label
 
             start_label = QLabel(self._slider_picture_text(default_start[wave_type] * DB_SLIDER_SCALE, "loudness"))
-            start_slider = QSlider(Qt.Horizontal)
+            start_slider = NoWheelSlider(Qt.Horizontal)
             start_slider.setRange(-20 * DB_SLIDER_SCALE, 0)
             start_slider.setValue(default_start[wave_type] * DB_SLIDER_SCALE)
             start_slider.setTickInterval(2 * DB_SLIDER_SCALE)
@@ -1955,7 +2225,7 @@ class WaveToyWindow(QMainWindow):
             start_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
             end_label = QLabel(self._slider_picture_text(default_end[wave_type] * DB_SLIDER_SCALE, "loudness"))
-            end_slider = QSlider(Qt.Horizontal)
+            end_slider = NoWheelSlider(Qt.Horizontal)
             end_slider.setRange(-20 * DB_SLIDER_SCALE, 0)
             end_slider.setValue(default_end[wave_type] * DB_SLIDER_SCALE)
             end_slider.setTickInterval(2 * DB_SLIDER_SCALE)
@@ -1964,7 +2234,7 @@ class WaveToyWindow(QMainWindow):
             end_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
             time_label = QLabel("🐢 Slow")
-            time_slider = QSlider(Qt.Horizontal)
+            time_slider = NoWheelSlider(Qt.Horizontal)
             time_slider.setRange(1, 100 * PERCENT_SLIDER_SCALE)
             time_slider.setValue(100 * PERCENT_SLIDER_SCALE)
             time_slider.setTickInterval(10 * PERCENT_SLIDER_SCALE)
@@ -1973,7 +2243,7 @@ class WaveToyWindow(QMainWindow):
             time_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_envelope_labels(wt))
 
             pan_label = QLabel(self._pan_picture_text(default_wave_pan[wave_type] * PERCENT_SLIDER_SCALE))
-            pan_slider = QSlider(Qt.Horizontal)
+            pan_slider = NoWheelSlider(Qt.Horizontal)
             pan_slider.setRange(-100 * PERCENT_SLIDER_SCALE, 100 * PERCENT_SLIDER_SCALE)
             pan_slider.setValue(default_wave_pan[wave_type] * PERCENT_SLIDER_SCALE)
             pan_slider.setToolTip("Where this ingredient sits between the left and right ear.")
@@ -1981,7 +2251,7 @@ class WaveToyWindow(QMainWindow):
             pan_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
             width_label = QLabel("↔️ Medium")
-            width_slider = QSlider(Qt.Horizontal)
+            width_slider = NoWheelSlider(Qt.Horizontal)
             width_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             width_slider.setValue(65 * PERCENT_SLIDER_SCALE)
             width_slider.setToolTip("How wide this ingredient feels in stereo space.")
@@ -1989,7 +2259,7 @@ class WaveToyWindow(QMainWindow):
             width_slider.valueChanged.connect(lambda value, wt=wave_type: self._update_wave_stereo_labels(wt))
 
             dance_label = QLabel("😴 Still")
-            dance_slider = QSlider(Qt.Horizontal)
+            dance_slider = NoWheelSlider(Qt.Horizontal)
             dance_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
             dance_slider.setValue(0)
             dance_slider.setToolTip("How much this ingredient dances between ears.")
@@ -2086,16 +2356,16 @@ class WaveToyWindow(QMainWindow):
         pitch_layout.setColumnStretch(0, 1)
         pitch_layout.setColumnStretch(1, 2)
 
-        self.note_combo = QComboBox()
+        self.note_combo = NoWheelComboBox()
         self.note_combo.addItems(NOTE_NAMES)
         self.note_combo.setCurrentText("A")
 
-        self.octave_slider = QSlider(Qt.Horizontal)
+        self.octave_slider = NoWheelSlider(Qt.Horizontal)
         self.octave_slider.setRange(2 * OCTAVE_SLIDER_SCALE, 6 * OCTAVE_SLIDER_SCALE)
         self.octave_slider.setValue(4 * OCTAVE_SLIDER_SCALE)
         self.octave_label = QLabel("🧸 Middle")
 
-        self.cents_slider = QSlider(Qt.Horizontal)
+        self.cents_slider = NoWheelSlider(Qt.Horizontal)
         self.cents_slider.setRange(-50 * 100, 50 * 100)
         self.cents_slider.setValue(0)
         self.cents_label = QLabel("🎯 Center")
@@ -2103,19 +2373,19 @@ class WaveToyWindow(QMainWindow):
         self.base_pitch_label = QLabel("Pitch: 🎵 ready")
         self.base_pitch_label.setObjectName("symbolHint")
 
-        self.tuning_method_combo = QComboBox()
+        self.tuning_method_combo = NoWheelComboBox()
         for method_id, method in TUNING_METHODS.items():
             self.tuning_method_combo.addItem(str(method["label"]), method_id)
             index = self.tuning_method_combo.count() - 1
             self.tuning_method_combo.setItemData(index, str(method["tooltip"]), Qt.ToolTipRole)
         self.tuning_method_combo.setToolTip("Choose how notes are spaced.")
 
-        self.tuning_root_combo = QComboBox()
+        self.tuning_root_combo = NoWheelComboBox()
         self.tuning_root_combo.addItems(NOTE_NAMES)
         self.tuning_root_combo.setCurrentText("A")
         self.tuning_root_combo.setToolTip("Pick the home note for tunings that lean around a root.")
 
-        self.tuning_reference_spin = QDoubleSpinBox()
+        self.tuning_reference_spin = NoWheelDoubleSpinBox()
         self.tuning_reference_spin.setRange(220.0, 880.0)
         self.tuning_reference_spin.setDecimals(1)
         self.tuning_reference_spin.setSingleStep(0.5)
@@ -2189,33 +2459,33 @@ class WaveToyWindow(QMainWindow):
         motion_layout.setColumnStretch(0, 1)
         motion_layout.setColumnStretch(1, 2)
 
-        self.duration_slider = QSlider(Qt.Horizontal)
+        self.duration_slider = NoWheelSlider(Qt.Horizontal)
         self.duration_slider.setRange(int(0.5 * SECONDS_SLIDER_SCALE), int(MAX_PREVIEW_SECONDS * SECONDS_SLIDER_SCALE))
         self.duration_slider.setValue(int(1.5 * SECONDS_SLIDER_SCALE))
         self.duration_label = QLabel("⏱️ Short")
         self.duration_slider.valueChanged.connect(self._sync_duration_slider_to_spin)
 
-        self.pitch_start = QSlider(Qt.Horizontal)
+        self.pitch_start = NoWheelSlider(Qt.Horizontal)
         self.pitch_start.setRange(36 * MIDI_SLIDER_SCALE, 84 * MIDI_SLIDER_SCALE)
         self.pitch_start.setValue(69 * MIDI_SLIDER_SCALE)
         self.pitch_start_label = QLabel("🎵 Middle")
 
-        self.pitch_end = QSlider(Qt.Horizontal)
+        self.pitch_end = NoWheelSlider(Qt.Horizontal)
         self.pitch_end.setRange(36 * MIDI_SLIDER_SCALE, 84 * MIDI_SLIDER_SCALE)
         self.pitch_end.setValue(69 * MIDI_SLIDER_SCALE)
         self.pitch_end_label = QLabel("🎵 Middle")
 
-        self.loud_start = QSlider(Qt.Horizontal)
+        self.loud_start = NoWheelSlider(Qt.Horizontal)
         self.loud_start.setRange(0, 100 * PERCENT_SLIDER_SCALE)
         self.loud_start.setValue(40 * PERCENT_SLIDER_SCALE)
         self.loud_start_label = QLabel("🌿 Medium")
 
-        self.loud_end = QSlider(Qt.Horizontal)
+        self.loud_end = NoWheelSlider(Qt.Horizontal)
         self.loud_end.setRange(0, 100 * PERCENT_SLIDER_SCALE)
         self.loud_end.setValue(40 * PERCENT_SLIDER_SCALE)
         self.loud_end_label = QLabel("🌿 Medium")
 
-        self.curve_combo = QComboBox()
+        self.curve_combo = NoWheelComboBox()
         for key, label in CURVE_LABELS.items():
             self.curve_combo.addItem(label, key)
 
@@ -2250,11 +2520,11 @@ class WaveToyWindow(QMainWindow):
         self.paulstretch_enabled = QCheckBox("😴 Effect Nap")
         self.paulstretch_enabled.setToolTip("Put this effect to sleep without changing its sliders.")
 
-        self.paul_amount_slider = QSlider(Qt.Horizontal)
+        self.paul_amount_slider = NoWheelSlider(Qt.Horizontal)
         self.paul_amount_slider.setRange(1 * PAULSTRETCH_SCALE, 30 * PAULSTRETCH_SCALE)
         self.paul_amount_slider.setValue(1 * PAULSTRETCH_SCALE)
 
-        self.paul_evolution_slider = QSlider(Qt.Horizontal)
+        self.paul_evolution_slider = NoWheelSlider(Qt.Horizontal)
         self.paul_evolution_slider.setRange(0, 100 * PERCENT_SLIDER_SCALE)
         self.paul_evolution_slider.setValue(15 * PERCENT_SLIDER_SCALE)
 
@@ -2286,7 +2556,7 @@ class WaveToyWindow(QMainWindow):
         self.pan_end_slider = self._make_percent_slider(-100, 100, 0)
         self.width_slider = self._make_percent_slider(0, 100, 45)
         self.auto_pan_depth_slider = self._make_percent_slider(0, 100, 0)
-        self.auto_pan_rate = QSlider(Qt.Horizontal)
+        self.auto_pan_rate = NoWheelSlider(Qt.Horizontal)
         self.auto_pan_rate.setRange(int(0.05 * RATE_SLIDER_SCALE), int(8.0 * RATE_SLIDER_SCALE))
         self.auto_pan_rate.setValue(int(0.5 * RATE_SLIDER_SCALE))
 
@@ -2426,6 +2696,293 @@ class WaveToyWindow(QMainWindow):
             else:
                 widget.valueChanged.connect(lambda *args: self._update_all_wave_previews())
 
+        self._activate_dashboard_workspace("shape")
+
+    def _build_visual_dashboard(self, outer: QVBoxLayout) -> None:
+        dashboard = self._toy_group("🌊 Wave Explorer Dashboard")
+        dashboard.setObjectName("dashboardGroup")
+        dashboard_layout = QGridLayout(dashboard)
+        dashboard_layout.setContentsMargins(12, 18, 12, 12)
+        dashboard_layout.setHorizontalSpacing(12)
+        dashboard_layout.setVerticalSpacing(10)
+        dashboard_layout.setColumnStretch(0, 5)
+        dashboard_layout.setColumnStretch(1, 2)
+        dashboard_layout.setColumnStretch(2, 2)
+
+        explorer_panel = QWidget()
+        explorer_panel.setObjectName("explorerDashboardPanel")
+        explorer_layout = QVBoxLayout(explorer_panel)
+        explorer_layout.setContentsMargins(0, 0, 0, 0)
+        explorer_layout.setSpacing(6)
+        explorer_title = QLabel("Wave Explorer is the main sound picture. Mouse wheel zooms only here.")
+        explorer_title.setObjectName("symbolHint")
+        explorer_title.setWordWrap(True)
+        self.dashboard_canvas = WaveCanvas()
+        self.dashboard_canvas.setMinimumSize(QSize(560, 245))
+        self.dashboard_canvas.setToolTip("Dashboard Wave Explorer preview. Mouse wheel zooms this waveform view.")
+        explorer_open = ToyButton("🔍 Open Big Explorer", "#7bdff2")
+        explorer_open.setMinimumHeight(44)
+        explorer_open.clicked.connect(self._open_wave_explorer)
+        self.dashboard_workspace_panel = QWidget()
+        self.dashboard_workspace_panel.setObjectName("workspacePanel")
+        workspace_outer = QVBoxLayout(self.dashboard_workspace_panel)
+        workspace_outer.setContentsMargins(8, 8, 8, 8)
+        workspace_outer.setSpacing(6)
+        self.dashboard_workspace_title = QLabel("Workspace")
+        self.dashboard_workspace_title.setObjectName("workspaceTitle")
+        self.dashboard_workspace_title.setWordWrap(True)
+        self.dashboard_workspace_layout = QGridLayout()
+        self.dashboard_workspace_layout.setHorizontalSpacing(8)
+        self.dashboard_workspace_layout.setVerticalSpacing(6)
+        workspace_outer.addWidget(self.dashboard_workspace_title)
+        workspace_outer.addLayout(self.dashboard_workspace_layout)
+
+        explorer_layout.addWidget(explorer_title)
+        explorer_layout.addWidget(self.dashboard_canvas, 1)
+        explorer_layout.addWidget(self.dashboard_workspace_panel)
+        explorer_layout.addWidget(explorer_open, 0, Qt.AlignRight)
+        dashboard_layout.addWidget(explorer_panel, 0, 0, 2, 1)
+
+        specs = [
+            ("shape", "🎚 Shape Mix", "#5cdb95"),
+            ("pitch", "🎯 Pitch Toys", "#ffd166"),
+            ("tuning", "🎼 Tuning Map", "#b8f2e6"),
+            ("stereo", "👂 Stereo Space", "#7bdff2"),
+            ("effects", "✨ Sound Magic", "#d7b9ff"),
+            ("presets", "🌈 Sound Experiments", "#ff99c8"),
+        ]
+        for index, (key, label, color) in enumerate(specs):
+            button = VisualPanelButton(label, key, color)
+            button.clicked.connect(lambda checked=False, workspace=key: self._activate_dashboard_workspace(workspace))
+            self.visual_panel_buttons[key] = button
+            dashboard_layout.addWidget(button, index // 2, 1 + index % 2)
+
+        outer.addWidget(dashboard)
+
+    def _clear_dashboard_workspace(self) -> None:
+        if self.dashboard_workspace_layout is None:
+            return
+        while self.dashboard_workspace_layout.count():
+            item = self.dashboard_workspace_layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                while child_layout.count():
+                    child = child_layout.takeAt(0)
+                    child_widget = child.widget()
+                    if child_widget is not None:
+                        child_widget.deleteLater()
+
+    def _activate_dashboard_workspace(self, workspace: str) -> None:
+        if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
+            return
+        self.active_dashboard_workspace = workspace
+        for key, button in self.visual_panel_buttons.items():
+            button.setDown(key == workspace)
+        self._clear_dashboard_workspace()
+        builders = {
+            "shape": self._build_shape_workspace,
+            "pitch": self._build_pitch_workspace,
+            "tuning": self._build_tuning_workspace,
+            "stereo": self._build_stereo_workspace,
+            "effects": self._build_effects_workspace,
+            "presets": self._build_presets_workspace,
+        }
+        builders.get(workspace, self._build_shape_workspace)()
+
+    def _make_synced_slider(self, source: QSlider) -> NoWheelSlider:
+        slider = NoWheelSlider(Qt.Horizontal)
+        slider.setRange(source.minimum(), source.maximum())
+        slider.setValue(source.value())
+        slider.setTickInterval(source.tickInterval())
+        slider.valueChanged.connect(source.setValue)
+        source.valueChanged.connect(slider.setValue)
+        return slider
+
+    def _make_synced_combo(self, source: QComboBox) -> NoWheelComboBox:
+        combo = NoWheelComboBox()
+        for index in range(source.count()):
+            combo.addItem(source.itemText(index), source.itemData(index))
+        combo.setCurrentIndex(source.currentIndex())
+        combo.currentIndexChanged.connect(source.setCurrentIndex)
+        source.currentIndexChanged.connect(combo.setCurrentIndex)
+        return combo
+
+    def _make_synced_spin(self, source: QSpinBox) -> NoWheelSpinBox:
+        spin = NoWheelSpinBox()
+        spin.setRange(source.minimum(), source.maximum())
+        spin.setValue(source.value())
+        spin.valueChanged.connect(source.setValue)
+        source.valueChanged.connect(spin.setValue)
+        return spin
+
+    def _make_synced_double_spin(self, source: QDoubleSpinBox) -> NoWheelDoubleSpinBox:
+        spin = NoWheelDoubleSpinBox()
+        spin.setRange(source.minimum(), source.maximum())
+        spin.setDecimals(source.decimals())
+        spin.setSingleStep(source.singleStep())
+        spin.setSuffix(source.suffix())
+        spin.setValue(source.value())
+        spin.valueChanged.connect(source.setValue)
+        source.valueChanged.connect(spin.setValue)
+        return spin
+
+    def _add_workspace_slider_row(self, row: int, label: str, source: QSlider) -> None:
+        if self.dashboard_workspace_layout is None:
+            return
+        self.dashboard_workspace_layout.addWidget(QLabel(label), row, 0)
+        self.dashboard_workspace_layout.addWidget(self._make_synced_slider(source), row, 1, 1, 2)
+
+    def _build_shape_workspace(self) -> None:
+        if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
+            return
+        self.dashboard_workspace_title.setText("🎚 Shape Workspace — adjust the mix while the Wave Explorer stays visible.")
+        for row, wave_type in enumerate(WAVE_ORDER):
+            self.dashboard_workspace_layout.addWidget(QLabel(f"{self._wave_icon(wave_type)} {WAVE_LABELS[wave_type]}"), row, 0)
+            self.dashboard_workspace_layout.addWidget(self._make_synced_slider(self.wave_start_sliders[wave_type]), row, 1)
+            self.dashboard_workspace_layout.addWidget(self._make_synced_slider(self.wave_end_sliders[wave_type]), row, 2)
+        self.dashboard_workspace_layout.addWidget(QLabel("Start level"), len(WAVE_ORDER), 1)
+        self.dashboard_workspace_layout.addWidget(QLabel("End level"), len(WAVE_ORDER), 2)
+
+    def _build_pitch_workspace(self) -> None:
+        if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
+            return
+        self.dashboard_workspace_title.setText("🎯 Pitch Workspace — Note Wheel ideas without hiding the waveform.")
+        self.dashboard_workspace_layout.addWidget(QLabel("🎵 Main Note"), 0, 0)
+        self.dashboard_workspace_layout.addWidget(self._make_synced_combo(self.note_combo), 0, 1)
+        self._add_workspace_slider_row(1, "🧸 Size", self.octave_slider)
+        self._add_workspace_slider_row(2, "🎯 Wiggle", self.cents_slider)
+        self._add_workspace_slider_row(3, "Start Pitch", self.pitch_start)
+        self._add_workspace_slider_row(4, "End Pitch", self.pitch_end)
+        for index, wave_type in enumerate(WAVE_ORDER, start=5):
+            follow = QCheckBox("👯 Follow Main")
+            follow.setChecked(self.wave_follow_pitch_buttons[wave_type].isChecked())
+            follow.stateChanged.connect(lambda state, wt=wave_type: self.wave_follow_pitch_buttons[wt].setChecked(bool(state)))
+            self.wave_follow_pitch_buttons[wave_type].stateChanged.connect(follow.setChecked)
+            note = self._make_synced_combo(self.wave_note_combos[wave_type])
+            octave = self._make_synced_spin(self.wave_octave_spins[wave_type])
+            self.dashboard_workspace_layout.addWidget(QLabel(f"{self._wave_icon(wave_type)}"), index, 0)
+            self.dashboard_workspace_layout.addWidget(follow, index, 1)
+            self.dashboard_workspace_layout.addWidget(note, index, 2)
+            self.dashboard_workspace_layout.addWidget(octave, index, 3)
+
+    def _build_tuning_workspace(self) -> None:
+        if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
+            return
+        self.dashboard_workspace_title.setText("🎼 Tuning Workspace — map notes while the waveform remains in view.")
+        self.dashboard_workspace_layout.addWidget(QLabel("🎼 Tuning Map"), 0, 0)
+        self.dashboard_workspace_layout.addWidget(self._make_synced_combo(self.tuning_method_combo), 0, 1, 1, 2)
+        self.dashboard_workspace_layout.addWidget(QLabel("Home Note"), 1, 0)
+        self.dashboard_workspace_layout.addWidget(self._make_synced_combo(self.tuning_root_combo), 1, 1, 1, 2)
+        self.dashboard_workspace_layout.addWidget(QLabel("A4 Sparkle"), 2, 0)
+        self.dashboard_workspace_layout.addWidget(self._make_synced_double_spin(self.tuning_reference_spin), 2, 1, 1, 2)
+
+    def _build_stereo_workspace(self) -> None:
+        if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
+            return
+        self.dashboard_workspace_title.setText("👂 Stereo Workspace — place the sound left, center, right, wide, and dancing.")
+        self._add_workspace_slider_row(0, "Left ↔ Right Start", self.pan_start_slider)
+        self._add_workspace_slider_row(1, "Left ↔ Right End", self.pan_end_slider)
+        self._add_workspace_slider_row(2, "Width", self.width_slider)
+        self._add_workspace_slider_row(3, "Dance", self.auto_pan_depth_slider)
+        self._add_workspace_slider_row(4, "Dance Speed", self.auto_pan_rate)
+
+    def _build_effects_workspace(self) -> None:
+        if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
+            return
+        self.dashboard_workspace_title.setText("✨ Sound Magic Workspace — effect playground around the wave picture.")
+        nap = QCheckBox("😴 Paulstretch Nap")
+        nap.setChecked(self.paulstretch_enabled.isChecked())
+        nap.stateChanged.connect(lambda state: self.paulstretch_enabled.setChecked(bool(state)))
+        self.paulstretch_enabled.stateChanged.connect(nap.setChecked)
+        self.dashboard_workspace_layout.addWidget(nap, 0, 0, 1, 3)
+        self._add_workspace_slider_row(1, "Dream Amount", self.paul_amount_slider)
+        self._add_workspace_slider_row(2, "Evolution", self.paul_evolution_slider)
+
+    def _build_presets_workspace(self) -> None:
+        if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
+            return
+        self.dashboard_workspace_title.setText("🌈 Experiments Workspace — jump between sounds without leaving the Explorer.")
+        presets = [
+            ("Pure A4", self._preset_pure_a4),
+            ("Rocket Pitch 🚀", self._preset_rocket_pitch),
+            ("Robot Beep 🤖", self._preset_robot_beep),
+            ("Falling Star ⭐", self._preset_falling_star),
+            ("Fade-In Mountain 🏔️", self._preset_fade_in_triangle),
+        ]
+        for index, (label, callback) in enumerate(presets):
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            self.dashboard_workspace_layout.addWidget(button, index // 2, index % 2)
+        save = QPushButton("💾 Save")
+        save.clicked.connect(self._save)
+        load = QPushButton("📂 Load")
+        load.clicked.connect(self._load_sound)
+        self.dashboard_workspace_layout.addWidget(save, 3, 0)
+        self.dashboard_workspace_layout.addWidget(load, 3, 1)
+
+    def _dashboard_audio_thumbnail(self, points: int = 72) -> np.ndarray:
+        if self.current_audio.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        mono = np.asarray(self.current_audio, dtype=np.float32)
+        if mono.ndim == 2:
+            mono = mono.mean(axis=1)
+        mono = mono.reshape(-1)
+        if mono.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        indices = np.linspace(0, mono.size - 1, min(points, mono.size)).astype(np.int64)
+        return np.clip(mono[indices], -1.0, 1.0)
+
+    def _update_visual_panel_buttons(self) -> None:
+        if not self.visual_panel_buttons:
+            return
+        s = self.current_settings
+        live_samples = self._dashboard_audio_thumbnail()
+        muted = s.wave_muted or {}
+        solo = s.solo_wave if s.solo_wave in WAVE_ORDER else None
+        amps = {
+            wave: max(db_to_gain((s.wave_start_db or {}).get(wave, -20.0)), db_to_gain((s.wave_end_db or {}).get(wave, -20.0)))
+            for wave in WAVE_ORDER
+        }
+        active = [wave for wave in WAVE_ORDER if not muted.get(wave, False) and (solo is None or solo == wave) and amps[wave] > 0.01]
+        shape_status = f"Solo: {WAVE_LABELS[solo].split()[0]}" if solo else f"{len(active)} waves playing"
+        self.visual_panel_buttons["shape"].set_status(shape_status, {"amps": amps, "muted": muted, "solo": solo, "samples": live_samples})
+
+        follow = s.wave_follow_main_pitch or {wave: True for wave in WAVE_ORDER}
+        notes = s.wave_note or {wave: s.note for wave in WAVE_ORDER}
+        pitch_items = []
+        custom = []
+        for wave in WAVE_ORDER:
+            color = VisualPanelButton.COLORS.get(wave, QColor("#ff4fa3"))
+            note_text = s.note if follow.get(wave, True) else str(notes.get(wave, s.note))
+            pitch_items.append((wave, note_text, color))
+            if not follow.get(wave, True):
+                custom.append(f"{wave.title()} {note_text}")
+        pitch_status = "All follow main" if not custom else " • ".join(custom[:2])
+        self.visual_panel_buttons["pitch"].set_status(pitch_status, {"notes": pitch_items})
+
+        tuning_label = TUNING_METHODS.get(s.tuning_method, TUNING_METHODS["equal_temperament_12"])["label"]
+        self.visual_panel_buttons["tuning"].set_status(f"{tuning_label} • Root {s.tuning_root_note}", {"method": tuning_label, "root": s.tuning_root_note})
+
+        positions = []
+        wave_pan = s.wave_pan or {}
+        wave_width = s.wave_width or {}
+        wave_dance = s.wave_dance or {}
+        for wave in WAVE_ORDER:
+            positions.append((wave, wave_pan.get(wave, 0.0), wave_width.get(wave, 0.65), wave_dance.get(wave, 0.0)))
+        stereo_status = "Dance on" if s.auto_pan_depth > 0.05 or any(float(item[3]) > 0.05 for item in positions) else "Wide mix" if s.stereo_width > 0.55 else "Centered mix"
+        self.visual_panel_buttons["stereo"].set_status(stereo_status, {"positions": positions})
+
+        paul_active = not (s.muted_modules or {}).get("paulstretch", True)
+        effect_status = f"Dream space {s.paulstretch_amount:.1f}x" if paul_active else "Paulstretch asleep"
+        self.visual_panel_buttons["effects"].set_status(effect_status, {"paul_active": paul_active, "amount": s.paulstretch_amount, "after_samples": live_samples})
+
+        recipe_count = len(self._read_user_recipes())
+        preset_status = f"{recipe_count} saved experiments" if recipe_count else "Custom Wave"
+        self.visual_panel_buttons["presets"].set_status(preset_status, {"count": recipe_count})
+
     def _toy_group(self, title: str) -> QGroupBox:
         box = QGroupBox(title)
         box.setObjectName("toyGroup")
@@ -2433,7 +2990,7 @@ class WaveToyWindow(QMainWindow):
         return box
 
     def _make_percent_slider(self, minimum: int, maximum: int, value: int) -> QSlider:
-        slider = QSlider(Qt.Horizontal)
+        slider = NoWheelSlider(Qt.Horizontal)
         slider.setRange(minimum * PERCENT_SLIDER_SCALE, maximum * PERCENT_SLIDER_SCALE)
         slider.setValue(value * PERCENT_SLIDER_SCALE)
         slider.setTickInterval(10 * PERCENT_SLIDER_SCALE)
@@ -2512,6 +3069,39 @@ class WaveToyWindow(QMainWindow):
                 padding: 1px 8px;
                 background: #ffffff;
                 border-radius: 8px;
+            }
+            QGroupBox#dashboardGroup {
+                background: #ffffff;
+                border: 4px solid rgba(0, 0, 0, 0.18);
+                border-radius: 24px;
+                margin-top: 16px;
+                padding: 10px;
+                font-size: 18px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QGroupBox#dashboardGroup::title {
+                subcontrol-origin: margin;
+                left: 16px;
+                padding: 1px 8px;
+                background: #ffffff;
+                border-radius: 8px;
+            }
+            QWidget#explorerDashboardPanel {
+                background: #eefbff;
+                border: 3px solid rgba(123, 223, 242, 0.65);
+                border-radius: 20px;
+                padding: 8px;
+            }
+            QWidget#workspacePanel {
+                background: rgba(255, 255, 255, 0.78);
+                border: 2px solid rgba(0, 0, 0, 0.10);
+                border-radius: 16px;
+            }
+            QLabel#workspaceTitle {
+                font-size: 14px;
+                font-weight: 900;
+                color: #263238;
             }
             QWidget#waveCard {
                 background: #f9fbff;
@@ -3124,10 +3714,11 @@ class WaveToyWindow(QMainWindow):
             msg = f"You are mixing {active_count} wave shape(s). Move the sliders!"
 
         visual_conditions = self._visual_conditions_from_ui()
+        if self.dashboard_canvas is not None:
+            self.dashboard_canvas.set_data(audio, freq_env, loud_env, msg, visual_conditions)
         if self.wave_explorer is not None:
             self.wave_explorer.set_data(audio, freq_env, loud_env, msg, visual_conditions)
-        else:
-            self.canvas.set_data(audio, freq_env, loud_env, msg, visual_conditions)
+        self._update_visual_panel_buttons()
         self._update_explanation()
 
         if self.live_loop_enabled and not self.live_loop_is_refreshing:
