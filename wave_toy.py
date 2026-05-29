@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QGridLayout,
+    QInputDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -304,6 +305,137 @@ class TimelineClip:
         if self.import_metadata:
             data["import_metadata"] = self.import_metadata
         return data
+
+
+@dataclass
+class ArticulationPhoneme:
+    """Reusable vowel-like articulation definition for the Articulation Lab."""
+
+    name: str
+    ipa: str
+    mouth_open: float
+    tongue_height: float
+    tongue_frontness: float
+    lip_rounding: float
+    voice_pitch: float = 220.0
+    voice_strength: float = 0.65
+    duration_ms: int = 500
+    preview_color: str = "#ffd166"
+
+    def clamped(self) -> "ArticulationPhoneme":
+        return ArticulationPhoneme(
+            name=str(self.name or "untitled_vowel"),
+            ipa=str(self.ipa or "?"),
+            mouth_open=float(np.clip(self.mouth_open, 0.0, 1.0)),
+            tongue_height=float(np.clip(self.tongue_height, 0.0, 1.0)),
+            tongue_frontness=float(np.clip(self.tongue_frontness, 0.0, 1.0)),
+            lip_rounding=float(np.clip(self.lip_rounding, 0.0, 1.0)),
+            voice_pitch=float(np.clip(self.voice_pitch, 60.0, 880.0)),
+            voice_strength=float(np.clip(self.voice_strength, 0.0, 1.0)),
+            duration_ms=int(np.clip(self.duration_ms, 120, 5000)),
+            preview_color=str(self.preview_color or "#ffd166"),
+        )
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self.clamped())
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "ArticulationPhoneme":
+        return cls(
+            name=str(data.get("name", "untitled_vowel")),
+            ipa=str(data.get("ipa", "?")),
+            mouth_open=float(data.get("mouth_open", 0.45)),
+            tongue_height=float(data.get("tongue_height", 0.45)),
+            tongue_frontness=float(data.get("tongue_frontness", 0.50)),
+            lip_rounding=float(data.get("lip_rounding", 0.10)),
+            voice_pitch=float(data.get("voice_pitch", 220.0)),
+            voice_strength=float(data.get("voice_strength", 0.65)),
+            duration_ms=int(data.get("duration_ms", 500)),
+            preview_color=str(data.get("preview_color", "#ffd166")),
+        ).clamped()
+
+
+VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
+    "EE": {"emoji": "😀", "ipa": "i", "tongue_height": 0.95, "tongue_frontness": 0.95, "mouth_open": 0.20, "lip_rounding": 0.05, "preview_color": "#b8f2e6"},
+    "EH": {"emoji": "🙂", "ipa": "e", "tongue_height": 0.70, "tongue_frontness": 0.85, "mouth_open": 0.40, "lip_rounding": 0.05, "preview_color": "#caffbf"},
+    "AH": {"emoji": "😮", "ipa": "a", "tongue_height": 0.20, "tongue_frontness": 0.40, "mouth_open": 0.95, "lip_rounding": 0.00, "preview_color": "#ffadad"},
+    "OH": {"emoji": "😯", "ipa": "o", "tongue_height": 0.50, "tongue_frontness": 0.20, "mouth_open": 0.55, "lip_rounding": 0.60, "preview_color": "#ffd6a5"},
+    "OO": {"emoji": "😗", "ipa": "u", "tongue_height": 0.90, "tongue_frontness": 0.10, "mouth_open": 0.15, "lip_rounding": 1.00, "preview_color": "#a0c4ff"},
+    "UH": {"emoji": "😐", "ipa": "ə", "tongue_height": 0.45, "tongue_frontness": 0.50, "mouth_open": 0.45, "lip_rounding": 0.10, "preview_color": "#d7b9ff"},
+}
+
+
+def articulation_summary(phoneme: ArticulationPhoneme) -> str:
+    open_word = "Open Mouth" if phoneme.mouth_open >= 0.66 else "Small Mouth" if phoneme.mouth_open <= 0.28 else "Medium Mouth"
+    height_word = "High Tongue" if phoneme.tongue_height >= 0.66 else "Low Tongue" if phoneme.tongue_height <= 0.34 else "Mid Tongue"
+    front_word = "Front Tongue" if phoneme.tongue_frontness >= 0.66 else "Back Tongue" if phoneme.tongue_frontness <= 0.34 else "Center Tongue"
+    round_word = "Rounded Lips" if phoneme.lip_rounding >= 0.55 else "Relaxed Lips"
+    return f"{open_word} | {height_word} | {front_word} | {round_word}"
+
+
+def formants_from_articulation(phoneme: ArticulationPhoneme) -> Tuple[float, float, float]:
+    mouth = float(np.clip(phoneme.mouth_open, 0.0, 1.0))
+    front = float(np.clip(phoneme.tongue_frontness, 0.0, 1.0))
+    height = float(np.clip(phoneme.tongue_height, 0.0, 1.0))
+    rounding = float(np.clip(phoneme.lip_rounding, 0.0, 1.0))
+    f1 = 260.0 + mouth * 620.0 - height * 90.0
+    f2 = 850.0 + front * 1450.0 - rounding * 380.0
+    f3 = 2300.0 + height * 650.0 - rounding * 280.0
+    return max(180.0, f1), max(500.0, f2), max(1400.0, f3)
+
+
+def apply_simple_formant_layer(audio: np.ndarray, phoneme: ArticulationPhoneme) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    mono = np.asarray(audio, dtype=np.float64)
+    if mono.ndim == 2:
+        mono = mono.mean(axis=1)
+    window = np.hanning(mono.size) if mono.size > 8 else np.ones(mono.size)
+    spectrum = np.fft.rfft(mono * window)
+    freqs = np.fft.rfftfreq(mono.size, 1.0 / SAMPLE_RATE)
+    f1, f2, f3 = formants_from_articulation(phoneme)
+    envelope = np.full_like(freqs, 0.10, dtype=np.float64)
+    for center, width, gain in ((f1, 120.0, 1.8), (f2, 210.0, 1.25), (f3, 330.0, 0.85)):
+        envelope += gain * np.exp(-0.5 * ((freqs - center) / width) ** 2)
+    envelope *= 1.0 - 0.35 * float(np.clip(phoneme.lip_rounding, 0.0, 1.0)) * np.clip((freqs - 1800.0) / 5000.0, 0.0, 1.0)
+    filtered = np.fft.irfft(spectrum * envelope, n=mono.size)
+    peak = float(np.max(np.abs(filtered))) if filtered.size else 0.0
+    if peak > 0.0:
+        filtered = (filtered / peak) * (0.75 * float(np.clip(phoneme.voice_strength, 0.0, 1.0)))
+    return np.column_stack([filtered, filtered]).astype(np.float32)
+
+
+def render_articulation_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
+    phoneme = phoneme.clamped()
+    duration = max(0.12, phoneme.duration_ms / 1000.0)
+    settings = SynthSettings(
+        wave_start_db={"sine": -7.0, "triangle": -12.0, "sawtooth": -10.0, "square": -20.0},
+        wave_end_db={"sine": -7.0, "triangle": -12.0, "sawtooth": -10.0, "square": -20.0},
+        wave_delta_time={wave: duration for wave in WAVE_ORDER},
+        pitch_start_hz=phoneme.voice_pitch,
+        pitch_end_hz=phoneme.voice_pitch,
+        loudness_start=phoneme.voice_strength,
+        loudness_end=phoneme.voice_strength,
+        duration_seconds=duration,
+        curve_type="linear",
+        pan_start=0.0,
+        pan_end=0.0,
+        stereo_width=0.15,
+        wave_pan={wave: 0.0 for wave in WAVE_ORDER},
+        wave_width={wave: 0.0 for wave in WAVE_ORDER},
+        wave_dance={wave: 0.0 for wave in WAVE_ORDER},
+        wave_muted={wave: False for wave in WAVE_ORDER},
+        enabled_modules={"paulstretch": False},
+    )
+    audio, _time_axis, _freq_env, _loud_env = generate_audio(settings)
+    audio = apply_simple_formant_layer(audio, phoneme)
+    fade_samples = min(int(0.025 * SAMPLE_RATE), max(1, len(audio) // 3))
+    if len(audio) > fade_samples * 2:
+        fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=np.float32)
+        fade_out = np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
+        audio[:fade_samples] *= fade_in[:, None]
+        audio[-fade_samples:] *= fade_out[:, None]
+    return audio
 
 
 @dataclass
@@ -2563,6 +2695,73 @@ class NoteWheelDialog(QDialog):
         self.selected_label.setText(f"Selected Note: {emotional_note_text(note)} • {emotion['label']} • {note_relationship(note, home)}")
 
 
+class VocalTractCanvas(QWidget):
+    """Cartoon vocal tract display driven by articulation values, not DSP knobs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
+        self.setMinimumSize(QSize(520, 360))
+        self.setToolTip("Toy vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels.")
+
+    def set_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        self.phoneme = phoneme.clamped()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(18, 18, -18, -18)
+        painter.fillRect(self.rect(), QColor("#fff7e6"))
+
+        p = self.phoneme
+        mouth_open = float(np.clip(p.mouth_open, 0.0, 1.0))
+        tongue_height = float(np.clip(p.tongue_height, 0.0, 1.0))
+        tongue_front = float(np.clip(p.tongue_frontness, 0.0, 1.0))
+        rounding = float(np.clip(p.lip_rounding, 0.0, 1.0))
+
+        face_rect = QRectF(rect.left() + 34, rect.top() + 8, rect.width() - 68, rect.height() - 16)
+        painter.setPen(QPen(QColor("#5f4b32"), 5))
+        painter.setBrush(QColor("#ffe0bd"))
+        painter.drawRoundedRect(face_rect, 54, 54)
+
+        mouth_w = face_rect.width() * (0.34 + (1.0 - rounding) * 0.30)
+        mouth_h = 28 + mouth_open * 142
+        mouth_cx = face_rect.center().x() + 20
+        mouth_cy = face_rect.top() + face_rect.height() * 0.58
+        mouth_rect = QRectF(mouth_cx - mouth_w / 2, mouth_cy - mouth_h / 2, mouth_w, mouth_h)
+        painter.setPen(QPen(QColor("#8c2f39"), 8 + int(rounding * 10)))
+        painter.setBrush(QColor("#301018"))
+        painter.drawEllipse(mouth_rect)
+
+        lip_rect = mouth_rect.adjusted(-12 - rounding * 18, -8 - rounding * 10, 12 + rounding * 18, 8 + rounding * 10)
+        painter.setPen(QPen(QColor("#d1495b"), 5))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(lip_rect)
+
+        tongue_x = mouth_rect.left() + mouth_rect.width() * (0.20 + tongue_front * 0.58)
+        tongue_y = mouth_rect.bottom() - 18 - tongue_height * max(24, mouth_rect.height() * 0.48)
+        tongue_path = QPainterPath()
+        tongue_path.moveTo(mouth_rect.left() + mouth_rect.width() * 0.18, mouth_rect.bottom() - 14)
+        tongue_path.cubicTo(tongue_x - 70, tongue_y + 40, tongue_x - 10, tongue_y - 26, tongue_x + 58, tongue_y + 8)
+        tongue_path.cubicTo(tongue_x + 34, tongue_y + 52, mouth_rect.right() - 38, mouth_rect.bottom() - 12, mouth_rect.left() + mouth_rect.width() * 0.18, mouth_rect.bottom() - 14)
+        painter.setPen(QPen(QColor("#b23a48"), 3))
+        painter.setBrush(QColor("#ff8fa3"))
+        painter.drawPath(tongue_path)
+
+        painter.setPen(QPen(QColor("#3a506b"), 4))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.30, face_rect.top() + 80, 32, 42))
+        painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.62, face_rect.top() + 80, 32, 42))
+
+        painter.setPen(QPen(QColor("#2b2d42"), 2))
+        painter.setFont(QFont("Sans Serif", 14, QFont.Bold))
+        f1, f2, f3 = formants_from_articulation(p)
+        painter.drawText(rect.adjusted(10, rect.height() - 56, -10, -10), Qt.AlignLeft | Qt.AlignVCenter, f"F1 {f1:.0f}  F2 {f2:.0f}  F3 {f3:.0f} Hz")
+        painter.end()
+
+
 class WaveToyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -2654,6 +2853,22 @@ class WaveToyWindow(QMainWindow):
         self.timeline_canvas: TimelineCanvas | None = None
         self.timeline_status_label: QLabel | None = None
         self.timeline_inspector_label: QLabel | None = None
+
+        self.phonemes_dir = Path("phonemes")
+        self.current_phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
+        self.saved_phonemes: List[ArticulationPhoneme] = []
+        self.articulation_canvas: VocalTractCanvas | None = None
+        self.articulation_name_label: QLabel | None = None
+        self.articulation_ipa_label: QLabel | None = None
+        self.articulation_summary_label: QLabel | None = None
+        self.articulation_wave_status_label: QLabel | None = None
+        self.phoneme_cards_widget: QWidget | None = None
+        self.articulation_sliders: Dict[str, QSlider] = {}
+        self.articulation_value_labels: Dict[str, QLabel] = {}
+        self.phoneme_preview_audio = np.zeros((0, 2), dtype=np.float32)
+        self.phoneme_loop_enabled = False
+        self.phoneme_loop_timer = QTimer(self)
+        self.phoneme_loop_timer.timeout.connect(self._articulation_loop_tick)
 
         self._build_actions()
         self._build_ui()
@@ -3369,9 +3584,370 @@ class WaveToyWindow(QMainWindow):
 
         self._build_wave_explorer_tab()
         self._build_play_tab()
+        self._build_articulation_tab()
         self._build_timeline_tab()
         if self.tabs is not None:
             self.tabs.setCurrentIndex(0)
+
+    def _build_articulation_tab(self) -> None:
+        if self.tabs is None:
+            return
+        self._load_saved_phonemes()
+        tab = QWidget()
+        tab.setObjectName("articulationLabTab")
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(18, 16, 18, 16)
+        outer.setSpacing(12)
+
+        title = QLabel("🗣 Articulation Lab")
+        title.setObjectName("title")
+        title.setAlignment(Qt.AlignCenter)
+        subtitle = QLabel("Design vowel phonemes by moving a toy mouth. Phase 1 makes approximate vowel sounds, not full speech.")
+        subtitle.setObjectName("subtitle")
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setWordWrap(True)
+        outer.addWidget(title)
+        outer.addWidget(subtitle)
+
+        main = QHBoxLayout()
+        main.setSpacing(14)
+        outer.addLayout(main, 1)
+
+        explorer = self._toy_group("Vocal Explorer")
+        explorer_layout = QVBoxLayout(explorer)
+        explorer_layout.setContentsMargins(14, 18, 14, 14)
+        explorer_layout.setSpacing(12)
+
+        top = QHBoxLayout()
+        self.articulation_name_label = QLabel("😮 AH")
+        self.articulation_name_label.setObjectName("articulationPhonemeTitle")
+        self.articulation_ipa_label = QLabel("IPA /a/")
+        self.articulation_ipa_label.setObjectName("articulationIpaBadge")
+        play_button = self._make_story_button("▶", "Play Phoneme", "#5cdb95", self._play_phoneme_preview)
+        loop_button = self._make_story_button("🔁", "Loop", "#b8f2e6", self._toggle_phoneme_loop)
+        stop_button = self._make_story_button("⏹", "Stop", "#ff6b6b", self._stop_phoneme_preview)
+        top.addWidget(self.articulation_name_label, 2)
+        top.addWidget(self.articulation_ipa_label, 1)
+        top.addWidget(play_button)
+        top.addWidget(loop_button)
+        top.addWidget(stop_button)
+        explorer_layout.addLayout(top)
+
+        self.articulation_canvas = VocalTractCanvas()
+        explorer_layout.addWidget(self.articulation_canvas, 1)
+        self.articulation_summary_label = QLabel("😮 AH  |  Open Mouth | Low Tongue")
+        self.articulation_summary_label.setObjectName("dashboardSummary")
+        self.articulation_summary_label.setWordWrap(True)
+        self.articulation_summary_label.setAlignment(Qt.AlignCenter)
+        explorer_layout.addWidget(self.articulation_summary_label)
+
+        controls = QGridLayout()
+        controls.setHorizontalSpacing(14)
+        controls.setVerticalSpacing(8)
+        for row, (key, label, minimum, maximum, value) in enumerate((
+            ("mouth_open", "👄 Mouth Open", 0, 100, 95),
+            ("tongue_height", "👅 Tongue Height", 0, 100, 20),
+            ("tongue_frontness", "👅 Tongue Front", 0, 100, 40),
+            ("lip_rounding", "💋 Lip Round", 0, 100, 0),
+            ("voice_pitch", "🎤 Voice Pitch", 60, 880, 220),
+            ("voice_strength", "🔊 Voice Strength", 0, 100, 65),
+        )):
+            text = QLabel(label)
+            text.setObjectName("articulationControlLabel")
+            slider = NoWheelSlider(Qt.Horizontal)
+            slider.setRange(minimum, maximum)
+            slider.setValue(value)
+            slider.setMinimumHeight(56)
+            value_label = QLabel("")
+            value_label.setObjectName("symbolHint")
+            value_label.setMinimumWidth(70)
+            slider.valueChanged.connect(lambda _value, slider_key=key: self._articulation_slider_changed(slider_key))
+            self.articulation_sliders[key] = slider
+            self.articulation_value_labels[key] = value_label
+            controls.addWidget(text, row, 0)
+            controls.addWidget(slider, row, 1)
+            controls.addWidget(value_label, row, 2)
+        explorer_layout.addLayout(controls)
+        main.addWidget(explorer, 3)
+
+        side = QWidget()
+        side.setMinimumWidth(320)
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.setSpacing(12)
+
+        preset_box = self._toy_group("Vowel Presets")
+        preset_layout = QGridLayout(preset_box)
+        preset_layout.setContentsMargins(12, 18, 12, 12)
+        preset_layout.setSpacing(10)
+        for index, (name, data) in enumerate(VOWEL_PRESETS.items()):
+            button = QPushButton(f"{data['emoji']}\n{name}")
+            button.setObjectName("articulationPresetButton")
+            button.setMinimumSize(QSize(132, 92))
+            button.clicked.connect(lambda checked=False, preset_name=name: self._select_vowel_preset(preset_name))
+            preset_layout.addWidget(button, index // 2, index % 2)
+        side_layout.addWidget(preset_box)
+
+        save_button = self._make_story_button("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme)
+        side_layout.addWidget(save_button)
+
+        cards_box = self._toy_group("Saved Phoneme Cards")
+        cards_layout = QVBoxLayout(cards_box)
+        cards_layout.setContentsMargins(12, 18, 12, 12)
+        card_scroll = QScrollArea()
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.phoneme_cards_widget = QWidget()
+        card_scroll.setWidget(self.phoneme_cards_widget)
+        cards_layout.addWidget(card_scroll, 1)
+        side_layout.addWidget(cards_box, 1)
+        main.addWidget(side, 1)
+
+        self.tabs.insertTab(min(2, self.tabs.count()), tab, "🗣 Articulation Lab")
+        self._refresh_phoneme_cards()
+        self._select_vowel_preset("AH", play=False)
+
+    def _phoneme_path(self, phoneme: ArticulationPhoneme) -> Path:
+        safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in phoneme.name.strip()).strip("_")
+        return self.phonemes_dir / f"{safe or 'untitled_vowel'}.json"
+
+    def _load_saved_phonemes(self) -> None:
+        self.saved_phonemes = []
+        if not self.phonemes_dir.exists():
+            return
+        for path in sorted(self.phonemes_dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self.saved_phonemes.append(ArticulationPhoneme.from_json_dict(data))
+            except Exception as exc:
+                print(f"[Articulation Lab] Could not load {path}: {exc}")
+
+    def _articulation_slider_value(self, key: str) -> float:
+        slider = self.articulation_sliders[key]
+        if key == "voice_pitch":
+            return float(slider.value())
+        return float(slider.value()) / 100.0
+
+    def _phoneme_from_articulation_ui(self) -> ArticulationPhoneme:
+        return ArticulationPhoneme(
+            name=self.current_phoneme.name,
+            ipa=self.current_phoneme.ipa,
+            mouth_open=self._articulation_slider_value("mouth_open"),
+            tongue_height=self._articulation_slider_value("tongue_height"),
+            tongue_frontness=self._articulation_slider_value("tongue_frontness"),
+            lip_rounding=self._articulation_slider_value("lip_rounding"),
+            voice_pitch=self._articulation_slider_value("voice_pitch"),
+            voice_strength=self._articulation_slider_value("voice_strength"),
+            duration_ms=self.current_phoneme.duration_ms,
+            preview_color=self.current_phoneme.preview_color,
+        ).clamped()
+
+    def _set_articulation_ui_from_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        phoneme = phoneme.clamped()
+        self.current_phoneme = phoneme
+        values = {
+            "mouth_open": int(round(phoneme.mouth_open * 100)),
+            "tongue_height": int(round(phoneme.tongue_height * 100)),
+            "tongue_frontness": int(round(phoneme.tongue_frontness * 100)),
+            "lip_rounding": int(round(phoneme.lip_rounding * 100)),
+            "voice_pitch": int(round(phoneme.voice_pitch)),
+            "voice_strength": int(round(phoneme.voice_strength * 100)),
+        }
+        for key, value in values.items():
+            slider = self.articulation_sliders.get(key)
+            if slider is not None:
+                slider.blockSignals(True)
+                slider.setValue(value)
+                slider.blockSignals(False)
+        self._update_articulation_preview(regenerate=True)
+
+    def _articulation_slider_changed(self, key: str) -> None:
+        del key
+        self.current_phoneme = self._phoneme_from_articulation_ui()
+        self._update_articulation_preview(regenerate=True)
+        if self.phoneme_loop_enabled:
+            self._play_phoneme_preview()
+
+    def _update_articulation_preview(self, regenerate: bool = False) -> None:
+        p = self.current_phoneme.clamped()
+        if self.articulation_name_label is not None:
+            emoji = next((str(data["emoji"]) for data in VOWEL_PRESETS.values() if data.get("ipa") == p.ipa), "🗣")
+            self.articulation_name_label.setText(f"{emoji} {p.name}")
+        if self.articulation_ipa_label is not None:
+            self.articulation_ipa_label.setText(f"IPA /{p.ipa}/")
+        if self.articulation_canvas is not None:
+            self.articulation_canvas.set_phoneme(p)
+        summary = articulation_summary(p)
+        if self.articulation_summary_label is not None:
+            self.articulation_summary_label.setText(f"{p.name} /{p.ipa}/  |  {summary}")
+        if self.articulation_wave_status_label is not None:
+            self.articulation_wave_status_label.setText(f"🗣 {p.name} /{p.ipa}/  |  {summary}")
+        for key, label in self.articulation_value_labels.items():
+            value = self._articulation_slider_value(key)
+            label.setText(f"{value:.0f} Hz" if key == "voice_pitch" else f"{value:.2f}")
+        if regenerate:
+            self.phoneme_preview_audio = render_articulation_phoneme(p)
+
+    def _select_vowel_preset(self, preset_name: str, play: bool = False) -> None:
+        data = VOWEL_PRESETS[preset_name]
+        pitch = self._settings_from_ui().pitch_start_hz if hasattr(self, "pitch_start") else 220.0
+        phoneme = ArticulationPhoneme.from_json_dict({**data, "name": preset_name, "voice_pitch": pitch, "voice_strength": 0.65, "duration_ms": 500})
+        self._set_articulation_ui_from_phoneme(phoneme)
+        if play:
+            self._play_phoneme_preview()
+
+    def _play_audio_array(self, audio: np.ndarray) -> None:
+        if sd is not None:
+            try:
+                sd.stop()
+                sd.play(audio, SAMPLE_RATE, blocking=False)
+                return
+            except Exception:
+                pass
+        old_audio = self.current_audio
+        try:
+            self.current_audio = audio
+            ok, message = self._play_with_system_player()
+        finally:
+            self.current_audio = old_audio
+        if not ok:
+            self._show_playback_warning(message)
+
+    def _play_phoneme_preview(self, checked: bool = False) -> None:
+        del checked
+        self.current_phoneme = self._phoneme_from_articulation_ui()
+        self.phoneme_preview_audio = render_articulation_phoneme(self.current_phoneme)
+        self._play_audio_array(self.phoneme_preview_audio)
+        if self.phoneme_loop_enabled:
+            duration_ms = max(100, int((len(self.phoneme_preview_audio) / SAMPLE_RATE) * 1000))
+            self.phoneme_loop_timer.start(duration_ms)
+
+    def _toggle_phoneme_loop(self, checked: bool = False) -> None:
+        del checked
+        self.phoneme_loop_enabled = not self.phoneme_loop_enabled
+        if self.phoneme_loop_enabled:
+            self._play_phoneme_preview()
+        else:
+            self._stop_phoneme_preview()
+
+    def _articulation_loop_tick(self) -> None:
+        if self.phoneme_loop_enabled:
+            self._play_phoneme_preview()
+
+    def _stop_phoneme_preview(self, checked: bool = False) -> None:
+        del checked
+        self.phoneme_loop_enabled = False
+        self.phoneme_loop_timer.stop()
+        if sd is not None:
+            try:
+                sd.stop()
+            except Exception:
+                pass
+
+    def _save_current_phoneme(self, checked: bool = False) -> None:
+        del checked
+        phoneme = self._phoneme_from_articulation_ui()
+        name, ok = QInputDialog.getText(self, "Save Phoneme", "Friendly phoneme name:", text=phoneme.name.lower())
+        if not ok or not name.strip():
+            return
+        phoneme.name = name.strip()
+        self.current_phoneme = phoneme.clamped()
+        self.phonemes_dir.mkdir(parents=True, exist_ok=True)
+        path = self._phoneme_path(self.current_phoneme)
+        path.write_text(json.dumps(self.current_phoneme.to_json_dict(), indent=2), encoding="utf-8")
+        self._load_saved_phonemes()
+        self._refresh_phoneme_cards()
+        self._update_articulation_preview(regenerate=True)
+
+    def _refresh_phoneme_cards(self) -> None:
+        if self.phoneme_cards_widget is None:
+            return
+        layout = self.phoneme_cards_widget.layout()
+        if layout is None:
+            layout = QVBoxLayout(self.phoneme_cards_widget)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(10)
+        else:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+        if not self.saved_phonemes:
+            empty = QLabel("Save a vowel to make a reusable phoneme card.")
+            empty.setWordWrap(True)
+            empty.setObjectName("symbolHint")
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            return
+        for phoneme in self.saved_phonemes:
+            layout.addWidget(self._make_phoneme_card(phoneme))
+        layout.addStretch(1)
+
+    def _make_phoneme_card(self, phoneme: ArticulationPhoneme) -> QWidget:
+        card = QWidget()
+        card.setObjectName("phonemeCard")
+        card.setStyleSheet(f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border-radius: 22px; }}")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        title = QLabel(f"/{phoneme.ipa}/  {phoneme.name}")
+        title.setObjectName("phonemeCardTitle")
+        title.setWordWrap(True)
+        summary = QLabel(articulation_summary(phoneme))
+        summary.setObjectName("phonemeCardSummary")
+        summary.setWordWrap(True)
+        row = QHBoxLayout()
+        actions = (
+            ("▶", lambda checked=False, p=phoneme: self._play_saved_phoneme(p)),
+            ("Load", lambda checked=False, p=phoneme: self._load_saved_phoneme(p)),
+            ("Rename", lambda checked=False, p=phoneme: self._rename_saved_phoneme(p)),
+            ("Duplicate", lambda checked=False, p=phoneme: self._duplicate_saved_phoneme(p)),
+            ("Delete", lambda checked=False, p=phoneme: self._delete_saved_phoneme(p)),
+        )
+        for text, callback in actions:
+            button = QPushButton(text)
+            button.setMinimumHeight(42)
+            button.clicked.connect(callback)
+            row.addWidget(button)
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        layout.addLayout(row)
+        return card
+
+    def _play_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        self._play_audio_array(render_articulation_phoneme(phoneme))
+
+    def _load_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        self._set_articulation_ui_from_phoneme(phoneme)
+
+    def _rename_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        new_name, ok = QInputDialog.getText(self, "Rename Phoneme", "New friendly name:", text=phoneme.name)
+        if not ok or not new_name.strip():
+            return
+        old_path = self._phoneme_path(phoneme)
+        phoneme.name = new_name.strip()
+        new_path = self._phoneme_path(phoneme)
+        self.phonemes_dir.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(json.dumps(phoneme.to_json_dict(), indent=2), encoding="utf-8")
+        if old_path.exists() and old_path != new_path:
+            old_path.unlink()
+        self._load_saved_phonemes()
+        self._refresh_phoneme_cards()
+
+    def _duplicate_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        duplicate = ArticulationPhoneme.from_json_dict(phoneme.to_json_dict())
+        duplicate.name = f"{phoneme.name}_copy"
+        self.phonemes_dir.mkdir(parents=True, exist_ok=True)
+        self._phoneme_path(duplicate).write_text(json.dumps(duplicate.to_json_dict(), indent=2), encoding="utf-8")
+        self._load_saved_phonemes()
+        self._refresh_phoneme_cards()
+
+    def _delete_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        path = self._phoneme_path(phoneme)
+        if path.exists():
+            path.unlink()
+        self._load_saved_phonemes()
+        self._refresh_phoneme_cards()
 
     def _make_story_button(self, icon: str, label: str, color: str, callback) -> QPushButton:
         button = QPushButton(f"{icon}\n{label}")
@@ -3523,7 +4099,7 @@ class WaveToyWindow(QMainWindow):
         layout.addLayout(split, 1)
 
         self._timeline_update_inspector()
-        self.tabs.insertTab(min(2, self.tabs.count()), tab, "🎬 Timeline")
+        self.tabs.insertTab(min(3, self.tabs.count()), tab, "🎬 Timeline")
         self._timeline_debug("Timeline tab constructed")
 
     def _timeline_refresh_palette_cards(self) -> None:
@@ -4081,6 +4657,10 @@ class WaveToyWindow(QMainWindow):
         self.dashboard_summary_label.setObjectName("dashboardSummary")
         self.dashboard_summary_label.setWordWrap(True)
         self.dashboard_summary_label.setAlignment(Qt.AlignCenter)
+        self.articulation_wave_status_label = QLabel("🗣 No phoneme selected yet. Open Articulation Lab to design vowels.")
+        self.articulation_wave_status_label.setObjectName("dashboardSummary")
+        self.articulation_wave_status_label.setWordWrap(True)
+        self.articulation_wave_status_label.setAlignment(Qt.AlignCenter)
         self.dashboard_canvas = WaveCanvas()
         self.dashboard_canvas.setMinimumSize(QSize(720, 400))
         self.dashboard_canvas.setToolTip("Central Wave Explorer. Mouse wheel zooms only this waveform view.")
@@ -4089,6 +4669,7 @@ class WaveToyWindow(QMainWindow):
         explorer_layout.addWidget(explorer_hint)
         explorer_layout.addWidget(self.dashboard_canvas, 1)
         explorer_layout.addWidget(self.dashboard_summary_label)
+        explorer_layout.addWidget(self.articulation_wave_status_label)
         dashboard_layout.addWidget(explorer_panel, 0, 1, 3, 1)
 
         specs = {
@@ -4229,6 +4810,10 @@ class WaveToyWindow(QMainWindow):
         self.dashboard_summary_label.setObjectName("dashboardSummary")
         self.dashboard_summary_label.setWordWrap(True)
         self.dashboard_summary_label.setAlignment(Qt.AlignCenter)
+        self.articulation_wave_status_label = QLabel("🗣 No phoneme selected yet. Open Articulation Lab to design vowels.")
+        self.articulation_wave_status_label.setObjectName("dashboardSummary")
+        self.articulation_wave_status_label.setWordWrap(True)
+        self.articulation_wave_status_label.setAlignment(Qt.AlignCenter)
         self.dashboard_canvas = WaveCanvas()
         self.dashboard_canvas.setMinimumSize(QSize(640, 330))
         self.dashboard_canvas.setToolTip("Central Wave Explorer. Mouse wheel zooms only this waveform view.")
@@ -4241,6 +4826,7 @@ class WaveToyWindow(QMainWindow):
         explorer_layout.addWidget(explorer_hint)
         explorer_layout.addWidget(self.dashboard_canvas, 1)
         explorer_layout.addWidget(self.dashboard_summary_label)
+        explorer_layout.addWidget(self.articulation_wave_status_label)
         explorer_layout.addWidget(explorer_open, 0, Qt.AlignRight)
         dashboard_layout.addWidget(explorer_panel, 1, 1)
 
@@ -4865,6 +5451,45 @@ class WaveToyWindow(QMainWindow):
                 font-size: 12px;
                 font-weight: 900;
                 color: #263238;
+            }
+            QLabel#articulationPhonemeTitle {
+                font-size: 34px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#articulationIpaBadge {
+                background: #ffffff;
+                border: 4px solid rgba(0, 0, 0, 0.14);
+                border-radius: 20px;
+                font-size: 24px;
+                font-weight: 900;
+                padding: 10px;
+            }
+            QLabel#articulationControlLabel {
+                font-size: 20px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#phonemeCardTitle {
+                font-size: 22px;
+                font-weight: 900;
+                color: #1d1d1d;
+            }
+            QLabel#phonemeCardSummary {
+                font-size: 13px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QPushButton#articulationPresetButton {
+                border-radius: 26px;
+                border: 4px solid rgba(0, 0, 0, 0.16);
+                background: #fff7e6;
+                font-size: 30px;
+                font-weight: 900;
+                padding: 8px;
+            }
+            QWidget#articulationLabTab {
+                background: #fff1d6;
             }
             QLabel {
                 font-size: 14px;
