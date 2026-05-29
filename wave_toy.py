@@ -48,8 +48,8 @@ try:
 except Exception:
     sd = None
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QShortcut
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QDrag, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -243,6 +244,34 @@ TUNING_METHODS = {
 
 
 @dataclass
+class AudioPaletteItem:
+    """Imported reusable audio source for the Timeline Audio Palette."""
+
+    id: int
+    name: str
+    source_path: str
+    audio_data: np.ndarray
+    sample_rate: int
+    duration_seconds: float
+    waveform_peaks: List[float]
+    color: str
+
+    @property
+    def item_id(self) -> int:
+        return self.id
+
+    def metadata(self) -> Dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "source_path": self.source_path,
+            "sample_rate": self.sample_rate,
+            "duration_seconds": self.duration_seconds,
+            "color": self.color,
+        }
+
+
+@dataclass
 class TimelineClip:
     """Audio clip placed on the Timeline storyboard."""
 
@@ -253,13 +282,15 @@ class TimelineClip:
     lane: int
     sample_rate: int = SAMPLE_RATE
     recipe: Dict[str, object] | None = None
+    source_path: str | None = None
+    import_metadata: Dict[str, object] | None = None
 
     @property
     def duration_seconds(self) -> float:
         return max(0.0, float(len(self.audio)) / float(self.sample_rate))
 
     def metadata(self) -> Dict[str, object]:
-        return {
+        data = {
             "id": self.clip_id,
             "name": self.name,
             "start_time_seconds": self.start_time_seconds,
@@ -268,6 +299,11 @@ class TimelineClip:
             "sample_rate": self.sample_rate,
             "recipe": self.recipe or {},
         }
+        if self.source_path:
+            data["source_path"] = self.source_path
+        if self.import_metadata:
+            data["import_metadata"] = self.import_metadata
+        return data
 
 
 @dataclass
@@ -790,6 +826,98 @@ def save_audio_file(path: Path, audio: np.ndarray, sample_rate: int = SAMPLE_RAT
     raise ValueError(f"Unsupported audio format: {suffix}")
 
 
+def _decode_pcm_frames(raw: bytes, sample_width: int, channels: int) -> np.ndarray:
+    if sample_width == 1:
+        audio = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif sample_width == 2:
+        audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 3:
+        data = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+        values = data[:, 0] | (data[:, 1] << 8) | (data[:, 2] << 16)
+        values = np.where(values & 0x800000, values - 0x1000000, values)
+        audio = values.astype(np.float32) / 8388608.0
+    elif sample_width == 4:
+        audio = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {sample_width * 8}-bit")
+
+    if channels <= 0:
+        raise ValueError("Audio file has no channels")
+    return audio.reshape(-1, channels)
+
+
+def _ensure_stereo_float(audio: np.ndarray) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    if audio.ndim != 2 or audio.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if audio.shape[1] == 1:
+        audio = np.repeat(audio, 2, axis=1)
+    elif audio.shape[1] > 2:
+        audio = audio[:, :2]
+    return np.clip(audio, -1.0, 1.0).astype(np.float32, copy=False)
+
+
+def _resample_audio(audio: np.ndarray, source_rate: int, target_rate: int = SAMPLE_RATE) -> np.ndarray:
+    if int(source_rate) == int(target_rate) or len(audio) == 0:
+        return audio.astype(np.float32, copy=False)
+    duration = len(audio) / float(source_rate)
+    target_len = max(1, int(round(duration * target_rate)))
+    old_x = np.linspace(0.0, duration, num=len(audio), endpoint=False)
+    new_x = np.linspace(0.0, duration, num=target_len, endpoint=False)
+    channels = [np.interp(new_x, old_x, audio[:, channel]) for channel in range(audio.shape[1])]
+    return np.column_stack(channels).astype(np.float32)
+
+
+def compute_waveform_peaks(audio: np.ndarray, bins: int = 36) -> List[float]:
+    audio = _ensure_stereo_float(audio)
+    if audio.size == 0:
+        return [0.0] * bins
+    mono = np.abs(audio.mean(axis=1))
+    peaks: List[float] = []
+    for chunk in np.array_split(mono, max(1, bins)):
+        peaks.append(float(np.max(chunk)) if chunk.size else 0.0)
+    peak = max(peaks) if peaks else 0.0
+    if peak > 1e-9:
+        peaks = [value / peak for value in peaks]
+    return peaks
+
+
+def load_audio_file(path: Path) -> Tuple[np.ndarray, int]:
+    suffix = path.suffix.lower()
+    if suffix == ".wav":
+        with wave.open(str(path), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            source_rate = wav_file.getframerate()
+            raw = wav_file.readframes(wav_file.getnframes())
+        audio = _decode_pcm_frames(raw, sample_width, channels)
+    elif suffix in {".mp3", ".ogg", ".flac"}:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError(f"{suffix.upper()[1:]} import requires ffmpeg. Install ffmpeg or import WAV files instead.")
+        with tempfile.NamedTemporaryFile(prefix="wave_toy_import_", suffix=".wav", delete=False) as temp:
+            temp_wav = Path(temp.name)
+        try:
+            subprocess.run(
+                [ffmpeg, "-y", "-loglevel", "error", "-i", str(path), "-ac", "2", "-ar", str(SAMPLE_RATE), str(temp_wav)],
+                check=True,
+            )
+            audio, source_rate = load_audio_file(temp_wav)
+        finally:
+            try:
+                temp_wav.unlink()
+            except OSError:
+                pass
+    else:
+        raise ValueError(f"Unsupported audio import format: {suffix or 'unknown'}")
+
+    audio = _ensure_stereo_float(audio)
+    audio = _resample_audio(audio, source_rate, SAMPLE_RATE)
+    return _ensure_stereo_float(audio), SAMPLE_RATE
+
+
 class WaveCanvas(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -1219,6 +1347,98 @@ class StoryboardClipWidget(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class AudioPaletteCard(QWidget):
+    """Large draggable toy card for an imported Timeline palette sound."""
+
+    def __init__(self, owner: "WaveToyWindow", item: AudioPaletteItem) -> None:
+        super().__init__()
+        self.owner = owner
+        self.item = item
+        self.drag_start_pos: QPoint | None = None
+        self.setObjectName("audioPaletteCard")
+        self.setMinimumHeight(108)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_menu)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(76, 10, 10, 10)
+        layout.addStretch(1)
+        add_button = QPushButton("➕ Add")
+        add_button.setMinimumSize(QSize(76, 44))
+        add_button.setCursor(Qt.PointingHandCursor)
+        add_button.clicked.connect(lambda checked=False: self.owner._timeline_add_palette_item_to_playhead(self.item.item_id))
+        layout.addWidget(add_button, 0, Qt.AlignRight | Qt.AlignBottom)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(3, 3, -3, -3)
+        selected = getattr(self.owner, "timeline_selected_palette_item_id", None) == self.item.item_id
+        painter.setPen(QPen(QColor("#ff4fa3" if selected else self.item.color), 4))
+        painter.setBrush(QColor("#fff8d9" if selected else "#ffffff"))
+        painter.drawRoundedRect(rect, 22, 22)
+
+        painter.setFont(QFont("Arial", 30, QFont.Bold))
+        painter.setPen(QColor("#263238"))
+        painter.drawText(QRectF(rect.left() + 10, rect.top() + 12, 54, 48), Qt.AlignCenter, "🎧")
+
+        text_left = rect.left() + 72
+        painter.setFont(QFont("Arial", 14, QFont.Bold))
+        painter.drawText(QRectF(text_left, rect.top() + 12, rect.width() - 160, 24), Qt.AlignLeft | Qt.AlignVCenter, self.item.name)
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        painter.setPen(QColor("#607d8b"))
+        painter.drawText(QRectF(text_left, rect.top() + 36, 170, 20), Qt.AlignLeft | Qt.AlignVCenter, f"{self.item.duration_seconds:.2f}s")
+
+        wave_rect = QRectF(text_left, rect.top() + 62, max(80.0, rect.width() - 170), 30)
+        painter.setPen(QPen(QColor(self.item.color), 3, Qt.SolidLine, Qt.RoundCap))
+        peaks = self.item.waveform_peaks or []
+        if peaks:
+            step = wave_rect.width() / max(1, len(peaks))
+            center = wave_rect.center().y()
+            for index, peak in enumerate(peaks):
+                x = wave_rect.left() + index * step
+                height = max(2.0, float(peak) * wave_rect.height())
+                painter.drawLine(QPointF(x, center - height / 2.0), QPointF(x, center + height / 2.0))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            self.owner._timeline_select_palette_item(self.item.item_id)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.drag_start_pos is None or not (event.buttons() & Qt.LeftButton):
+            return super().mouseMoveEvent(event)
+        if (event.pos() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+            return
+        self.owner._timeline_debug(f"Palette drag started id={self.item.item_id} name={self.item.name}")
+        mime = QMimeData()
+        mime.setData("application/x-wavetoy-palette-id", str(self.item.item_id).encode("utf-8"))
+        mime.setText(self.item.name)
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.transparent)
+        self.render(pixmap)
+        drag.setPixmap(pixmap.scaledToWidth(220, Qt.SmoothTransformation))
+        drag.setHotSpot(QPoint(30, 30))
+        drag.exec(Qt.CopyAction)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.setCursor(Qt.OpenHandCursor)
+        self.drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _show_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+        add_action = menu.addAction("➕ Add to Timeline at Playhead")
+        action = menu.exec(self.mapToGlobal(pos))
+        if action == add_action:
+            self.owner._timeline_add_palette_item_to_playhead(self.item.item_id)
+
+
 class TimelineCanvas(QWidget):
     """Large draggable timeline canvas for arranging sound clips."""
 
@@ -1239,6 +1459,8 @@ class TimelineCanvas(QWidget):
         self.drag_clip_id: int | None = None
         self.drag_offset_seconds = 0.0
         self.drag_started = False
+        self.drop_highlight_lane: int | None = None
+        self.setAcceptDrops(True)
 
     def _refresh_size(self) -> None:
         arrangement = self.owner.timeline_clips if hasattr(self.owner, "timeline_clips") else []
@@ -1291,8 +1513,9 @@ class TimelineCanvas(QWidget):
         for lane in range(lane_count):
             top = self._lane_top(lane)
             lane_rect = QRectF(14, top, canvas_right - 14, self.lane_height - 8)
-            painter.setPen(QPen(QColor(0, 0, 0, 40), 3))
-            painter.setBrush(QColor("#ffffff") if lane % 2 == 0 else QColor("#eefbff"))
+            is_drop_target = self.drop_highlight_lane == lane
+            painter.setPen(QPen(QColor("#ff4fa3") if is_drop_target else QColor(0, 0, 0, 40), 5 if is_drop_target else 3))
+            painter.setBrush(QColor("#ffe3f3") if is_drop_target else (QColor("#ffffff") if lane % 2 == 0 else QColor("#eefbff")))
             painter.drawRoundedRect(lane_rect, 24, 24)
 
             header_rect = QRectF(24, top + 10, self.header_width - 38, self.lane_height - 28)
@@ -1394,6 +1617,42 @@ class TimelineCanvas(QWidget):
         self.drag_started = False
         self.setCursor(Qt.OpenHandCursor)
         self.update()
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat("application/x-wavetoy-palette-id"):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if not event.mimeData().hasFormat("application/x-wavetoy-palette-id"):
+            event.ignore()
+            return
+        self.drop_highlight_lane = self._lane_from_y(event.position().y())
+        self.update()
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        self.drop_highlight_lane = None
+        self.update()
+        event.accept()
+
+    def dropEvent(self, event) -> None:
+        if not event.mimeData().hasFormat("application/x-wavetoy-palette-id"):
+            event.ignore()
+            return
+        try:
+            item_id = int(bytes(event.mimeData().data("application/x-wavetoy-palette-id")).decode("utf-8"))
+        except ValueError:
+            event.ignore()
+            return
+        start_time = self._x_to_time(event.position().x())
+        lane = self._lane_from_y(event.position().y())
+        self.owner._timeline_debug(f"Palette item dropped on timeline id={item_id} start={start_time:.3f}s lane={lane}")
+        self.owner._timeline_add_palette_item_to_timeline(item_id, start_time, lane)
+        self.drop_highlight_lane = None
+        self.update()
+        event.acceptProposedAction()
 
 
 
@@ -2377,6 +2636,11 @@ class WaveToyWindow(QMainWindow):
         self.timeline_lane_count = len(self.timeline_lane_names)
         self.timeline_next_clip_id = 1
         self.timeline_selected_clip_id: int | None = None
+        self.timeline_audio_palette: List[AudioPaletteItem] = []
+        self.timeline_next_palette_item_id = 1
+        self.timeline_selected_palette_item_id: int | None = None
+        self.timeline_palette_list_widget: QWidget | None = None
+        self.timeline_palette_count_label: QLabel | None = None
         self.timeline_playhead_seconds = 0.0
         self.timeline_duration_seconds = 0.0
         self.timeline_last_mix = np.zeros((0, 2), dtype=np.float32)
@@ -2385,6 +2649,8 @@ class WaveToyWindow(QMainWindow):
         self.timeline_playback_started_at: float | None = None
         self.timeline_play_timer = QTimer(self)
         self.timeline_play_timer.timeout.connect(self._timeline_playback_tick)
+        self.timeline_fallback_process: subprocess.Popen | None = None
+        self.timeline_fallback_temp_path: Path | None = None
         self.timeline_canvas: TimelineCanvas | None = None
         self.timeline_status_label: QLabel | None = None
         self.timeline_inspector_label: QLabel | None = None
@@ -3193,6 +3459,38 @@ class WaveToyWindow(QMainWindow):
 
         split = QHBoxLayout()
         split.setSpacing(12)
+
+        palette = QWidget()
+        palette.setObjectName("timelineAudioPalette")
+        palette.setMinimumWidth(300)
+        palette.setMaximumWidth(370)
+        palette_layout = QVBoxLayout(palette)
+        palette_layout.setContentsMargins(12, 12, 12, 12)
+        palette_layout.setSpacing(10)
+        palette_title = QLabel("🎧 Audio Palette")
+        palette_title.setObjectName("timelineInspectorTitle")
+        palette_subtitle = QLabel("Import sounds, then drag cards into lanes or tap ➕ Add.")
+        palette_subtitle.setObjectName("timelineInspectorText")
+        palette_subtitle.setWordWrap(True)
+        import_button = self._make_story_button("📥", "Import Sounds", "#b8f2e6", self._timeline_import_sounds)
+        import_button.setMinimumHeight(70)
+        self.timeline_palette_count_label = QLabel("No imported sounds yet.")
+        self.timeline_palette_count_label.setObjectName("timelineInspectorText")
+        self.timeline_palette_count_label.setWordWrap(True)
+        palette_scroll = QScrollArea()
+        palette_scroll.setWidgetResizable(True)
+        palette_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.timeline_palette_list_widget = QWidget()
+        self.timeline_palette_list_widget.setObjectName("timelinePaletteList")
+        palette_scroll.setWidget(self.timeline_palette_list_widget)
+        palette_layout.addWidget(palette_title)
+        palette_layout.addWidget(palette_subtitle)
+        palette_layout.addWidget(import_button)
+        palette_layout.addWidget(self.timeline_palette_count_label)
+        palette_layout.addWidget(palette_scroll, 1)
+        split.addWidget(palette)
+        self._timeline_refresh_palette_cards()
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(False)
         scroll.setFrameShape(QScrollArea.NoFrame)
@@ -3227,6 +3525,141 @@ class WaveToyWindow(QMainWindow):
         self._timeline_update_inspector()
         self.tabs.insertTab(min(2, self.tabs.count()), tab, "🎬 Timeline")
         self._timeline_debug("Timeline tab constructed")
+
+    def _timeline_refresh_palette_cards(self) -> None:
+        if self.timeline_palette_list_widget is None:
+            return
+        layout = self.timeline_palette_list_widget.layout()
+        if layout is None:
+            layout = QVBoxLayout(self.timeline_palette_list_widget)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(10)
+        else:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+        if not self.timeline_audio_palette:
+            empty = QLabel("📥 Import WAV files to build your toy sound shelf.")
+            empty.setObjectName("timelineInspectorText")
+            empty.setWordWrap(True)
+            empty.setMinimumHeight(92)
+            layout.addWidget(empty)
+        else:
+            for item in self.timeline_audio_palette:
+                layout.addWidget(AudioPaletteCard(self, item))
+        layout.addStretch(1)
+        if self.timeline_palette_count_label is not None:
+            count = len(self.timeline_audio_palette)
+            self.timeline_palette_count_label.setText(f"{count} palette sound{'s' if count != 1 else ''} ready." if count else "No imported sounds yet.")
+
+    def _timeline_select_palette_item(self, item_id: int) -> None:
+        item = self._timeline_palette_item_by_id(item_id)
+        if item is None:
+            return
+        self.timeline_selected_palette_item_id = item_id
+        self._timeline_refresh_palette_cards()
+        self._timeline_debug(f"Palette item selected id={item.item_id} name={item.name}")
+
+    def _timeline_palette_item_by_id(self, item_id: int | None) -> AudioPaletteItem | None:
+        for item in self.timeline_audio_palette:
+            if item.item_id == item_id:
+                return item
+        return None
+
+    def _timeline_import_sounds(self, checked: bool = False) -> None:
+        self._timeline_debug("Audio import requested")
+        filenames, _selected_filter = QFileDialog.getOpenFileNames(
+            self,
+            "Import Sounds to Palette",
+            "",
+            "Audio Files (*.wav *.ogg *.flac *.mp3);;WAV Audio (*.wav);;All Files (*)",
+        )
+        if not filenames:
+            self._timeline_debug("Audio import cancelled")
+            return
+        imported = 0
+        failures: List[str] = []
+        colors = ["#5cdb95", "#ffd166", "#b8f2e6", "#d7b9ff", "#ffadad", "#caffbf", "#ffc6ff"]
+        for filename in filenames:
+            path = Path(filename)
+            try:
+                audio, sample_rate = load_audio_file(path)
+                if audio.size == 0 or len(audio) < 2:
+                    raise ValueError("Imported audio is empty")
+                item_id = self.timeline_next_palette_item_id
+                self.timeline_next_palette_item_id += 1
+                item = AudioPaletteItem(
+                    id=item_id,
+                    name=path.stem,
+                    source_path=str(path),
+                    audio_data=audio,
+                    sample_rate=sample_rate,
+                    duration_seconds=len(audio) / float(sample_rate),
+                    waveform_peaks=compute_waveform_peaks(audio),
+                    color=colors[(item_id - 1) % len(colors)],
+                )
+                self.timeline_audio_palette.append(item)
+                imported += 1
+                self._timeline_debug(f"File import success id={item.item_id} path={path} duration={item.duration_seconds:.3f}s")
+            except Exception as exc:
+                failures.append(f"{path.name}: {exc}")
+                self._timeline_debug(f"File import failure path={path} error={exc}")
+        self._timeline_refresh_palette_cards()
+        if imported:
+            self.timeline_selected_palette_item_id = self.timeline_audio_palette[-1].item_id
+        message = f"Imported {imported} sound{'s' if imported != 1 else ''} into the Audio Palette."
+        if failures:
+            message += "\n\nSome files could not be imported:\n" + "\n".join(failures[:6])
+        if imported and not failures:
+            QMessageBox.information(self, "Import Sounds", message)
+        else:
+            QMessageBox.warning(self, "Import Sounds", message)
+
+    def _timeline_add_palette_item_to_playhead(self, item_id: int | None = None) -> None:
+        target_id = item_id if item_id is not None else self.timeline_selected_palette_item_id
+        item = self._timeline_palette_item_by_id(target_id)
+        if item is None:
+            QMessageBox.information(self, "Audio Palette", "Select or import a palette sound first.")
+            return
+        self._timeline_add_palette_item_to_timeline(item.item_id, self.timeline_playhead_seconds, 0)
+
+    def _timeline_add_palette_item_to_timeline(self, item_id: int, start_time_seconds: float, lane: int) -> None:
+        item = self._timeline_palette_item_by_id(item_id)
+        if item is None:
+            QMessageBox.warning(self, "Audio Palette", "That palette sound is no longer available.")
+            return
+        clip_id = self.timeline_next_clip_id
+        self.timeline_next_clip_id += 1
+        clip = TimelineClip(
+            clip_id=clip_id,
+            name=item.name,
+            audio=np.array(item.audio_data, dtype=np.float32, copy=True),
+            start_time_seconds=max(0.0, start_time_seconds),
+            lane=max(0, min(self.timeline_lane_count - 1, lane)),
+            sample_rate=item.sample_rate,
+            recipe=None,
+            source_path=item.source_path,
+            import_metadata={
+                "palette_item_id": item.item_id,
+                "palette_name": item.name,
+                "source_path": item.source_path,
+                "duration_seconds": item.duration_seconds,
+            },
+        )
+        self.timeline_clips.append(clip)
+        self.timeline_selected_clip_id = clip.clip_id
+        self.timeline_selected_palette_item_id = item.item_id
+        self._timeline_update_duration()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = clip.clip_id
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_refresh_palette_cards()
+        self._timeline_debug(f"Clip created from palette clip_id={clip.clip_id} palette_id={item.item_id} start={clip.start_time_seconds:.3f}s lane={clip.lane} duration={clip.duration_seconds:.3f}s")
 
     def _add_story_lane(self, checked: bool = False, icon: str | None = None, label: str | None = None, clips: list | None = None) -> None:
         if icon is not None and label is not None:
@@ -3364,6 +3797,8 @@ class WaveToyWindow(QMainWindow):
             start_time_seconds=source.start_time_seconds + 0.25,
             lane=source.lane,
             recipe=source.recipe,
+            source_path=source.source_path,
+            import_metadata=source.import_metadata,
         )
         self.timeline_clips.append(duplicate)
         self.timeline_selected_clip_id = duplicate.clip_id
@@ -3427,8 +3862,12 @@ class WaveToyWindow(QMainWindow):
         if self.timeline_canvas is not None:
             self.timeline_canvas.update()
         if sd is None:
-            self._timeline_debug("Playback unavailable: sounddevice is not installed")
-            QMessageBox.warning(self, "Playback is not available", "Timeline mix was rendered, but sounddevice is not installed. Export still works.")
+            self._timeline_debug("Playback fallback selected: sounddevice is not installed")
+            ok, message = self._timeline_play_with_system_player(mix)
+            if ok:
+                QMessageBox.information(self, "Timeline playback fallback", message)
+            else:
+                QMessageBox.warning(self, "Timeline playback fallback", message)
             return
         try:
             sd.stop()
@@ -3436,6 +3875,56 @@ class WaveToyWindow(QMainWindow):
         except Exception as exc:
             self._timeline_debug(f"Playback failed: {exc}")
             QMessageBox.warning(self, "Playback is not available", f"Timeline mix was rendered, but playback failed. Export still works.\n\nDetails: {exc}")
+
+    def _timeline_play_with_system_player(self, mix: np.ndarray) -> Tuple[bool, str]:
+        players = [
+            ("xdg-open", ["xdg-open"]),
+            ("paplay", ["paplay"]),
+            ("aplay", ["aplay", "-q"]),
+            ("ffplay", ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]),
+            ("play", ["play", "-q"]),
+        ]
+        found = [(name, command) for name, command in players if shutil.which(name)]
+        try:
+            temp = tempfile.NamedTemporaryFile(prefix="wave_toy_timeline_", suffix=".wav", delete=False)
+            temp_path = Path(temp.name)
+            temp.close()
+            save_wav(temp_path, mix, SAMPLE_RATE)
+            self.timeline_fallback_temp_path = temp_path
+            self._timeline_debug(f"Temporary playback file path={temp_path}")
+        except Exception as exc:
+            return False, f"Timeline mix was rendered, but WaveToy could not save a temporary WAV for fallback playback. Export Last Mix still works.\n\nDetails: {exc}"
+
+        if not found:
+            self._timeline_debug("Playback fallback failed: no system audio command found")
+            return False, (
+                "sounddevice is not installed, and WaveToy could not find a system audio player command. "
+                "Export Last Mix still works.\n\n"
+                f"Temporary WAV saved at:\n{temp_path}"
+            )
+
+        name, command = found[0]
+        try:
+            self.timeline_fallback_process = subprocess.Popen(
+                [*command, str(temp_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self._timeline_debug(f"Fallback subprocess started command={name} path={temp_path}")
+            note = " Stop can terminate WaveToy's fallback subprocess when the player keeps running." if name != "xdg-open" else " The system player may continue separately if it takes over from xdg-open."
+            return True, (
+                "sounddevice is not installed, so WaveToy opened a temporary WAV with your system player. "
+                "Export still works.\n\n"
+                f"Player: {name}\nTemporary WAV: {temp_path}\n{note}"
+            )
+        except Exception as exc:
+            self._timeline_debug(f"Fallback subprocess failed command={name} error={exc}")
+            return False, (
+                "sounddevice is not installed, and WaveToy could not open the temporary WAV with a system player. "
+                "Export Last Mix still works.\n\n"
+                f"Temporary WAV saved at:\n{temp_path}\n\nDetails: {exc}"
+            )
 
     def _timeline_stop_story(self, checked: bool = False) -> None:
         self._timeline_debug("Stop clicked")
@@ -3446,6 +3935,13 @@ class WaveToyWindow(QMainWindow):
                 sd.stop()
             except Exception as exc:
                 self._timeline_debug(f"sounddevice stop failed: {exc}")
+        if self.timeline_fallback_process is not None and self.timeline_fallback_process.poll() is None:
+            try:
+                self.timeline_fallback_process.terminate()
+                self._timeline_debug("Fallback subprocess stopped")
+            except Exception as exc:
+                self._timeline_debug(f"Fallback subprocess stop failed: {exc}")
+        self.timeline_fallback_process = None
         if self.timeline_canvas is not None:
             self.timeline_canvas.update()
 
@@ -3497,7 +3993,9 @@ class WaveToyWindow(QMainWindow):
                 "sample_rate": SAMPLE_RATE,
                 "duration_seconds": len(mix) / SAMPLE_RATE,
                 "clip_count": len(self.timeline_clips),
+                "palette_sources": [item.metadata() for item in self.timeline_audio_palette],
                 "clips": [clip.metadata() for clip in self.timeline_clips],
+                "notes": "Imported clip metadata stores source paths only; raw audio arrays are not embedded. Reloading imported audio requires the source files to remain available.",
             }
             sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
             self.timeline_last_mix_path = path
@@ -4172,10 +4670,13 @@ class WaveToyWindow(QMainWindow):
                 border: 5px solid rgba(0, 0, 0, 0.12);
                 border-radius: 24px;
             }
-            QWidget#timelineInspector {
+            QWidget#timelineInspector, QWidget#timelineAudioPalette {
                 background: #fff8d9;
                 border: 5px solid rgba(255, 153, 200, 0.72);
                 border-radius: 26px;
+            }
+            QWidget#timelinePaletteList {
+                background: transparent;
             }
             QLabel#timelineInspectorTitle {
                 font-size: 24px;
