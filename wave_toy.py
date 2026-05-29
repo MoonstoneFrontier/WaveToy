@@ -1122,8 +1122,7 @@ class VisualPanelButton(QPushButton):
         self.status_text = "Ready"
         self.preview_data: Dict[str, object] = {}
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumSize(QSize(176, 132))
-        self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
+        self.setFixedSize(QSize(220, 140))
         self.setToolTip(f"Open {label} controls.")
 
     def set_status(self, status_text: str, preview_data: Dict[str, object] | None = None) -> None:
@@ -1145,18 +1144,18 @@ class VisualPanelButton(QPushButton):
         painter.setBrush(gradient)
         painter.drawRoundedRect(rect, 24, 24)
 
-        title_rect = rect.adjusted(12, 8, -12, -rect.height() + 42)
+        title_rect = QRectF(rect.left() + 14, rect.top() + 8, rect.width() - 28, 30)
         painter.setPen(QColor("#263238"))
-        painter.setFont(QFont("Arial", 16, QFont.Bold))
-        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, self.label)
+        painter.setFont(QFont("Arial", 17, QFont.Bold))
+        painter.drawText(title_rect, Qt.AlignCenter, self.label)
 
-        preview_rect = rect.adjusted(12, 45, -12, -38)
+        preview_rect = QRectF(rect.left() + 18, rect.top() + 43, rect.width() - 36, 56)
         self._draw_preview(painter, preview_rect)
 
-        status_rect = rect.adjusted(12, rect.height() - 32, -12, -8)
+        status_rect = QRectF(rect.left() + 14, rect.bottom() - 32, rect.width() - 28, 22)
         painter.setPen(QColor("#455a64"))
-        painter.setFont(QFont("Arial", 10, QFont.Bold))
-        painter.drawText(status_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, self.status_text)
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        painter.drawText(status_rect, Qt.AlignCenter, self.status_text)
 
     def _draw_preview(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QPen(QColor(255, 255, 255, 190), 2))
@@ -1197,9 +1196,6 @@ class VisualPanelButton(QPushButton):
     def _draw_shape_mix(self, painter: QPainter, rect: QRectF) -> None:
         live_samples = self.preview_data.get("samples")
         if self._draw_sample_waveform(painter, rect.adjusted(8, 8, -8, -8), live_samples, QColor("#ff4fa3"), 4):
-            painter.setFont(QFont("Arial", 8, QFont.Bold))
-            painter.setPen(QColor("#455a64"))
-            painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignTop | Qt.AlignRight, "Live mix")
             return
         amps = self.preview_data.get("amps", {})
         muted = self.preview_data.get("muted", {})
@@ -1265,10 +1261,9 @@ class VisualPanelButton(QPushButton):
             else:
                 path.lineTo(x, y)
         painter.drawPath(path)
-        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        painter.setFont(QFont("Arial", 13, QFont.Bold))
         painter.setPen(QColor("#263238"))
-        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignTop | Qt.AlignLeft, root)
-        painter.drawText(rect.adjusted(8, 4, -8, -4), Qt.AlignBottom | Qt.AlignRight, method[:18])
+        painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignCenter, root)
 
     def _draw_stereo_field(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QPen(QColor("#90a4ae"), 2, Qt.DashLine))
@@ -1974,6 +1969,7 @@ class WaveToyWindow(QMainWindow):
         self.dashboard_workspace_panel: QWidget | None = None
         self.dashboard_workspace_layout: QGridLayout | None = None
         self.dashboard_workspace_title: QLabel | None = None
+        self.dashboard_summary_label: QLabel | None = None
         self.active_dashboard_workspace = "shape"
         self.wave_explorer: WaveExplorerWindow | None = None
         self._preview_stop_timer = QTimer(self)
@@ -2432,24 +2428,8 @@ class WaveToyWindow(QMainWindow):
 
         left.addWidget(explain_box)
 
-        explorer_box = self._toy_group("Wave Explorer")
-        explorer_box.setMinimumWidth(280)
-        explorer_box.setMaximumWidth(370)
-        explorer_layout = QVBoxLayout(explorer_box)
-        explorer_layout.setContentsMargins(10, 18, 10, 10)
-        explorer_layout.setSpacing(8)
         self.wave_explorer = WaveExplorerWindow(self)
         self.canvas = self.wave_explorer.canvas
-        self.wave_explorer_button = ToyButton("🌊 Wave Explorer", "#7bdff2")
-        self.wave_explorer_button.setMinimumHeight(76)
-        self.wave_explorer_button.setToolTip("Open a big sound-picture window.")
-        self.wave_explorer_button.clicked.connect(self._open_wave_explorer)
-        explorer_hint = QLabel("Open a big, zoomable sound-picture window that can follow playback.")
-        explorer_hint.setObjectName("symbolHint")
-        explorer_hint.setWordWrap(True)
-        explorer_layout.addWidget(self.wave_explorer_button)
-        explorer_layout.addWidget(explorer_hint)
-        right.addWidget(explorer_box, 0, Qt.AlignTop | Qt.AlignRight)
 
         motion_box = self._toy_group("3. Change Over Time")
         motion_box.setMinimumWidth(280)
@@ -2699,34 +2679,88 @@ class WaveToyWindow(QMainWindow):
         self._activate_dashboard_workspace("shape")
 
     def _build_visual_dashboard(self, outer: QVBoxLayout) -> None:
-        dashboard = self._toy_group("🌊 Wave Explorer Dashboard")
+        dashboard = self._toy_group("🐙 Wave Explorer Dashboard")
         dashboard.setObjectName("dashboardGroup")
         dashboard_layout = QGridLayout(dashboard)
         dashboard_layout.setContentsMargins(12, 18, 12, 12)
-        dashboard_layout.setHorizontalSpacing(12)
-        dashboard_layout.setVerticalSpacing(10)
-        dashboard_layout.setColumnStretch(0, 5)
-        dashboard_layout.setColumnStretch(1, 2)
-        dashboard_layout.setColumnStretch(2, 2)
+        dashboard_layout.setHorizontalSpacing(14)
+        dashboard_layout.setVerticalSpacing(12)
+        dashboard_layout.setColumnMinimumWidth(0, 220)
+        dashboard_layout.setColumnMinimumWidth(1, 650)
+        dashboard_layout.setColumnMinimumWidth(2, 220)
+        dashboard_layout.setColumnStretch(0, 0)
+        dashboard_layout.setColumnStretch(1, 1)
+        dashboard_layout.setColumnStretch(2, 0)
+        dashboard_layout.setRowMinimumHeight(0, 140)
+        dashboard_layout.setRowMinimumHeight(1, 140)
+        dashboard_layout.setRowMinimumHeight(2, 140)
+        dashboard_layout.setRowStretch(0, 0)
+        dashboard_layout.setRowStretch(1, 1)
+        dashboard_layout.setRowStretch(2, 0)
 
         explorer_panel = QWidget()
         explorer_panel.setObjectName("explorerDashboardPanel")
         explorer_layout = QVBoxLayout(explorer_panel)
-        explorer_layout.setContentsMargins(0, 0, 0, 0)
-        explorer_layout.setSpacing(6)
-        explorer_title = QLabel("Wave Explorer is the main sound picture. Mouse wheel zooms only here.")
-        explorer_title.setObjectName("symbolHint")
-        explorer_title.setWordWrap(True)
+        explorer_layout.setContentsMargins(10, 10, 10, 10)
+        explorer_layout.setSpacing(8)
+        explorer_title = QLabel("🌊 Wave Explorer")
+        explorer_title.setObjectName("dashboardExplorerTitle")
+        explorer_title.setAlignment(Qt.AlignCenter)
+        explorer_hint = QLabel("The waveform is the instrument. Every limb changes this center sound picture.")
+        explorer_hint.setObjectName("symbolHint")
+        explorer_hint.setWordWrap(True)
+        explorer_hint.setAlignment(Qt.AlignCenter)
+        self.dashboard_summary_label = QLabel("Custom Wave • A4 Main • Piano Steps • No bends • All waves")
+        self.dashboard_summary_label.setObjectName("dashboardSummary")
+        self.dashboard_summary_label.setWordWrap(True)
+        self.dashboard_summary_label.setAlignment(Qt.AlignCenter)
         self.dashboard_canvas = WaveCanvas()
-        self.dashboard_canvas.setMinimumSize(QSize(560, 245))
-        self.dashboard_canvas.setToolTip("Dashboard Wave Explorer preview. Mouse wheel zooms this waveform view.")
-        explorer_open = ToyButton("🔍 Open Big Explorer", "#7bdff2")
+        self.dashboard_canvas.setMinimumSize(QSize(640, 330))
+        self.dashboard_canvas.setToolTip("Central Wave Explorer. Mouse wheel zooms only this waveform view.")
+        explorer_open = ToyButton("🔍 Big View", "#7bdff2")
         explorer_open.setMinimumHeight(44)
+        explorer_open.setMaximumWidth(150)
         explorer_open.clicked.connect(self._open_wave_explorer)
+
+        explorer_layout.addWidget(explorer_title)
+        explorer_layout.addWidget(explorer_hint)
+        explorer_layout.addWidget(self.dashboard_canvas, 1)
+        explorer_layout.addWidget(self.dashboard_summary_label)
+        explorer_layout.addWidget(explorer_open, 0, Qt.AlignRight)
+        dashboard_layout.addWidget(explorer_panel, 1, 1)
+
+        specs = {
+            "shape": ("🎚 Shape Mix", "#5cdb95"),
+            "pitch": ("🎯 Pitch Toys", "#ffd166"),
+            "tuning": ("🎼 Tuning Map", "#b8f2e6"),
+            "stereo": ("👂 Stereo Space", "#7bdff2"),
+            "effects": ("✨ Sound Magic", "#d7b9ff"),
+            "presets": ("🌈 Experiments", "#ff99c8"),
+            "save": ("💾 Save Sound", "#ffd166"),
+        }
+        positions = {
+            "shape": (0, 0, Qt.AlignRight | Qt.AlignBottom),
+            "pitch": (0, 1, Qt.AlignHCenter | Qt.AlignBottom),
+            "tuning": (0, 2, Qt.AlignLeft | Qt.AlignBottom),
+            "stereo": (1, 0, Qt.AlignRight | Qt.AlignVCenter),
+            "effects": (1, 2, Qt.AlignLeft | Qt.AlignVCenter),
+            "presets": (2, 0, Qt.AlignRight | Qt.AlignTop),
+            "save": (2, 2, Qt.AlignLeft | Qt.AlignTop),
+        }
+        for key, (label, color) in specs.items():
+            button = VisualPanelButton(label, key, color)
+            if key == "save":
+                button.clicked.connect(self._save)
+            else:
+                button.clicked.connect(lambda checked=False, workspace=key: self._activate_dashboard_workspace(workspace))
+            self.visual_panel_buttons[key] = button
+            row, column, alignment = positions[key]
+            dashboard_layout.addWidget(button, row, column, alignment)
+
         self.dashboard_workspace_panel = QWidget()
         self.dashboard_workspace_panel.setObjectName("workspacePanel")
         workspace_outer = QVBoxLayout(self.dashboard_workspace_panel)
-        workspace_outer.setContentsMargins(8, 8, 8, 8)
+        workspace_outer.setContentsMargins(10, 8, 10, 8)
         workspace_outer.setSpacing(6)
         self.dashboard_workspace_title = QLabel("Workspace")
         self.dashboard_workspace_title.setObjectName("workspaceTitle")
@@ -2736,26 +2770,7 @@ class WaveToyWindow(QMainWindow):
         self.dashboard_workspace_layout.setVerticalSpacing(6)
         workspace_outer.addWidget(self.dashboard_workspace_title)
         workspace_outer.addLayout(self.dashboard_workspace_layout)
-
-        explorer_layout.addWidget(explorer_title)
-        explorer_layout.addWidget(self.dashboard_canvas, 1)
-        explorer_layout.addWidget(self.dashboard_workspace_panel)
-        explorer_layout.addWidget(explorer_open, 0, Qt.AlignRight)
-        dashboard_layout.addWidget(explorer_panel, 0, 0, 2, 1)
-
-        specs = [
-            ("shape", "🎚 Shape Mix", "#5cdb95"),
-            ("pitch", "🎯 Pitch Toys", "#ffd166"),
-            ("tuning", "🎼 Tuning Map", "#b8f2e6"),
-            ("stereo", "👂 Stereo Space", "#7bdff2"),
-            ("effects", "✨ Sound Magic", "#d7b9ff"),
-            ("presets", "🌈 Sound Experiments", "#ff99c8"),
-        ]
-        for index, (key, label, color) in enumerate(specs):
-            button = VisualPanelButton(label, key, color)
-            button.clicked.connect(lambda checked=False, workspace=key: self._activate_dashboard_workspace(workspace))
-            self.visual_panel_buttons[key] = button
-            dashboard_layout.addWidget(button, index // 2, 1 + index % 2)
+        dashboard_layout.addWidget(self.dashboard_workspace_panel, 2, 1)
 
         outer.addWidget(dashboard)
 
@@ -2947,7 +2962,7 @@ class WaveToyWindow(QMainWindow):
             for wave in WAVE_ORDER
         }
         active = [wave for wave in WAVE_ORDER if not muted.get(wave, False) and (solo is None or solo == wave) and amps[wave] > 0.01]
-        shape_status = f"Solo: {WAVE_LABELS[solo].split()[0]}" if solo else f"{len(active)} waves playing"
+        shape_status = f"Solo {WAVE_LABELS[solo].split()[0]}" if solo else f"{len(active)} Waves"
         self.visual_panel_buttons["shape"].set_status(shape_status, {"amps": amps, "muted": muted, "solo": solo, "samples": live_samples})
 
         follow = s.wave_follow_main_pitch or {wave: True for wave in WAVE_ORDER}
@@ -2960,11 +2975,11 @@ class WaveToyWindow(QMainWindow):
             pitch_items.append((wave, note_text, color))
             if not follow.get(wave, True):
                 custom.append(f"{wave.title()} {note_text}")
-        pitch_status = "All follow main" if not custom else " • ".join(custom[:2])
+        pitch_status = f"{s.note}{int(round(s.octave))} Main" if not custom else "Custom Notes"
         self.visual_panel_buttons["pitch"].set_status(pitch_status, {"notes": pitch_items})
 
         tuning_label = TUNING_METHODS.get(s.tuning_method, TUNING_METHODS["equal_temperament_12"])["label"]
-        self.visual_panel_buttons["tuning"].set_status(f"{tuning_label} • Root {s.tuning_root_note}", {"method": tuning_label, "root": s.tuning_root_note})
+        self.visual_panel_buttons["tuning"].set_status(str(tuning_label), {"method": tuning_label, "root": s.tuning_root_note})
 
         positions = []
         wave_pan = s.wave_pan or {}
@@ -2972,16 +2987,34 @@ class WaveToyWindow(QMainWindow):
         wave_dance = s.wave_dance or {}
         for wave in WAVE_ORDER:
             positions.append((wave, wave_pan.get(wave, 0.0), wave_width.get(wave, 0.65), wave_dance.get(wave, 0.0)))
-        stereo_status = "Dance on" if s.auto_pan_depth > 0.05 or any(float(item[3]) > 0.05 for item in positions) else "Wide mix" if s.stereo_width > 0.55 else "Centered mix"
+        stereo_status = "Dancing" if s.auto_pan_depth > 0.05 or any(float(item[3]) > 0.05 for item in positions) else "Wide" if s.stereo_width > 0.55 else "Centered"
         self.visual_panel_buttons["stereo"].set_status(stereo_status, {"positions": positions})
 
         paul_active = not (s.muted_modules or {}).get("paulstretch", True)
-        effect_status = f"Dream space {s.paulstretch_amount:.1f}x" if paul_active else "Paulstretch asleep"
+        effect_status = "Paulstretch On" if paul_active else "Paulstretch Off"
         self.visual_panel_buttons["effects"].set_status(effect_status, {"paul_active": paul_active, "amount": s.paulstretch_amount, "after_samples": live_samples})
 
         recipe_count = len(self._read_user_recipes())
-        preset_status = f"{recipe_count} saved experiments" if recipe_count else "Custom Wave"
+        preset_status = f"{recipe_count} Saved" if recipe_count else "Try Presets"
         self.visual_panel_buttons["presets"].set_status(preset_status, {"count": recipe_count})
+        self.visual_panel_buttons["save"].set_status("WAV + Recipe", {"samples": live_samples})
+        self._update_dashboard_summary(s, tuning_label, solo, active)
+
+    def _update_dashboard_summary(self, s: SynthSettings, tuning_label: str, solo: str | None, active: List[str]) -> None:
+        if self.dashboard_summary_label is None:
+            return
+        sound_name = "Custom Wave"
+        main_pitch = f"{s.note}{int(round(s.octave))} Main"
+        bend_hz = abs(float(s.pitch_start_hz) - float(s.pitch_end_hz))
+        bend_text = "Pitch bend on" if bend_hz > 0.5 else "No bends"
+        if solo:
+            mute_text = f"Solo {WAVE_LABELS[solo].split()[0]}"
+        else:
+            muted_count = sum(1 for muted_value in (s.wave_muted or {}).values() if muted_value)
+            mute_text = "All waves" if muted_count == 0 else f"{muted_count} muted • {len(active)} active"
+        self.dashboard_summary_label.setText(
+            f"{sound_name} • {main_pitch} • {tuning_label} • {bend_text} • {mute_text}"
+        )
 
     def _toy_group(self, title: str) -> QGroupBox:
         box = QGroupBox(title)
@@ -3089,9 +3122,23 @@ class WaveToyWindow(QMainWindow):
             }
             QWidget#explorerDashboardPanel {
                 background: #eefbff;
-                border: 3px solid rgba(123, 223, 242, 0.65);
-                border-radius: 20px;
+                border: 5px solid rgba(123, 223, 242, 0.78);
+                border-radius: 28px;
                 padding: 8px;
+            }
+            QLabel#dashboardExplorerTitle {
+                font-size: 30px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#dashboardSummary {
+                background: rgba(255, 255, 255, 0.82);
+                border: 2px solid rgba(0, 0, 0, 0.10);
+                border-radius: 14px;
+                color: #263238;
+                font-size: 14px;
+                font-weight: 900;
+                padding: 6px;
             }
             QWidget#workspacePanel {
                 background: rgba(255, 255, 255, 0.78);
