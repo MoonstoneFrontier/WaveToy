@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QSpinBox,
     QDoubleSpinBox,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -3455,10 +3456,54 @@ class WaveToyWindow(QMainWindow):
         loop_shortcut.setContext(Qt.ApplicationShortcut)
         loop_shortcut.activated.connect(self._toggle_live_loop)
 
+    def _build_toy_title_banner(self) -> QWidget:
+        """Create the compact in-app Wave Toy title banner while leaving native chrome alone."""
+        banner = QWidget()
+        banner.setObjectName("toyTitleBanner")
+        banner.setMinimumHeight(86)
+        banner.setMaximumHeight(104)
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setSpacing(16)
+
+        left_icons = QLabel("🚂 ⭐")
+        left_icons.setObjectName("toyTitleIconRail")
+        left_icons.setAlignment(Qt.AlignCenter)
+        left_icons.setMinimumWidth(96)
+
+        text_stack = QVBoxLayout()
+        text_stack.setSpacing(0)
+        title = QLabel("⭐ Wave Toy ⭐")
+        title.setObjectName("toyTitleText")
+        title.setAlignment(Qt.AlignCenter)
+        subtitle = QLabel("Build Sounds by Shaping Waves")
+        subtitle.setObjectName("toyTitleSubtitle")
+        subtitle.setAlignment(Qt.AlignCenter)
+        text_stack.addWidget(title)
+        text_stack.addWidget(subtitle)
+
+        right_icons = QLabel("🌊 🔊")
+        right_icons.setObjectName("toyTitleIconRail")
+        right_icons.setAlignment(Qt.AlignCenter)
+        right_icons.setMinimumWidth(96)
+
+        layout.addWidget(left_icons)
+        layout.addLayout(text_stack, 1)
+        layout.addWidget(right_icons)
+        return banner
+
     def _build_ui(self) -> None:
+        app_shell = QWidget()
+        app_shell.setObjectName("appShell")
+        app_layout = QVBoxLayout(app_shell)
+        app_layout.setContentsMargins(12, 10, 12, 12)
+        app_layout.setSpacing(10)
+        app_layout.addWidget(self._build_toy_title_banner())
+
         self.tabs = QTabWidget()
         self.tabs.setObjectName("mainTabs")
-        self.setCentralWidget(self.tabs)
+        app_layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(app_shell)
 
         scroll = WaveToyScrollArea(scroll_speed=1.05)
         self.tabs.addTab(scroll, "🧰 Classic Editor")
@@ -4240,22 +4285,24 @@ class WaveToyWindow(QMainWindow):
         explorer_layout.addLayout(controls)
         main.addWidget(explorer, 3)
 
-        side = QWidget()
-        side.setMinimumWidth(320)
-        side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(0, 0, 0, 0)
-        side_layout.setSpacing(12)
+        side_scroll = WaveToyScrollArea(scroll_speed=0.95, content_drag_scroll=False)
+        side_scroll.setObjectName("articulationSidebarScroll")
+        side_scroll.setMinimumWidth(400)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        side_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
-        preset_box = self._toy_group("Vowels")
-        preset_layout = QGridLayout(preset_box)
-        preset_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 20, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
-        preset_layout.setSpacing(12)
-        for index, (name, data) in enumerate(VOWEL_PRESETS.items()):
-            button = QPushButton(f"{data['emoji']}\n{name}")
-            button.setObjectName("articulationPresetButton")
-            button.setMinimumSize(QSize(148, 96))
-            button.clicked.connect(lambda checked=False, preset_name=name: self._select_vowel_preset(preset_name))
-            preset_layout.addWidget(button, index // 2, index % 2)
+        side = QWidget()
+        side.setObjectName("articulationSidebarContent")
+        side.setMinimumWidth(360)
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(4, 4, 10, 4)
+        side_layout.setSpacing(14)
+
+        preset_box = self._build_phoneme_preset_grid(
+            "Vowels",
+            VOWEL_PRESETS,
+            lambda name, _data: self._select_vowel_preset(name),
+        )
         side_layout.addWidget(CollapsibleSection("🔤 Vowels", preset_box, expanded=True))
 
         section_names = {
@@ -4266,35 +4313,60 @@ class WaveToyWindow(QMainWindow):
         for section_title, presets in CONSONANT_PRESET_SECTIONS:
             first_preset = next(iter(presets.values()), {})
             family = str(first_preset.get("phoneme_family", "")).lower()
-            consonant_box = self._toy_group(section_names.get(family, section_title))
-            consonant_layout = QGridLayout(consonant_box)
-            consonant_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 20, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
-            consonant_layout.setSpacing(12)
-            for index, (name, data) in enumerate(presets.items()):
-                button = QPushButton(f"{data['emoji']}\n{name}")
-                button.setObjectName("articulationPresetButton")
-                button.setMinimumSize(QSize(148, 90))
-                button.clicked.connect(lambda checked=False, preset_name=name, preset_data=data: self._select_consonant_preset(preset_name, preset_data))
-                consonant_layout.addWidget(button, index // 2, index % 2)
-            side_layout.addWidget(CollapsibleSection(section_names.get(family, section_title), consonant_box, expanded=False))
+            friendly_title = section_names.get(family, section_title)
+            consonant_box = self._build_phoneme_preset_grid(
+                friendly_title,
+                presets,
+                lambda name, data: self._select_consonant_preset(name, data),
+            )
+            side_layout.addWidget(CollapsibleSection(friendly_title, consonant_box, expanded=False))
 
         save_button = self._make_story_button("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme)
+        save_button.setMinimumHeight(84)
         side_layout.addWidget(save_button)
 
         cards_box = self._toy_group("Saved Phonemes")
         cards_layout = QVBoxLayout(cards_box)
-        cards_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 20, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
-        card_scroll = WaveToyScrollArea(scroll_speed=0.9)
-        card_scroll.setMinimumHeight(230)
+        cards_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 24, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
+        cards_layout.setSpacing(12)
         self.phoneme_cards_widget = QWidget()
-        card_scroll.setWidget(self.phoneme_cards_widget)
-        cards_layout.addWidget(card_scroll, 1)
-        side_layout.addWidget(CollapsibleSection("💾 Saved Phonemes", cards_box, expanded=True), 1)
-        main.addWidget(side, 1)
+        cards_layout.addWidget(self.phoneme_cards_widget)
+        side_layout.addWidget(CollapsibleSection("💾 Saved Phonemes", cards_box, expanded=True))
+        side_layout.addStretch(1)
+
+        side_scroll.setWidget(side)
+        main.addWidget(side_scroll, 1)
 
         self.tabs.insertTab(min(2, self.tabs.count()), tab, "🗣 Articulation Lab")
         self._refresh_phoneme_cards()
         self._select_vowel_preset("AH", play=False)
+
+    def _build_phoneme_preset_grid(self, title: str, presets: Dict[str, Dict[str, object]], callback) -> QGroupBox:
+        """Build a roomy two-column preset grid for one sidebar section."""
+        box = self._toy_group(title)
+        layout = QGridLayout(box)
+        layout.setContentsMargins(WaveToySizing.CARD_PADDING, 24, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(12)
+        for column in range(2):
+            layout.setColumnStretch(column, 1)
+        for index, (name, data) in enumerate(presets.items()):
+            button = self._make_phoneme_preset_button(name, data)
+            button.clicked.connect(lambda checked=False, preset_name=name, preset_data=data: callback(preset_name, preset_data))
+            layout.addWidget(button, index // 2, index % 2)
+        return box
+
+    def _make_phoneme_preset_button(self, name: str, data: Dict[str, object]) -> QPushButton:
+        emoji = str(data.get("emoji", "🔊"))
+        ipa = str(data.get("ipa", name.lower()))
+        button = QPushButton(f"{emoji}  {name}\n/{ipa}/")
+        button.setObjectName("articulationPresetButton")
+        button.setMinimumHeight(56)
+        button.setMinimumWidth(142)
+        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip(f"Load {name} phoneme preset")
+        return button
 
     def _phoneme_path(self, phoneme: ArticulationPhoneme) -> Path:
         safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in phoneme.name.strip()).strip("_")
@@ -4504,31 +4576,59 @@ class WaveToyWindow(QMainWindow):
     def _make_phoneme_card(self, phoneme: ArticulationPhoneme) -> QWidget:
         card = QWidget()
         card.setObjectName("phonemeCard")
+        card.setMinimumHeight(72)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         card.setStyleSheet(f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border-radius: 22px; }}")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        title = QLabel(f"/{phoneme.ipa}/  {phoneme.name}")
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        ipa = QLabel(f"/{phoneme.ipa}/")
+        ipa.setObjectName("phonemeCardIpa")
+        ipa.setAlignment(Qt.AlignCenter)
+        ipa.setMinimumWidth(66)
+        title = QLabel(phoneme.name)
         title.setObjectName("phonemeCardTitle")
         title.setWordWrap(True)
         summary = QLabel(articulation_summary(phoneme))
         summary.setObjectName("phonemeCardSummary")
         summary.setWordWrap(True)
-        row = QHBoxLayout()
-        actions = (
-            ("▶", lambda checked=False, p=phoneme: self._play_saved_phoneme(p)),
+        title_stack = QVBoxLayout()
+        title_stack.setSpacing(2)
+        title_stack.addWidget(title)
+        title_stack.addWidget(summary)
+
+        play_button = QPushButton("▶ Play")
+        play_button.setObjectName("phonemeCardPrimaryAction")
+        play_button.setMinimumHeight(WaveToySizing.MIN_TOUCH_TARGET)
+        play_button.clicked.connect(lambda checked=False, p=phoneme: self._play_saved_phoneme(p))
+        delete_button = QPushButton("🗑 Delete")
+        delete_button.setObjectName("phonemeCardDangerAction")
+        delete_button.setMinimumHeight(WaveToySizing.MIN_TOUCH_TARGET)
+        delete_button.clicked.connect(lambda checked=False, p=phoneme: self._delete_saved_phoneme(p))
+
+        header.addWidget(ipa)
+        header.addLayout(title_stack, 1)
+        header.addWidget(play_button)
+        header.addWidget(delete_button)
+        layout.addLayout(header)
+
+        tools = QHBoxLayout()
+        tools.setSpacing(8)
+        secondary_actions = (
             ("Load", lambda checked=False, p=phoneme: self._load_saved_phoneme(p)),
             ("Rename", lambda checked=False, p=phoneme: self._rename_saved_phoneme(p)),
             ("Duplicate", lambda checked=False, p=phoneme: self._duplicate_saved_phoneme(p)),
-            ("Delete", lambda checked=False, p=phoneme: self._delete_saved_phoneme(p)),
         )
-        for text, callback in actions:
+        for text, callback in secondary_actions:
             button = QPushButton(text)
+            button.setObjectName("phonemeCardSecondaryAction")
             button.setMinimumHeight(WaveToySizing.MIN_TOUCH_TARGET)
             button.clicked.connect(callback)
-            row.addWidget(button)
-        layout.addWidget(title)
-        layout.addWidget(summary)
-        layout.addLayout(row)
+            tools.addWidget(button)
+        layout.addLayout(tools)
         return card
 
     def _play_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
@@ -5955,6 +6055,33 @@ class WaveToyWindow(QMainWindow):
                 border: 4px solid rgba(255, 153, 200, 0.75);
                 border-radius: 24px;
             }
+            QWidget#appShell {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7bdff2, stop:0.55 #fff1d6, stop:1 #ff99c8);
+            }
+            QWidget#toyTitleBanner {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:0.48 #fff8d9, stop:1 #ffd6e8);
+                border: 5px solid rgba(255, 79, 163, 0.72);
+                border-radius: 30px;
+            }
+            QLabel#toyTitleText {
+                font-size: 36px;
+                font-weight: 900;
+                color: #263238;
+                letter-spacing: 1px;
+            }
+            QLabel#toyTitleSubtitle {
+                font-size: 18px;
+                font-weight: 900;
+                color: #4361ee;
+            }
+            QLabel#toyTitleIconRail {
+                background: rgba(255, 255, 255, 0.76);
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: 22px;
+                font-size: 30px;
+                font-weight: 900;
+                padding: 6px;
+            }
             QLabel#title {
                 font-size: 42px;
                 font-weight: 900;
@@ -6099,8 +6226,17 @@ class WaveToyWindow(QMainWindow):
                 font-weight: 900;
                 color: #263238;
             }
+            QLabel#phonemeCardIpa {
+                background: rgba(255, 255, 255, 0.82);
+                border: 3px solid rgba(0, 0, 0, 0.12);
+                border-radius: 18px;
+                font-size: 24px;
+                font-weight: 900;
+                color: #1d1d1d;
+                padding: 8px;
+            }
             QLabel#phonemeCardTitle {
-                font-size: 22px;
+                font-size: 20px;
                 font-weight: 900;
                 color: #1d1d1d;
             }
@@ -6109,16 +6245,49 @@ class WaveToyWindow(QMainWindow):
                 font-weight: 900;
                 color: #263238;
             }
+            QPushButton#phonemeCardPrimaryAction, QPushButton#phonemeCardDangerAction, QPushButton#phonemeCardSecondaryAction {
+                border-radius: 16px;
+                font-size: 14px;
+                font-weight: 900;
+                padding: 8px 10px;
+                min-height: 48px;
+            }
+            QPushButton#phonemeCardPrimaryAction {
+                background: #5cdb95;
+            }
+            QPushButton#phonemeCardDangerAction {
+                background: #ffadad;
+            }
+            QPushButton#phonemeCardSecondaryAction {
+                background: #eefbff;
+            }
             QPushButton#articulationPresetButton {
-                border-radius: 26px;
+                border-radius: 22px;
                 border: 4px solid rgba(0, 0, 0, 0.16);
                 background: #fff7e6;
-                font-size: 30px;
+                font-size: 21px;
                 font-weight: 900;
-                padding: 8px;
+                min-height: 56px;
+                padding: 10px 12px;
+                text-align: center;
+            }
+            QPushButton#articulationPresetButton:hover {
+                background: #fff0bd;
+                border-color: rgba(255, 79, 163, 0.62);
+            }
+            QPushButton#articulationPresetButton:pressed {
+                background: #ffd166;
+                padding-top: 13px;
             }
             QWidget#articulationLabTab {
                 background: #fff1d6;
+            }
+            QWidget#articulationSidebarContent {
+                background: transparent;
+            }
+            QScrollArea#articulationSidebarScroll {
+                background: transparent;
+                border: 0;
             }
             QLabel {
                 font-size: 14px;
@@ -6177,7 +6346,7 @@ class WaveToyWindow(QMainWindow):
                 font-size: 20px;
                 font-weight: 900;
                 min-height: 56px;
-                padding: 8px 12px;
+                padding: 10px 14px;
                 text-align: left;
             }
             QToolButton#collapsibleHeader:hover {
