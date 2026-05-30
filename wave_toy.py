@@ -48,7 +48,7 @@ try:
 except Exception:
     sd = None
 
-from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QDrag, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QTabWidget,
+    QToolButton,
     QSpinBox,
     QDoubleSpinBox,
     QVBoxLayout,
@@ -1254,10 +1255,24 @@ class WaveCanvas(QWidget):
 
     def mouseDoubleClickEvent(self, event) -> None:
         """Double-click resets waveform zoom."""
+        self.reset_zoom()
+        event.accept()
+
+    def zoom_by(self, multiplier: float) -> None:
+        self.zoom_factor = float(np.clip(self.zoom_factor * multiplier, 1.0, 64.0))
+        self.update()
+
+    def pan_view(self, direction: float) -> None:
+        if self.zoom_factor <= 1.01:
+            return
+        step = max(0.02, 0.18 / self.zoom_factor)
+        self.zoom_center = float(np.clip(self.zoom_center + (step * direction), 0.02, 0.98))
+        self.update()
+
+    def reset_zoom(self) -> None:
         self.zoom_factor = 1.0
         self.zoom_center = 0.5
         self.update()
-        event.accept()
 
     def set_playhead_fraction(self, fraction: float | None) -> None:
         """Set the displayed playback playhead without changing the user's zoom level."""
@@ -1598,6 +1613,282 @@ class WaveCanvas(QWidget):
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.TextWordWrap, self.mascot_message)
 
 
+
+class WaveToySizing:
+    """Central touch-friendly sizing tokens for WaveToy's toy UI."""
+
+    MIN_TOUCH_TARGET = 48
+    BUTTON_HEIGHT = 56
+    LARGE_BUTTON_HEIGHT = 72
+    ICON_STANDARD = 32
+    ICON_LARGE = 48
+    ICON_HERO = 64
+    CARD_MIN_HEIGHT = 96
+    SCROLLBAR_WIDTH = 22
+    PAGE_MARGIN = 18
+    CARD_PADDING = 14
+    SECTION_SPACING = 14
+
+
+class WaveToyTheme:
+    """Shared color, spacing, and style helpers for the WaveToy interface."""
+
+    BACKGROUND = "#7bdff2"
+    SURFACE = "#ffffff"
+    CARD = "#fff8d9"
+    INK = "#263238"
+    MUTED = "#607d8b"
+    ACCENT = "#ff4fa3"
+    ACCENT_DARK = "#ff2f91"
+    BLUE = "#dff8ff"
+
+    @classmethod
+    def scroll_area_style(cls) -> str:
+        width = WaveToySizing.SCROLLBAR_WIDTH
+        return f"""
+            WaveToyScrollArea {{
+                background: transparent;
+                border: 0;
+            }}
+            QScrollArea#waveToyScrollArea {{
+                background: transparent;
+                border: 0;
+            }}
+            QScrollBar:vertical {{
+                background: rgba(255, 255, 255, 0.44);
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: {width // 2}px;
+                width: {width}px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {cls.ACCENT};
+                border: 3px solid white;
+                border-radius: {max(8, (width - 6) // 2)}px;
+                min-height: 72px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {cls.ACCENT_DARK};
+            }}
+            QScrollBar:horizontal {{
+                background: rgba(255, 255, 255, 0.44);
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: {width // 2}px;
+                height: {width}px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {cls.ACCENT};
+                border: 3px solid white;
+                border-radius: {max(8, (width - 6) // 2)}px;
+                min-width: 72px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {cls.ACCENT_DARK};
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line {{
+                width: 0;
+                height: 0;
+                border: 0;
+                background: transparent;
+            }}
+            QScrollBar::add-page, QScrollBar::sub-page {{
+                background: transparent;
+            }}
+        """
+
+    @classmethod
+    def global_control_style(cls) -> str:
+        return f"""
+            QPushButton {{
+                min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
+                padding: 8px 14px;
+                border-radius: 16px;
+                font-size: 16px;
+                font-weight: 800;
+            }}
+            QComboBox, QSpinBox, QDoubleSpinBox {{
+                min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
+                padding: 4px 10px;
+                border-radius: 14px;
+            }}
+            QCheckBox {{
+                min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
+                spacing: 10px;
+                font-size: 16px;
+                font-weight: 800;
+            }}
+            QGroupBox#toyGroup, QWidget#timelineInspector, QWidget#timelineAudioPalette, QWidget#explorerDashboardPanel {{
+                margin-top: 8px;
+            }}
+        """
+
+
+class WaveToyScrollArea(QScrollArea):
+    """Unified toy-like scroll area with wheel, drag, kinetic scrolling, and large handles."""
+
+    def __init__(self, *, scroll_speed: float = 1.0, content_drag_scroll: bool = True, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("waveToyScrollArea")
+        self.setFrameShape(QScrollArea.NoFrame)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setStyleSheet(WaveToyTheme.scroll_area_style())
+        self.scroll_speed = max(0.15, float(scroll_speed))
+        self.content_drag_scroll = content_drag_scroll
+        self._drag_active = False
+        self._drag_scrolling = False
+        self._drag_start = QPoint()
+        self._last_pos = QPoint()
+        self._last_time = time.monotonic()
+        self._velocity_x = 0.0
+        self._velocity_y = 0.0
+        self._kinetic_timer = QTimer(self)
+        self._kinetic_timer.timeout.connect(self._kinetic_tick)
+        self.viewport().installEventFilter(self)
+        self.viewport().setCursor(Qt.OpenHandCursor)
+
+    def setWidget(self, widget: QWidget) -> None:  # noqa: N802 - Qt override name
+        super().setWidget(widget)
+        if self.content_drag_scroll:
+            widget.installEventFilter(self)
+
+    def set_scroll_speed(self, speed: float) -> None:
+        self.scroll_speed = max(0.15, float(speed))
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta()
+        pixel_delta = event.pixelDelta()
+        x_delta = pixel_delta.x() if not pixel_delta.isNull() else delta.x()
+        y_delta = pixel_delta.y() if not pixel_delta.isNull() else delta.y()
+        if x_delta == 0 and y_delta == 0:
+            event.ignore()
+            return
+        horizontal = abs(x_delta) > abs(y_delta) and self.horizontalScrollBar().maximum() > 0
+        if horizontal:
+            self._scroll_by(dx=-(x_delta / 120.0) * 72.0 * self.scroll_speed, dy=0.0)
+        elif self.verticalScrollBar().maximum() > 0:
+            self._scroll_by(dx=0.0, dy=-(y_delta / 120.0) * 72.0 * self.scroll_speed)
+        elif self.horizontalScrollBar().maximum() > 0:
+            self._scroll_by(dx=-(y_delta / 120.0) * 72.0 * self.scroll_speed, dy=0.0)
+        else:
+            event.ignore()
+            return
+        event.accept()
+
+    def keyPressEvent(self, event) -> None:
+        step = int(72 * self.scroll_speed)
+        if event.key() in (Qt.Key_Down, Qt.Key_PageDown):
+            self._scroll_by(dy=step * (5 if event.key() == Qt.Key_PageDown else 1))
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Up, Qt.Key_PageUp):
+            self._scroll_by(dy=-step * (5 if event.key() == Qt.Key_PageUp else 1))
+            event.accept()
+            return
+        if event.key() == Qt.Key_Right:
+            self._scroll_by(dx=step)
+            event.accept()
+            return
+        if event.key() == Qt.Key_Left:
+            self._scroll_by(dx=-step)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        event_type = event.type()
+        if event_type == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            self._kinetic_timer.stop()
+            self._drag_active = True
+            self._drag_scrolling = False
+            self._drag_start = event.globalPosition().toPoint()
+            self._last_pos = self._drag_start
+            self._last_time = time.monotonic()
+            self._velocity_x = 0.0
+            self._velocity_y = 0.0
+            return False
+        if event_type == QEvent.MouseMove and self._drag_active and event.buttons() & Qt.LeftButton:
+            pos = event.globalPosition().toPoint()
+            delta = pos - self._last_pos
+            if not self._drag_scrolling and (pos - self._drag_start).manhattanLength() < QApplication.startDragDistance():
+                return False
+            self._drag_scrolling = True
+            now = time.monotonic()
+            elapsed = max(0.001, now - self._last_time)
+            can_x = self.horizontalScrollBar().maximum() > 0
+            can_y = self.verticalScrollBar().maximum() > 0
+            dx = -delta.x() if can_x and (abs(delta.x()) >= abs(delta.y()) or not can_y) else 0
+            dy = -delta.y() if can_y and (abs(delta.y()) >= abs(delta.x()) or not can_x) else 0
+            self._scroll_by(dx=dx, dy=dy)
+            self._velocity_x = dx / elapsed
+            self._velocity_y = dy / elapsed
+            self._last_pos = pos
+            self._last_time = now
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return True
+        if event_type == QEvent.MouseButtonRelease and self._drag_active:
+            was_scrolling = self._drag_scrolling
+            self._drag_active = False
+            self._drag_scrolling = False
+            self.viewport().setCursor(Qt.OpenHandCursor)
+            if was_scrolling and (abs(self._velocity_x) > 80.0 or abs(self._velocity_y) > 80.0):
+                self._kinetic_timer.start(16)
+            return was_scrolling
+        return super().eventFilter(watched, event)
+
+    def _scroll_by(self, dx: float = 0.0, dy: float = 0.0) -> None:
+        if dx:
+            bar = self.horizontalScrollBar()
+            bar.setValue(int(max(bar.minimum(), min(bar.maximum(), bar.value() + dx))))
+        if dy:
+            bar = self.verticalScrollBar()
+            bar.setValue(int(max(bar.minimum(), min(bar.maximum(), bar.value() + dy))))
+
+    def _kinetic_tick(self) -> None:
+        self._velocity_x *= 0.88
+        self._velocity_y *= 0.88
+        if abs(self._velocity_x) < 8.0 and abs(self._velocity_y) < 8.0:
+            self._kinetic_timer.stop()
+            return
+        old_x = self.horizontalScrollBar().value()
+        old_y = self.verticalScrollBar().value()
+        self._scroll_by(dx=self._velocity_x * 0.016, dy=self._velocity_y * 0.016)
+        if old_x == self.horizontalScrollBar().value() and old_y == self.verticalScrollBar().value():
+            self._kinetic_timer.stop()
+
+
+class CollapsibleSection(QWidget):
+    """Touch-friendly collapsible card used to reduce Articulation Lab density."""
+
+    def __init__(self, title: str, content: QWidget, *, expanded: bool = True) -> None:
+        super().__init__()
+        self.setObjectName("collapsibleSection")
+        self.content = content
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("collapsibleHeader")
+        self.toggle.setText(title)
+        self.toggle.setCheckable(True)
+        self.toggle.setChecked(expanded)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.toggle.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+        self.toggle.clicked.connect(self._toggle_content)
+        outer.addWidget(self.toggle)
+        outer.addWidget(self.content)
+        self.content.setVisible(expanded)
+
+    def _toggle_content(self, checked: bool) -> None:
+        self.toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        self.content.setVisible(checked)
+
+
 class ToyButton(QPushButton):
     def __init__(self, text: str, color: str) -> None:
         super().__init__(text)
@@ -1666,7 +1957,7 @@ class StoryboardClipWidget(QWidget):
         for label in ("⧉", "🔇", "⭐"):
             button = QPushButton(label)
             button.setObjectName("storyboardTinyAction")
-            button.setMinimumSize(QSize(44, 44))
+            button.setMinimumSize(QSize(WaveToySizing.MIN_TOUCH_TARGET, WaveToySizing.MIN_TOUCH_TARGET))
             button.setToolTip({"⧉": "Duplicate this sound card.", "🔇": "Mute this sound card.", "⭐": "Solo this sound card."}[label])
             action_stack.addWidget(button)
         layout.addLayout(action_stack)
@@ -1708,7 +1999,7 @@ class AudioPaletteCard(QWidget):
         layout.setContentsMargins(76, 10, 10, 10)
         layout.addStretch(1)
         add_button = QPushButton("➕ Add")
-        add_button.setMinimumSize(QSize(76, 44))
+        add_button.setMinimumSize(QSize(86, WaveToySizing.MIN_TOUCH_TARGET))
         add_button.setCursor(Qt.PointingHandCursor)
         add_button.clicked.connect(lambda checked=False: self.owner._timeline_add_palette_item_to_playhead(self.item.item_id))
         layout.addWidget(add_button, 0, Qt.AlignRight | Qt.AlignBottom)
@@ -2294,8 +2585,22 @@ class WaveExplorerWindow(QWidget):
         self.canvas = WaveCanvas()
         self.canvas.setMinimumSize(QSize(700, 380))
         layout.addWidget(self.canvas, 1)
+        controls = QHBoxLayout()
+        controls.setSpacing(10)
+        for label, callback in (
+            ("🔎 Zoom In", lambda checked=False: self.canvas.zoom_by(1.25)),
+            ("🔍 Zoom Out", lambda checked=False: self.canvas.zoom_by(0.8)),
+            ("⬅ Pan", lambda checked=False: self.canvas.pan_view(-1.0)),
+            ("➡ Pan", lambda checked=False: self.canvas.pan_view(1.0)),
+            ("↺ Reset", lambda checked=False: self.canvas.reset_zoom()),
+        ):
+            button = QPushButton(label)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            button.clicked.connect(callback)
+            controls.addWidget(button)
+        layout.addLayout(controls)
 
-        self.status_label = QLabel("Mouse wheel zooms. During playback, a zoomed picture follows the sound.")
+        self.status_label = QLabel("Mouse wheel zooms; buttons zoom, pan, and reset without hiding the waveform.")
         self.status_label.setObjectName("symbolHint")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
@@ -3155,9 +3460,7 @@ class WaveToyWindow(QMainWindow):
         self.tabs.setObjectName("mainTabs")
         self.setCentralWidget(self.tabs)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll = WaveToyScrollArea(scroll_speed=1.05)
         self.tabs.addTab(scroll, "🧰 Classic Editor")
 
         root = QWidget()
@@ -3165,8 +3468,8 @@ class WaveToyWindow(QMainWindow):
         scroll.setWidget(root)
 
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(16, 14, 16, 14)
-        outer.setSpacing(10)
+        outer.setContentsMargins(WaveToySizing.PAGE_MARGIN, 16, WaveToySizing.PAGE_MARGIN, 16)
+        outer.setSpacing(WaveToySizing.SECTION_SPACING)
 
         title = QLabel("🌈 Wave Toy")
         title.setObjectName("title")
@@ -3771,7 +4074,7 @@ class WaveToyWindow(QMainWindow):
             (self.load_button, 160),
         ):
             button.setMinimumWidth(width)
-            button.setMaximumHeight(54)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
         self.loop_status_label = QLabel("Loop: Off")
         self.loop_status_label.setObjectName("loopStatus")
 
@@ -3943,44 +4246,50 @@ class WaveToyWindow(QMainWindow):
         side_layout.setContentsMargins(0, 0, 0, 0)
         side_layout.setSpacing(12)
 
-        preset_box = self._toy_group("Vowel Presets")
+        preset_box = self._toy_group("Vowels")
         preset_layout = QGridLayout(preset_box)
-        preset_layout.setContentsMargins(12, 18, 12, 12)
-        preset_layout.setSpacing(10)
+        preset_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 20, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
+        preset_layout.setSpacing(12)
         for index, (name, data) in enumerate(VOWEL_PRESETS.items()):
             button = QPushButton(f"{data['emoji']}\n{name}")
             button.setObjectName("articulationPresetButton")
-            button.setMinimumSize(QSize(132, 92))
+            button.setMinimumSize(QSize(148, 96))
             button.clicked.connect(lambda checked=False, preset_name=name: self._select_vowel_preset(preset_name))
             preset_layout.addWidget(button, index // 2, index % 2)
-        side_layout.addWidget(preset_box)
+        side_layout.addWidget(CollapsibleSection("🔤 Vowels", preset_box, expanded=True))
 
+        section_names = {
+            "fricative": "🌬 Fricatives",
+            "stop": "💥 Stops",
+            "nasal": "👃 Nasals",
+        }
         for section_title, presets in CONSONANT_PRESET_SECTIONS:
-            consonant_box = self._toy_group(section_title)
+            first_preset = next(iter(presets.values()), {})
+            family = str(first_preset.get("phoneme_family", "")).lower()
+            consonant_box = self._toy_group(section_names.get(family, section_title))
             consonant_layout = QGridLayout(consonant_box)
-            consonant_layout.setContentsMargins(12, 18, 12, 12)
-            consonant_layout.setSpacing(10)
+            consonant_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 20, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
+            consonant_layout.setSpacing(12)
             for index, (name, data) in enumerate(presets.items()):
                 button = QPushButton(f"{data['emoji']}\n{name}")
                 button.setObjectName("articulationPresetButton")
-                button.setMinimumSize(QSize(132, 82))
+                button.setMinimumSize(QSize(148, 90))
                 button.clicked.connect(lambda checked=False, preset_name=name, preset_data=data: self._select_consonant_preset(preset_name, preset_data))
                 consonant_layout.addWidget(button, index // 2, index % 2)
-            side_layout.addWidget(consonant_box)
+            side_layout.addWidget(CollapsibleSection(section_names.get(family, section_title), consonant_box, expanded=False))
 
         save_button = self._make_story_button("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme)
         side_layout.addWidget(save_button)
 
-        cards_box = self._toy_group("Saved Phoneme Cards")
+        cards_box = self._toy_group("Saved Phonemes")
         cards_layout = QVBoxLayout(cards_box)
-        cards_layout.setContentsMargins(12, 18, 12, 12)
-        card_scroll = QScrollArea()
-        card_scroll.setWidgetResizable(True)
-        card_scroll.setFrameShape(QScrollArea.NoFrame)
+        cards_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 20, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
+        card_scroll = WaveToyScrollArea(scroll_speed=0.9)
+        card_scroll.setMinimumHeight(230)
         self.phoneme_cards_widget = QWidget()
         card_scroll.setWidget(self.phoneme_cards_widget)
         cards_layout.addWidget(card_scroll, 1)
-        side_layout.addWidget(cards_box, 1)
+        side_layout.addWidget(CollapsibleSection("💾 Saved Phonemes", cards_box, expanded=True), 1)
         main.addWidget(side, 1)
 
         self.tabs.insertTab(min(2, self.tabs.count()), tab, "🗣 Articulation Lab")
@@ -4214,7 +4523,7 @@ class WaveToyWindow(QMainWindow):
         )
         for text, callback in actions:
             button = QPushButton(text)
-            button.setMinimumHeight(42)
+            button.setMinimumHeight(WaveToySizing.MIN_TOUCH_TARGET)
             button.clicked.connect(callback)
             row.addWidget(button)
         layout.addWidget(title)
@@ -4361,9 +4670,7 @@ class WaveToyWindow(QMainWindow):
         self.timeline_palette_count_label = QLabel("No imported sounds yet.")
         self.timeline_palette_count_label.setObjectName("timelineInspectorText")
         self.timeline_palette_count_label.setWordWrap(True)
-        palette_scroll = QScrollArea()
-        palette_scroll.setWidgetResizable(True)
-        palette_scroll.setFrameShape(QScrollArea.NoFrame)
+        palette_scroll = WaveToyScrollArea(scroll_speed=0.9)
         self.timeline_palette_list_widget = QWidget()
         self.timeline_palette_list_widget.setObjectName("timelinePaletteList")
         palette_scroll.setWidget(self.timeline_palette_list_widget)
@@ -4375,9 +4682,8 @@ class WaveToyWindow(QMainWindow):
         split.addWidget(palette)
         self._timeline_refresh_palette_cards()
 
-        scroll = QScrollArea()
+        scroll = WaveToyScrollArea(scroll_speed=1.0, content_drag_scroll=False)
         scroll.setWidgetResizable(False)
-        scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setObjectName("storyboardScroll")
         self.timeline_canvas = TimelineCanvas(self)
         self.timeline_canvas._refresh_size()
@@ -4972,10 +5278,25 @@ class WaveToyWindow(QMainWindow):
         self.dashboard_canvas = WaveCanvas()
         self.dashboard_canvas.setMinimumSize(QSize(720, 400))
         self.dashboard_canvas.setToolTip("Central Wave Explorer. Mouse wheel zooms only this waveform view.")
+        wave_controls = QHBoxLayout()
+        wave_controls.setSpacing(8)
+        for label, callback in (
+            ("🔎 Zoom In", lambda checked=False: self.dashboard_canvas.zoom_by(1.25)),
+            ("🔍 Zoom Out", lambda checked=False: self.dashboard_canvas.zoom_by(0.8)),
+            ("⬅ Pan", lambda checked=False: self.dashboard_canvas.pan_view(-1.0)),
+            ("➡ Pan", lambda checked=False: self.dashboard_canvas.pan_view(1.0)),
+            ("↺ Reset", lambda checked=False: self.dashboard_canvas.reset_zoom()),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("waveExplorerControlButton")
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            button.clicked.connect(callback)
+            wave_controls.addWidget(button)
 
         explorer_layout.addWidget(explorer_title)
         explorer_layout.addWidget(explorer_hint)
         explorer_layout.addWidget(self.dashboard_canvas, 1)
+        explorer_layout.addLayout(wave_controls)
         explorer_layout.addWidget(self.dashboard_summary_label)
         explorer_layout.addWidget(self.articulation_wave_status_label)
         dashboard_layout.addWidget(explorer_panel, 0, 1, 3, 1)
@@ -5623,8 +5944,8 @@ class WaveToyWindow(QMainWindow):
                 color: #607d8b;
             }
             QPushButton#storyboardTinyAction {
-                min-width: 44px;
-                min-height: 44px;
+                min-width: 48px;
+                min-height: 48px;
                 border-radius: 16px;
                 font-size: 20px;
                 padding: 0;
@@ -5844,8 +6165,26 @@ class WaveToyWindow(QMainWindow):
             QPushButton:hover {
                 background: #e2f2ff;
             }
+            QWidget#collapsibleSection {
+                background: transparent;
+                margin: 0;
+            }
+            QToolButton#collapsibleHeader {
+                background: #ffffff;
+                border: 4px solid rgba(255, 153, 200, 0.62);
+                border-radius: 20px;
+                color: #263238;
+                font-size: 20px;
+                font-weight: 900;
+                min-height: 56px;
+                padding: 8px 12px;
+                text-align: left;
+            }
+            QToolButton#collapsibleHeader:hover {
+                background: #fff8d9;
+            }
             """
-        self.setStyleSheet(base_style + self._slider_style_sheet())
+        self.setStyleSheet(base_style + self._slider_style_sheet() + WaveToyTheme.global_control_style() + WaveToyTheme.scroll_area_style())
 
     def _db_text(self, value: int) -> str:
         db_value = value / DB_SLIDER_SCALE
