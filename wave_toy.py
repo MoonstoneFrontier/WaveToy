@@ -3225,7 +3225,7 @@ class VocalTractCanvas(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
-        self.setMinimumSize(QSize(520, 360))
+        self.setMinimumSize(QSize(560, 300))
         self.setToolTip("Toy vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels.")
 
     def set_phoneme(self, phoneme: ArticulationPhoneme) -> None:
@@ -3281,9 +3281,6 @@ class VocalTractCanvas(QWidget):
             closure_y = mouth_rect.center().y()
             painter.setPen(QPen(QColor("#ffb703"), 6 + int(closure * 10), Qt.SolidLine, Qt.RoundCap))
             painter.drawLine(QPointF(mouth_rect.left() + 18, closure_y), QPointF(mouth_rect.right() - 18, closure_y))
-            painter.setFont(QFont("Sans Serif", 10, QFont.Bold))
-            painter.setPen(QColor("#7a4f00"))
-            painter.drawText(QRectF(mouth_rect.left(), mouth_rect.top() - 24, mouth_rect.width(), 20), Qt.AlignCenter, "closure")
 
         if air_pressure > 0.05:
             painter.setPen(QPen(QColor(78, 205, 196, 70 + int(air_pressure * 140)), 3, Qt.DashLine, Qt.RoundCap))
@@ -3306,17 +3303,14 @@ class VocalTractCanvas(QWidget):
             painter.setPen(QPen(QColor("#4361ee"), 3))
             painter.setBrush(QColor(67, 97, 238, 50))
             painter.drawEllipse(throat)
-            painter.drawText(throat, Qt.AlignCenter, "voice")
+            for offset in (-12, 0, 12):
+                painter.drawArc(throat.adjusted(14 + offset, 14, -14 + offset, -14), 35 * 16, 110 * 16)
 
         painter.setPen(QPen(QColor("#3a506b"), 4))
         painter.setBrush(QColor("#ffffff"))
         painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.30, face_rect.top() + 80, 32, 42))
         painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.62, face_rect.top() + 80, 32, 42))
 
-        painter.setPen(QPen(QColor("#2b2d42"), 2))
-        painter.setFont(QFont("Sans Serif", 14, QFont.Bold))
-        f1, f2, f3 = formants_from_articulation(p)
-        painter.drawText(rect.adjusted(10, rect.height() - 56, -10, -10), Qt.AlignLeft | Qt.AlignVCenter, f"{p.phoneme_family.title()}  |  F1 {f1:.0f}  F2 {f2:.0f}  F3 {f3:.0f} Hz")
         painter.end()
 
 
@@ -3425,6 +3419,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_name_label: QLabel | None = None
         self.articulation_ipa_label: QLabel | None = None
         self.articulation_summary_label: QLabel | None = None
+        self.articulation_formant_label: QLabel | None = None
         self.articulation_wave_status_label: QLabel | None = None
         self.phoneme_cards_widget: QWidget | None = None
         self.phoneme_drawer_stack: QStackedWidget | None = None
@@ -4229,11 +4224,12 @@ class WaveToyWindow(QMainWindow):
 
         left = QVBoxLayout()
         left.setSpacing(10)
-        main.addLayout(left, 5)
+        main.addLayout(left, 6)
 
         explorer = self._toy_group("Vocal Explorer")
-        explorer.setMinimumHeight(250)
-        explorer.setMaximumHeight(340)
+        explorer.setMinimumHeight(350)
+        explorer.setMaximumHeight(460)
+        explorer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         explorer_layout = QVBoxLayout(explorer)
         explorer_layout.setContentsMargins(14, 18, 14, 12)
         explorer_layout.setSpacing(8)
@@ -4258,14 +4254,26 @@ class WaveToyWindow(QMainWindow):
         explorer_layout.addLayout(top)
 
         self.articulation_canvas = VocalTractCanvas()
-        self.articulation_canvas.setMinimumHeight(130)
+        self.articulation_canvas.setMinimumHeight(250)
         explorer_layout.addWidget(self.articulation_canvas, 1)
+
+        status_strip = QWidget()
+        status_strip.setObjectName("articulationStatusStrip")
+        status_layout = QVBoxLayout(status_strip)
+        status_layout.setContentsMargins(10, 8, 10, 8)
+        status_layout.setSpacing(4)
+        self.articulation_formant_label = QLabel("Formants: F1 850 Hz • F2 1370 Hz • F3 2500 Hz")
+        self.articulation_formant_label.setObjectName("dashboardSummary")
+        self.articulation_formant_label.setWordWrap(True)
+        self.articulation_formant_label.setAlignment(Qt.AlignCenter)
         self.articulation_summary_label = QLabel("😮 AH  |  Open Mouth | Low Tongue")
         self.articulation_summary_label.setObjectName("dashboardSummary")
         self.articulation_summary_label.setWordWrap(True)
         self.articulation_summary_label.setAlignment(Qt.AlignCenter)
-        explorer_layout.addWidget(self.articulation_summary_label)
-        left.addWidget(explorer, 2)
+        status_layout.addWidget(self.articulation_formant_label)
+        status_layout.addWidget(self.articulation_summary_label)
+        explorer_layout.addWidget(status_strip)
+        left.addWidget(explorer, 3)
 
         controls_card = self._toy_group("Articulation Controls")
         controls_layout = QVBoxLayout(controls_card)
@@ -4322,19 +4330,20 @@ class WaveToyWindow(QMainWindow):
         controls_body_layout.addStretch(1)
         controls_scroll.setWidget(controls_body)
         controls_layout.addWidget(controls_scroll, 1)
-        left.addWidget(controls_card, 4)
+        left.addWidget(controls_card, 3)
 
         drawer_shell = QWidget()
         drawer_shell.setObjectName("phonemeDrawerShell")
-        drawer_shell.setMinimumWidth(430)
-        drawer_shell.setMaximumWidth(510)
+        drawer_shell.setMinimumWidth(300)
+        drawer_shell.setMaximumWidth(390)
+        drawer_shell.resize(340, drawer_shell.height())
         drawer_layout = QHBoxLayout(drawer_shell)
         drawer_layout.setContentsMargins(0, 0, 0, 0)
         drawer_layout.setSpacing(8)
 
         rail = QWidget()
         rail.setObjectName("phonemeIconRail")
-        rail.setFixedWidth(74)
+        rail.setFixedWidth(64)
         rail_layout = QVBoxLayout(rail)
         rail_layout.setContentsMargins(6, 8, 6, 8)
         rail_layout.setSpacing(8)
@@ -4350,10 +4359,13 @@ class WaveToyWindow(QMainWindow):
             ("saved", "💾", "Saved Phonemes", {}, None),
         ]
         for index, (key, icon, title_text, presets, callback) in enumerate(drawer_specs):
-            button = QPushButton(f"{icon}\n{title_text.split()[0]}")
+            button = QPushButton(icon)
             button.setObjectName("phonemeRailButton")
             button.setCheckable(True)
-            button.setMinimumHeight(72)
+            button.setToolTip(title_text)
+            button.setAccessibleName(title_text)
+            button.setMinimumSize(QSize(52, 56))
+            button.setMaximumHeight(60)
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(lambda checked=False, drawer_key=key: self._set_phoneme_drawer(drawer_key))
             self.phoneme_drawer_buttons[key] = button
@@ -4480,10 +4492,10 @@ class WaveToyWindow(QMainWindow):
     def _make_phoneme_preset_button(self, name: str, data: Dict[str, object]) -> QPushButton:
         emoji = str(data.get("emoji", "🔊"))
         ipa = str(data.get("ipa", name.lower()))
-        button = QPushButton(f"{emoji}  {name}\n/{ipa}/")
+        button = QPushButton(f"{emoji}  {name}    /{ipa}/")
         button.setObjectName("articulationPresetButton")
         button.setMinimumHeight(56)
-        button.setMinimumWidth(142)
+        button.setMaximumHeight(64)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button.setCursor(Qt.PointingHandCursor)
         button.setToolTip(f"Load {name} phoneme preset")
@@ -4580,6 +4592,9 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_canvas is not None:
             self.articulation_canvas.set_phoneme(p)
         summary = articulation_summary(p)
+        f1, f2, f3 = formants_from_articulation(p)
+        if self.articulation_formant_label is not None:
+            self.articulation_formant_label.setText(f"Formants: F1 {f1:.0f} Hz • F2 {f2:.0f} Hz • F3 {f3:.0f} Hz")
         if self.articulation_summary_label is not None:
             self.articulation_summary_label.setText(f"{p.name} /{p.ipa}/  |  {summary}")
         if self.articulation_wave_status_label is not None:
@@ -6383,14 +6398,15 @@ class WaveToyWindow(QMainWindow):
                 background: #eefbff;
             }
             QPushButton#articulationPresetButton {
-                border-radius: 22px;
-                border: 4px solid rgba(0, 0, 0, 0.16);
+                border-radius: 18px;
+                border: 3px solid rgba(0, 0, 0, 0.16);
                 background: #fff7e6;
-                font-size: 20px;
+                font-size: 18px;
                 font-weight: 900;
-                min-height: 72px;
-                padding: 10px 14px;
-                text-align: center;
+                min-height: 56px;
+                max-height: 64px;
+                padding: 6px 10px;
+                text-align: left;
             }
             QPushButton#articulationPresetButton:hover {
                 background: #fff0bd;
@@ -6469,14 +6485,19 @@ class WaveToyWindow(QMainWindow):
                 background: #eefbff;
                 border-radius: 20px;
             }
+            QWidget#articulationStatusStrip {
+                background: rgba(255, 255, 255, 0.72);
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: 18px;
+            }
             QPushButton#phonemeRailButton {
                 background: #ffffff;
                 border: 3px solid rgba(0, 0, 0, 0.12);
                 border-radius: 18px;
                 color: #263238;
-                font-size: 18px;
+                font-size: 24px;
                 font-weight: 900;
-                padding: 5px;
+                padding: 4px;
             }
             QPushButton#phonemeRailButton:checked {
                 background: #ffd166;
