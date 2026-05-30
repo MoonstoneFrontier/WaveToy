@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QStackedWidget,
     QTabWidget,
     QToolButton,
     QSpinBox,
@@ -3426,6 +3427,9 @@ class WaveToyWindow(QMainWindow):
         self.articulation_summary_label: QLabel | None = None
         self.articulation_wave_status_label: QLabel | None = None
         self.phoneme_cards_widget: QWidget | None = None
+        self.phoneme_drawer_stack: QStackedWidget | None = None
+        self.phoneme_drawer_buttons: Dict[str, QPushButton] = {}
+        self.active_phoneme_drawer = "vowels"
         self.articulation_sliders: Dict[str, QSlider] = {}
         self.articulation_value_labels: Dict[str, QLabel] = {}
         self.articulation_voiced_checkbox: QCheckBox | None = None
@@ -3460,11 +3464,11 @@ class WaveToyWindow(QMainWindow):
         """Create the compact in-app Wave Toy title banner while leaving native chrome alone."""
         banner = QWidget()
         banner.setObjectName("toyTitleBanner")
-        banner.setMinimumHeight(86)
-        banner.setMaximumHeight(104)
+        banner.setMinimumHeight(66)
+        banner.setMaximumHeight(78)
         layout = QHBoxLayout(banner)
-        layout.setContentsMargins(18, 10, 18, 10)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 6, 16, 6)
+        layout.setSpacing(12)
 
         left_icons = QLabel("🚂 ⭐")
         left_icons.setObjectName("toyTitleIconRail")
@@ -3496,8 +3500,8 @@ class WaveToyWindow(QMainWindow):
         app_shell = QWidget()
         app_shell.setObjectName("appShell")
         app_layout = QVBoxLayout(app_shell)
-        app_layout.setContentsMargins(12, 10, 12, 12)
-        app_layout.setSpacing(10)
+        app_layout.setContentsMargins(12, 8, 12, 12)
+        app_layout.setSpacing(2)
         app_layout.addWidget(self._build_toy_title_banner())
 
         self.tabs = QTabWidget()
@@ -4202,36 +4206,50 @@ class WaveToyWindow(QMainWindow):
         tab = QWidget()
         tab.setObjectName("articulationLabTab")
         outer = QVBoxLayout(tab)
-        outer.setContentsMargins(18, 16, 18, 16)
-        outer.setSpacing(12)
+        outer.setContentsMargins(14, 10, 14, 12)
+        outer.setSpacing(8)
 
+        lab_header = QWidget()
+        lab_header.setObjectName("articulationLabHeader")
+        header_layout = QHBoxLayout(lab_header)
+        header_layout.setContentsMargins(14, 8, 14, 8)
+        header_layout.setSpacing(12)
         title = QLabel("🗣 Articulation Lab")
-        title.setObjectName("title")
-        title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel("Design vowel and consonant phonemes by moving a toy vocal tract. Phase 2 adds approximate fricatives, stops, and nasals — still playful, not full speech.")
-        subtitle.setObjectName("subtitle")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setWordWrap(True)
-        outer.addWidget(title)
-        outer.addWidget(subtitle)
+        title.setObjectName("articulationCompactTitle")
+        info = QLabel("Toy speech workstation: shape the tract, then pick one phoneme drawer.")
+        info.setObjectName("articulationInfoBadge")
+        info.setWordWrap(True)
+        header_layout.addWidget(title)
+        header_layout.addWidget(info, 1)
+        outer.addWidget(lab_header)
 
         main = QHBoxLayout()
-        main.setSpacing(14)
+        main.setSpacing(12)
         outer.addLayout(main, 1)
 
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        main.addLayout(left, 5)
+
         explorer = self._toy_group("Vocal Explorer")
+        explorer.setMinimumHeight(250)
+        explorer.setMaximumHeight(340)
         explorer_layout = QVBoxLayout(explorer)
-        explorer_layout.setContentsMargins(14, 18, 14, 14)
-        explorer_layout.setSpacing(12)
+        explorer_layout.setContentsMargins(14, 18, 14, 12)
+        explorer_layout.setSpacing(8)
 
         top = QHBoxLayout()
+        top.setSpacing(8)
         self.articulation_name_label = QLabel("😮 AH")
         self.articulation_name_label.setObjectName("articulationPhonemeTitle")
         self.articulation_ipa_label = QLabel("IPA /a/")
         self.articulation_ipa_label.setObjectName("articulationIpaBadge")
-        play_button = self._make_story_button("▶", "Play Phoneme", "#5cdb95", self._play_phoneme_preview)
+        play_button = self._make_story_button("▶", "Play", "#5cdb95", self._play_phoneme_preview)
         loop_button = self._make_story_button("🔁", "Loop", "#b8f2e6", self._toggle_phoneme_loop)
         stop_button = self._make_story_button("⏹", "Stop", "#ff6b6b", self._stop_phoneme_preview)
+        for button in (play_button, loop_button, stop_button):
+            button.setMinimumSize(QSize(92, 58))
+            button.setMaximumHeight(64)
         top.addWidget(self.articulation_name_label, 2)
         top.addWidget(self.articulation_ipa_label, 1)
         top.addWidget(play_button)
@@ -4240,106 +4258,209 @@ class WaveToyWindow(QMainWindow):
         explorer_layout.addLayout(top)
 
         self.articulation_canvas = VocalTractCanvas()
+        self.articulation_canvas.setMinimumHeight(130)
         explorer_layout.addWidget(self.articulation_canvas, 1)
         self.articulation_summary_label = QLabel("😮 AH  |  Open Mouth | Low Tongue")
         self.articulation_summary_label.setObjectName("dashboardSummary")
         self.articulation_summary_label.setWordWrap(True)
         self.articulation_summary_label.setAlignment(Qt.AlignCenter)
         explorer_layout.addWidget(self.articulation_summary_label)
+        left.addWidget(explorer, 2)
 
-        controls = QGridLayout()
-        controls.setHorizontalSpacing(14)
-        controls.setVerticalSpacing(8)
-        for row, (key, label, minimum, maximum, value) in enumerate((
-            ("mouth_open", "👄 Mouth Open", 0, 100, 95),
-            ("tongue_height", "👅 Tongue Height", 0, 100, 20),
-            ("tongue_frontness", "👅 Tongue Front", 0, 100, 40),
-            ("lip_rounding", "💋 Lip Round", 0, 100, 0),
-            ("voice_pitch", "🎤 Voice Pitch", 60, 880, 220),
-            ("voice_strength", "🔊 Voice Strength", 0, 100, 65),
-            ("air_pressure", "🌬 Air Pressure", 0, 100, 45),
-            ("teeth_gap", "🦷 Teeth Gap", 0, 100, 50),
-            ("closure", "🔒 Closure", 0, 100, 0),
-            ("burst_strength", "💥 Burst", 0, 100, 0),
-            ("nasal_open", "👃 Nose Open", 0, 100, 0),
-        )):
-            text = QLabel(label)
-            text.setObjectName("articulationControlLabel")
-            slider = NoWheelSlider(Qt.Horizontal)
-            slider.setRange(minimum, maximum)
-            slider.setValue(value)
-            slider.setMinimumHeight(56)
-            value_label = QLabel("")
-            value_label.setObjectName("symbolHint")
-            value_label.setMinimumWidth(70)
-            slider.valueChanged.connect(lambda _value, slider_key=key: self._articulation_slider_changed(slider_key))
-            self.articulation_sliders[key] = slider
-            self.articulation_value_labels[key] = value_label
-            controls.addWidget(text, row, 0)
-            controls.addWidget(slider, row, 1)
-            controls.addWidget(value_label, row, 2)
-        self.articulation_voiced_checkbox = QCheckBox("🎤 Voice On")
+        controls_card = self._toy_group("Articulation Controls")
+        controls_layout = QVBoxLayout(controls_card)
+        controls_layout.setContentsMargins(12, 20, 12, 12)
+        controls_layout.setSpacing(8)
+        controls_hint = QLabel("Move each toy control from the plain-English left meaning to the right meaning.")
+        controls_hint.setObjectName("symbolHint")
+        controls_hint.setWordWrap(True)
+        controls_layout.addWidget(controls_hint)
+
+        controls_scroll = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
+        controls_scroll.setObjectName("articulationControlsScroll")
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        controls_body = QWidget()
+        controls_body.setObjectName("articulationControlsBody")
+        controls_body_layout = QVBoxLayout(controls_body)
+        controls_body_layout.setContentsMargins(2, 2, 8, 2)
+        controls_body_layout.setSpacing(8)
+        for key, label, low_label, high_label, minimum, maximum, value in (
+            ("mouth_open", "👄 Mouth Open", "closed", "open", 0, 100, 95),
+            ("tongue_height", "👅 Tongue Height", "low", "high", 0, 100, 20),
+            ("tongue_frontness", "👅 Tongue Front", "back", "front", 0, 100, 40),
+            ("lip_rounding", "💋 Lip Round", "flat", "round", 0, 100, 0),
+            ("voice_pitch", "🎤 Voice Pitch", "low", "high", 60, 880, 220),
+            ("voice_strength", "🔊 Voice Strength", "soft", "strong", 0, 100, 65),
+            ("air_pressure", "🌬 Air Pressure", "gentle", "strong", 0, 100, 45),
+            ("teeth_gap", "🦷 Teeth Gap", "tight", "wide", 0, 100, 50),
+            ("closure", "🔒 Closure", "open", "closed", 0, 100, 0),
+            ("burst_strength", "💥 Burst", "soft", "sharp", 0, 100, 0),
+            ("nasal_open", "👃 Nose Open", "closed", "open", 0, 100, 0),
+        ):
+            controls_body_layout.addWidget(self._make_articulation_toy_control(key, label, low_label, high_label, minimum, maximum, value))
+
+        voice_card = QWidget()
+        voice_card.setObjectName("articulationToyControl")
+        voice_card.setMinimumHeight(54)
+        voice_layout = QHBoxLayout(voice_card)
+        voice_layout.setContentsMargins(12, 6, 12, 6)
+        voice_layout.setSpacing(12)
+        voice_title = QLabel("🎤 Voice On")
+        voice_title.setObjectName("articulationToyLabel")
+        voice_detail = QLabel("Toggle vocal-cord buzz for vowels and voiced consonants.")
+        voice_detail.setObjectName("articulationToyEndpoint")
+        voice_detail.setWordWrap(True)
+        self.articulation_voiced_checkbox = QCheckBox("Buzzing")
+        self.articulation_voiced_checkbox.setObjectName("articulationVoiceToggle")
         self.articulation_voiced_checkbox.setChecked(True)
         self.articulation_voiced_checkbox.toggled.connect(lambda _checked: self._articulation_slider_changed("voiced"))
-        controls.addWidget(self.articulation_voiced_checkbox, controls.rowCount(), 0, 1, 3)
-        explorer_layout.addLayout(controls)
-        main.addWidget(explorer, 3)
+        voice_layout.addWidget(voice_title)
+        voice_layout.addWidget(voice_detail, 1)
+        voice_layout.addWidget(self.articulation_voiced_checkbox)
+        controls_body_layout.addWidget(voice_card)
+        controls_body_layout.addStretch(1)
+        controls_scroll.setWidget(controls_body)
+        controls_layout.addWidget(controls_scroll, 1)
+        left.addWidget(controls_card, 4)
 
-        side_scroll = WaveToyScrollArea(scroll_speed=0.95, content_drag_scroll=False)
-        side_scroll.setObjectName("articulationSidebarScroll")
-        side_scroll.setMinimumWidth(400)
-        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        side_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        drawer_shell = QWidget()
+        drawer_shell.setObjectName("phonemeDrawerShell")
+        drawer_shell.setMinimumWidth(430)
+        drawer_shell.setMaximumWidth(510)
+        drawer_layout = QHBoxLayout(drawer_shell)
+        drawer_layout.setContentsMargins(0, 0, 0, 0)
+        drawer_layout.setSpacing(8)
 
-        side = QWidget()
-        side.setObjectName("articulationSidebarContent")
-        side.setMinimumWidth(360)
-        side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(4, 4, 10, 4)
-        side_layout.setSpacing(14)
+        rail = QWidget()
+        rail.setObjectName("phonemeIconRail")
+        rail.setFixedWidth(74)
+        rail_layout = QVBoxLayout(rail)
+        rail_layout.setContentsMargins(6, 8, 6, 8)
+        rail_layout.setSpacing(8)
+        self.phoneme_drawer_buttons = {}
+        self.phoneme_drawer_stack = QStackedWidget()
+        self.phoneme_drawer_stack.setObjectName("phonemeDrawerStack")
 
-        preset_box = self._build_phoneme_preset_grid(
-            "Vowels",
-            VOWEL_PRESETS,
-            lambda name, _data: self._select_vowel_preset(name),
-        )
-        side_layout.addWidget(CollapsibleSection("🔤 Vowels", preset_box, expanded=True))
+        drawer_specs = [
+            ("vowels", "😀", "Vowels", VOWEL_PRESETS, lambda name, _data: self._select_vowel_preset(name)),
+            ("fricatives", "🌬", "Fricatives", dict(CONSONANT_PRESET_SECTIONS[0][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("stops", "💥", "Stops", dict(CONSONANT_PRESET_SECTIONS[1][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("nasals", "👃", "Nasals", dict(CONSONANT_PRESET_SECTIONS[2][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("saved", "💾", "Saved Phonemes", {}, None),
+        ]
+        for index, (key, icon, title_text, presets, callback) in enumerate(drawer_specs):
+            button = QPushButton(f"{icon}\n{title_text.split()[0]}")
+            button.setObjectName("phonemeRailButton")
+            button.setCheckable(True)
+            button.setMinimumHeight(72)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda checked=False, drawer_key=key: self._set_phoneme_drawer(drawer_key))
+            self.phoneme_drawer_buttons[key] = button
+            rail_layout.addWidget(button)
+            self.phoneme_drawer_stack.addWidget(self._build_phoneme_drawer_page(title_text, icon, presets, callback))
+        rail_layout.addStretch(1)
 
-        section_names = {
-            "fricative": "🌬 Fricatives",
-            "stop": "💥 Stops",
-            "nasal": "👃 Nasals",
-        }
-        for section_title, presets in CONSONANT_PRESET_SECTIONS:
-            first_preset = next(iter(presets.values()), {})
-            family = str(first_preset.get("phoneme_family", "")).lower()
-            friendly_title = section_names.get(family, section_title)
-            consonant_box = self._build_phoneme_preset_grid(
-                friendly_title,
-                presets,
-                lambda name, data: self._select_consonant_preset(name, data),
-            )
-            side_layout.addWidget(CollapsibleSection(friendly_title, consonant_box, expanded=False))
-
-        save_button = self._make_story_button("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme)
-        save_button.setMinimumHeight(84)
-        side_layout.addWidget(save_button)
-
-        cards_box = self._toy_group("Saved Phonemes")
-        cards_layout = QVBoxLayout(cards_box)
-        cards_layout.setContentsMargins(WaveToySizing.CARD_PADDING, 24, WaveToySizing.CARD_PADDING, WaveToySizing.CARD_PADDING)
-        cards_layout.setSpacing(12)
-        self.phoneme_cards_widget = QWidget()
-        cards_layout.addWidget(self.phoneme_cards_widget)
-        side_layout.addWidget(CollapsibleSection("💾 Saved Phonemes", cards_box, expanded=True))
-        side_layout.addStretch(1)
-
-        side_scroll.setWidget(side)
-        main.addWidget(side_scroll, 1)
+        drawer_layout.addWidget(rail)
+        drawer_layout.addWidget(self.phoneme_drawer_stack, 1)
+        main.addWidget(drawer_shell, 2)
 
         self.tabs.insertTab(min(2, self.tabs.count()), tab, "🗣 Articulation Lab")
         self._refresh_phoneme_cards()
+        self._set_phoneme_drawer("vowels")
         self._select_vowel_preset("AH", play=False)
+
+    def _make_articulation_toy_control(self, key: str, label: str, low_label: str, high_label: str, minimum: int, maximum: int, value: int) -> QWidget:
+        row = QWidget()
+        row.setObjectName("articulationToyControl")
+        row.setMinimumHeight(52)
+        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(10)
+        name = QLabel(label)
+        name.setObjectName("articulationToyLabel")
+        name.setMinimumWidth(150)
+        low = QLabel(low_label)
+        low.setObjectName("articulationToyEndpoint")
+        low.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        low.setMinimumWidth(58)
+        slider = NoWheelSlider(Qt.Horizontal)
+        slider.setRange(minimum, maximum)
+        slider.setValue(value)
+        slider.setMinimumHeight(44)
+        value_label = QLabel("")
+        value_label.setObjectName("articulationToyValue")
+        value_label.setAlignment(Qt.AlignCenter)
+        value_label.setMinimumWidth(72)
+        high = QLabel(high_label)
+        high.setObjectName("articulationToyEndpoint")
+        high.setMinimumWidth(58)
+        slider.valueChanged.connect(lambda _value, slider_key=key: self._articulation_slider_changed(slider_key))
+        self.articulation_sliders[key] = slider
+        self.articulation_value_labels[key] = value_label
+        layout.addWidget(name)
+        layout.addWidget(low)
+        layout.addWidget(slider, 1)
+        layout.addWidget(high)
+        layout.addWidget(value_label)
+        return row
+
+    def _build_phoneme_drawer_page(self, title: str, icon: str, presets: Dict[str, Dict[str, object]], callback) -> QWidget:
+        page = QWidget()
+        page.setObjectName("phonemeDrawerPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QWidget()
+        header.setObjectName("phonemeDrawerHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(14, 10, 14, 8)
+        header_layout.setSpacing(4)
+        title_label = QLabel(f"{icon} {title}")
+        title_label.setObjectName("phonemeDrawerTitle")
+        help_label = QLabel("One active drawer stays open here. Cards are large enough to read and tap.")
+        help_label.setObjectName("symbolHint")
+        help_label.setWordWrap(True)
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(help_label)
+        layout.addWidget(header)
+
+        scroll = WaveToyScrollArea(scroll_speed=0.95, content_drag_scroll=False)
+        scroll.setObjectName("phonemeDrawerScroll")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setObjectName("phonemeDrawerBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(10, 10, 14, 14)
+        body_layout.setSpacing(10)
+
+        if title == "Saved Phonemes":
+            save_button = self._make_story_button("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme)
+            save_button.setMinimumHeight(72)
+            body_layout.addWidget(save_button)
+            self.phoneme_cards_widget = QWidget()
+            body_layout.addWidget(self.phoneme_cards_widget)
+        else:
+            for name, data in presets.items():
+                button = self._make_phoneme_preset_button(name, data)
+                button.clicked.connect(lambda checked=False, preset_name=name, preset_data=data: callback(preset_name, preset_data))
+                body_layout.addWidget(button)
+        body_layout.addStretch(1)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+        return page
+
+    def _set_phoneme_drawer(self, drawer_key: str) -> None:
+        order = ["vowels", "fricatives", "stops", "nasals", "saved"]
+        if self.phoneme_drawer_stack is None or drawer_key not in order:
+            return
+        self.active_phoneme_drawer = drawer_key
+        self.phoneme_drawer_stack.setCurrentIndex(order.index(drawer_key))
+        for key, button in self.phoneme_drawer_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == drawer_key)
+            button.blockSignals(False)
 
     def _build_phoneme_preset_grid(self, title: str, presets: Dict[str, Dict[str, object]], callback) -> QGroupBox:
         """Build a roomy two-column preset grid for one sidebar section."""
@@ -5946,8 +6067,8 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
                 font-size: 18px;
                 font-weight: 900;
-                min-height: 46px;
-                padding: 10px 22px;
+                min-height: 42px;
+                padding: 8px 22px;
             }
             QTabBar::tab:selected {
                 background: #ffffff;
@@ -6064,13 +6185,13 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 30px;
             }
             QLabel#toyTitleText {
-                font-size: 36px;
+                font-size: 30px;
                 font-weight: 900;
                 color: #263238;
                 letter-spacing: 1px;
             }
             QLabel#toyTitleSubtitle {
-                font-size: 18px;
+                font-size: 15px;
                 font-weight: 900;
                 color: #4361ee;
             }
@@ -6078,9 +6199,9 @@ class WaveToyWindow(QMainWindow):
                 background: rgba(255, 255, 255, 0.76);
                 border: 3px solid rgba(0, 0, 0, 0.10);
                 border-radius: 22px;
-                font-size: 30px;
+                font-size: 24px;
                 font-weight: 900;
-                padding: 6px;
+                padding: 4px;
             }
             QLabel#title {
                 font-size: 42px;
@@ -6209,7 +6330,7 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QLabel#articulationPhonemeTitle {
-                font-size: 34px;
+                font-size: 26px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -6217,9 +6338,9 @@ class WaveToyWindow(QMainWindow):
                 background: #ffffff;
                 border: 4px solid rgba(0, 0, 0, 0.14);
                 border-radius: 20px;
-                font-size: 24px;
+                font-size: 18px;
                 font-weight: 900;
-                padding: 10px;
+                padding: 7px;
             }
             QLabel#articulationControlLabel {
                 font-size: 20px;
@@ -6265,10 +6386,10 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 22px;
                 border: 4px solid rgba(0, 0, 0, 0.16);
                 background: #fff7e6;
-                font-size: 21px;
+                font-size: 20px;
                 font-weight: 900;
-                min-height: 56px;
-                padding: 10px 12px;
+                min-height: 72px;
+                padding: 10px 14px;
                 text-align: center;
             }
             QPushButton#articulationPresetButton:hover {
@@ -6282,13 +6403,99 @@ class WaveToyWindow(QMainWindow):
             QWidget#articulationLabTab {
                 background: #fff1d6;
             }
-            QWidget#articulationSidebarContent {
-                background: transparent;
+            QWidget#articulationLabHeader {
+                background: rgba(255, 255, 255, 0.72);
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: 18px;
             }
-            QScrollArea#articulationSidebarScroll {
+            QLabel#articulationCompactTitle {
+                font-size: 24px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#articulationInfoBadge {
+                background: #eefbff;
+                border: 2px solid rgba(123, 223, 242, 0.88);
+                border-radius: 14px;
+                color: #37474f;
+                font-size: 13px;
+                font-weight: 900;
+                padding: 6px 10px;
+            }
+            QWidget#articulationControlsCard {
+                background: #ffffff;
+            }
+            QScrollArea#articulationControlsScroll, QScrollArea#phonemeDrawerScroll {
                 background: transparent;
                 border: 0;
             }
+            QWidget#articulationToyControl {
+                background: #fff7e6;
+                border: 3px solid rgba(0, 0, 0, 0.10);
+                border-radius: 18px;
+            }
+            QLabel#articulationToyLabel {
+                font-size: 17px;
+                font-weight: 900;
+                color: #263238;
+            }
+            QLabel#articulationToyEndpoint {
+                font-size: 12px;
+                font-weight: 900;
+                color: #607d8b;
+            }
+            QLabel#articulationToyValue {
+                background: #ffffff;
+                border: 2px solid rgba(0, 0, 0, 0.12);
+                border-radius: 12px;
+                color: #263238;
+                font-size: 14px;
+                font-weight: 900;
+                padding: 5px 7px;
+            }
+            QCheckBox#articulationVoiceToggle {
+                background: #ffffff;
+                border: 2px solid rgba(0, 0, 0, 0.12);
+                border-radius: 14px;
+                padding: 8px 12px;
+                font-size: 15px;
+            }
+            QWidget#phonemeDrawerShell {
+                background: rgba(255, 255, 255, 0.60);
+                border: 4px solid rgba(0, 0, 0, 0.12);
+                border-radius: 24px;
+            }
+            QWidget#phonemeIconRail {
+                background: #eefbff;
+                border-radius: 20px;
+            }
+            QPushButton#phonemeRailButton {
+                background: #ffffff;
+                border: 3px solid rgba(0, 0, 0, 0.12);
+                border-radius: 18px;
+                color: #263238;
+                font-size: 18px;
+                font-weight: 900;
+                padding: 5px;
+            }
+            QPushButton#phonemeRailButton:checked {
+                background: #ffd166;
+                border: 4px solid #ff4fa3;
+            }
+            QWidget#phonemeDrawerPage, QWidget#phonemeDrawerBody {
+                background: transparent;
+            }
+            QWidget#phonemeDrawerHeader {
+                background: #ffffff;
+                border-top-right-radius: 20px;
+                border-bottom: 3px solid rgba(0, 0, 0, 0.08);
+            }
+            QLabel#phonemeDrawerTitle {
+                font-size: 24px;
+                font-weight: 900;
+                color: #263238;
+            }
+
             QLabel {
                 font-size: 14px;
                 font-weight: 700;
