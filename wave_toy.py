@@ -3225,7 +3225,8 @@ class VocalTractCanvas(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
-        self.setMinimumSize(QSize(560, 300))
+        self.setMinimumSize(QSize(560, 360))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setToolTip("Toy vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels.")
 
     def set_phoneme(self, phoneme: ArticulationPhoneme) -> None:
@@ -3236,8 +3237,8 @@ class VocalTractCanvas(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(18, 18, -18, -18)
         painter.fillRect(self.rect(), QColor("#fff7e6"))
+        rect = QRectF(self.rect()).adjusted(28, 24, -28, -24)
 
         p = self.phoneme
         mouth_open = float(np.clip(p.mouth_open, 0.0, 1.0))
@@ -3248,68 +3249,85 @@ class VocalTractCanvas(QWidget):
         nasal_open = float(np.clip(p.nasal_open, 0.0, 1.0))
         air_pressure = float(np.clip(p.air_pressure, 0.0, 1.0))
 
-        face_rect = QRectF(rect.left() + 34, rect.top() + 8, rect.width() - 68, rect.height() - 16)
+        tract_w = min(rect.width() - 48, 680.0)
+        tract_h = min(rect.height() - 36, 308.0)
+        tract_rect = QRectF(
+            rect.center().x() - tract_w / 2,
+            rect.center().y() - tract_h / 2,
+            tract_w,
+            tract_h,
+        )
+        face_rect = tract_rect.adjusted(18, 8, -18, -8)
         painter.setPen(QPen(QColor("#5f4b32"), 5))
         painter.setBrush(QColor("#ffe0bd"))
-        painter.drawRoundedRect(face_rect, 54, 54)
+        painter.drawRoundedRect(face_rect, 58, 58)
 
-        mouth_w = face_rect.width() * (0.34 + (1.0 - rounding) * 0.30)
-        mouth_h = 28 + mouth_open * 142
-        mouth_cx = face_rect.center().x() + 20
-        mouth_cy = face_rect.top() + face_rect.height() * 0.58
+        painter.setPen(QPen(QColor("#3a506b"), 4))
+        painter.setBrush(QColor("#ffffff"))
+        eye_y = face_rect.top() + face_rect.height() * 0.23
+        painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.30, eye_y, 34, 42))
+        painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.62, eye_y, 34, 42))
+
+        nose_rect = QRectF(face_rect.center().x() - 24, face_rect.top() + face_rect.height() * 0.30, 48, 54)
+        painter.setPen(QPen(QColor("#8d6e63"), 3))
+        painter.setBrush(QColor("#ffc8a2"))
+        painter.drawEllipse(nose_rect)
+
+        mouth_w = face_rect.width() * (0.32 + (1.0 - rounding) * 0.24)
+        mouth_h = 56 + mouth_open * 150
+        mouth_cx = face_rect.center().x() + face_rect.width() * 0.04
+        mouth_cy = face_rect.top() + face_rect.height() * 0.64
         mouth_rect = QRectF(mouth_cx - mouth_w / 2, mouth_cy - mouth_h / 2, mouth_w, mouth_h)
-        painter.setPen(QPen(QColor("#8c2f39"), 8 + int(rounding * 10)))
+        mouth_rect = mouth_rect.intersected(face_rect.adjusted(48, 86, -48, -28))
+        painter.setPen(QPen(QColor("#8c2f39"), 8 + int(rounding * 9)))
         painter.setBrush(QColor("#301018"))
         painter.drawEllipse(mouth_rect)
 
-        lip_rect = mouth_rect.adjusted(-12 - rounding * 18, -8 - rounding * 10, 12 + rounding * 18, 8 + rounding * 10)
-        painter.setPen(QPen(QColor("#d1495b"), 5))
+        lip_pad_x = 12 + rounding * 28
+        lip_pad_y = 8 + rounding * 16
+        lip_rect = mouth_rect.adjusted(-lip_pad_x, -lip_pad_y, lip_pad_x, lip_pad_y)
+        painter.setPen(QPen(QColor("#d1495b"), 5 + int(rounding * 3)))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(lip_rect)
 
-        tongue_x = mouth_rect.left() + mouth_rect.width() * (0.20 + tongue_front * 0.58)
-        tongue_y = mouth_rect.bottom() - 18 - tongue_height * max(24, mouth_rect.height() * 0.48)
+        tongue_x = mouth_rect.left() + mouth_rect.width() * (0.18 + tongue_front * 0.64)
+        tongue_y = mouth_rect.bottom() - 22 - tongue_height * max(34, mouth_rect.height() * 0.58)
         tongue_path = QPainterPath()
-        tongue_path.moveTo(mouth_rect.left() + mouth_rect.width() * 0.18, mouth_rect.bottom() - 14)
-        tongue_path.cubicTo(tongue_x - 70, tongue_y + 40, tongue_x - 10, tongue_y - 26, tongue_x + 58, tongue_y + 8)
-        tongue_path.cubicTo(tongue_x + 34, tongue_y + 52, mouth_rect.right() - 38, mouth_rect.bottom() - 12, mouth_rect.left() + mouth_rect.width() * 0.18, mouth_rect.bottom() - 14)
+        tongue_base_left = QPointF(mouth_rect.left() + mouth_rect.width() * 0.16, mouth_rect.bottom() - 18)
+        tongue_base_right = QPointF(mouth_rect.right() - mouth_rect.width() * 0.14, mouth_rect.bottom() - 18)
+        tongue_path.moveTo(tongue_base_left)
+        tongue_path.cubicTo(tongue_x - 80, tongue_y + 54, tongue_x - 18, tongue_y - 34, tongue_x + 68, tongue_y + 4)
+        tongue_path.cubicTo(tongue_x + 48, tongue_y + 58, tongue_base_right.x(), tongue_base_right.y() + 2, tongue_base_left.x(), tongue_base_left.y())
         painter.setPen(QPen(QColor("#b23a48"), 3))
         painter.setBrush(QColor("#ff8fa3"))
         painter.drawPath(tongue_path)
 
         if closure > 0.08:
-            closure_y = mouth_rect.center().y()
+            closure_y = mouth_rect.center().y() - (closure * mouth_rect.height() * 0.12)
             painter.setPen(QPen(QColor("#ffb703"), 6 + int(closure * 10), Qt.SolidLine, Qt.RoundCap))
-            painter.drawLine(QPointF(mouth_rect.left() + 18, closure_y), QPointF(mouth_rect.right() - 18, closure_y))
+            painter.drawLine(QPointF(mouth_rect.left() + 22, closure_y), QPointF(mouth_rect.right() - 22, closure_y))
 
         if air_pressure > 0.05:
-            painter.setPen(QPen(QColor(78, 205, 196, 70 + int(air_pressure * 140)), 3, Qt.DashLine, Qt.RoundCap))
-            for i in range(3):
-                y = mouth_rect.center().y() - 24 + i * 24
-                painter.drawLine(QPointF(face_rect.left() + 38, y), QPointF(mouth_rect.left() - 10, y + (i - 1) * 6))
+            painter.setPen(QPen(QColor(78, 205, 196, 55 + int(air_pressure * 130)), 3, Qt.DashLine, Qt.RoundCap))
+            for i in range(4):
+                y = mouth_rect.center().y() - 30 + i * 20
+                painter.drawLine(QPointF(face_rect.left() + 46, y), QPointF(mouth_rect.left() - 12, y + (i - 1.5) * 5))
+            painter.setPen(QPen(QColor(78, 205, 196, 60 + int(air_pressure * 100)), 2, Qt.DotLine, Qt.RoundCap))
+            painter.drawLine(QPointF(mouth_rect.right() + 8, mouth_rect.center().y()), QPointF(face_rect.right() - 48, mouth_rect.center().y() - 14))
 
-        nose_rect = QRectF(face_rect.center().x() - 22, face_rect.top() + 136, 44, 48)
-        painter.setPen(QPen(QColor("#8d6e63"), 3))
-        painter.setBrush(QColor("#ffc8a2"))
-        painter.drawEllipse(nose_rect)
         if nasal_open > 0.05:
             painter.setPen(QPen(QColor("#6a4c93"), 3 + int(nasal_open * 6)))
-            painter.drawArc(nose_rect.adjusted(6, 12, -6, 10), 200 * 16, 140 * 16)
+            painter.drawArc(nose_rect.adjusted(7, 14, -7, 10), 200 * 16, 140 * 16)
             painter.setPen(QPen(QColor("#6a4c93"), 2, Qt.DotLine))
             painter.drawLine(QPointF(nose_rect.center().x(), nose_rect.bottom()), QPointF(nose_rect.center().x(), mouth_rect.top()))
 
         if p.voiced:
-            throat = QRectF(face_rect.left() + 36, face_rect.bottom() - 88, 58, 54)
+            throat = QRectF(face_rect.left() + 42, face_rect.bottom() - 94, 64, 58)
             painter.setPen(QPen(QColor("#4361ee"), 3))
             painter.setBrush(QColor(67, 97, 238, 50))
             painter.drawEllipse(throat)
-            for offset in (-12, 0, 12):
-                painter.drawArc(throat.adjusted(14 + offset, 14, -14 + offset, -14), 35 * 16, 110 * 16)
-
-        painter.setPen(QPen(QColor("#3a506b"), 4))
-        painter.setBrush(QColor("#ffffff"))
-        painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.30, face_rect.top() + 80, 32, 42))
-        painter.drawEllipse(QRectF(face_rect.left() + face_rect.width() * 0.62, face_rect.top() + 80, 32, 42))
+            for offset in (-14, 0, 14):
+                painter.drawArc(throat.adjusted(16 + offset, 15, -16 + offset, -15), 35 * 16, 110 * 16)
 
         painter.end()
 
@@ -4198,10 +4216,13 @@ class WaveToyWindow(QMainWindow):
         if self.tabs is None:
             return
         self._load_saved_phonemes()
-        tab = QWidget()
+        tab = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
         tab.setObjectName("articulationLabTab")
-        outer = QVBoxLayout(tab)
-        outer.setContentsMargins(14, 10, 14, 12)
+        tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page = QWidget()
+        page.setObjectName("articulationLabPage")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(14, 10, 14, 18)
         outer.setSpacing(8)
 
         lab_header = QWidget()
@@ -4227,9 +4248,8 @@ class WaveToyWindow(QMainWindow):
         main.addLayout(left, 6)
 
         explorer = self._toy_group("Vocal Explorer")
-        explorer.setMinimumHeight(350)
-        explorer.setMaximumHeight(460)
-        explorer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        explorer.setMinimumHeight(500)
+        explorer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         explorer_layout = QVBoxLayout(explorer)
         explorer_layout.setContentsMargins(14, 18, 14, 12)
         explorer_layout.setSpacing(8)
@@ -4254,20 +4274,21 @@ class WaveToyWindow(QMainWindow):
         explorer_layout.addLayout(top)
 
         self.articulation_canvas = VocalTractCanvas()
-        self.articulation_canvas.setMinimumHeight(250)
-        explorer_layout.addWidget(self.articulation_canvas, 1)
+        self.articulation_canvas.setMinimumHeight(360)
+        self.articulation_canvas.setMaximumHeight(460)
+        explorer_layout.addWidget(self.articulation_canvas)
 
         status_strip = QWidget()
         status_strip.setObjectName("articulationStatusStrip")
         status_layout = QVBoxLayout(status_strip)
-        status_layout.setContentsMargins(10, 8, 10, 8)
-        status_layout.setSpacing(4)
+        status_layout.setContentsMargins(8, 6, 8, 6)
+        status_layout.setSpacing(6)
         self.articulation_formant_label = QLabel("Formants: F1 850 Hz • F2 1370 Hz • F3 2500 Hz")
-        self.articulation_formant_label.setObjectName("dashboardSummary")
+        self.articulation_formant_label.setObjectName("articulationFormantStrip")
         self.articulation_formant_label.setWordWrap(True)
         self.articulation_formant_label.setAlignment(Qt.AlignCenter)
         self.articulation_summary_label = QLabel("😮 AH  |  Open Mouth | Low Tongue")
-        self.articulation_summary_label.setObjectName("dashboardSummary")
+        self.articulation_summary_label.setObjectName("articulationSummaryStrip")
         self.articulation_summary_label.setWordWrap(True)
         self.articulation_summary_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.articulation_formant_label)
@@ -4284,14 +4305,10 @@ class WaveToyWindow(QMainWindow):
         controls_hint.setWordWrap(True)
         controls_layout.addWidget(controls_hint)
 
-        controls_scroll = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
-        controls_scroll.setObjectName("articulationControlsScroll")
-        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        controls_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         controls_body = QWidget()
         controls_body.setObjectName("articulationControlsBody")
         controls_body_layout = QVBoxLayout(controls_body)
-        controls_body_layout.setContentsMargins(2, 2, 8, 2)
+        controls_body_layout.setContentsMargins(2, 2, 2, 2)
         controls_body_layout.setSpacing(8)
         for key, label, low_label, high_label, minimum, maximum, value in (
             ("mouth_open", "👄 Mouth Open", "closed", "open", 0, 100, 95),
@@ -4328,9 +4345,8 @@ class WaveToyWindow(QMainWindow):
         voice_layout.addWidget(self.articulation_voiced_checkbox)
         controls_body_layout.addWidget(voice_card)
         controls_body_layout.addStretch(1)
-        controls_scroll.setWidget(controls_body)
-        controls_layout.addWidget(controls_scroll, 1)
-        left.addWidget(controls_card, 3)
+        controls_layout.addWidget(controls_body)
+        left.addWidget(controls_card)
 
         drawer_shell = QWidget()
         drawer_shell.setObjectName("phonemeDrawerShell")
@@ -4377,6 +4393,7 @@ class WaveToyWindow(QMainWindow):
         drawer_layout.addWidget(self.phoneme_drawer_stack, 1)
         main.addWidget(drawer_shell, 2)
 
+        tab.setWidget(page)
         self.tabs.insertTab(min(2, self.tabs.count()), tab, "🗣 Articulation Lab")
         self._refresh_phoneme_cards()
         self._set_phoneme_drawer("vowels")
@@ -6441,7 +6458,7 @@ class WaveToyWindow(QMainWindow):
             QWidget#articulationControlsCard {
                 background: #ffffff;
             }
-            QScrollArea#articulationControlsScroll, QScrollArea#phonemeDrawerScroll {
+            QScrollArea#articulationLabTab, QScrollArea#phonemeDrawerScroll {
                 background: transparent;
                 border: 0;
             }
@@ -6486,9 +6503,20 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 20px;
             }
             QWidget#articulationStatusStrip {
-                background: rgba(255, 255, 255, 0.72);
+                background: transparent;
+                border: 0;
+            }
+            QLabel#articulationFormantStrip, QLabel#articulationSummaryStrip {
+                background: rgba(255, 255, 255, 0.80);
                 border: 3px solid rgba(0, 0, 0, 0.10);
-                border-radius: 18px;
+                border-radius: 16px;
+                color: #263238;
+                font-size: 13px;
+                font-weight: 900;
+                padding: 7px 10px;
+            }
+            QLabel#articulationSummaryStrip {
+                background: rgba(255, 247, 230, 0.92);
             }
             QPushButton#phonemeRailButton {
                 background: #ffffff;
