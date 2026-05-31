@@ -84,3 +84,18 @@ PY
 - Preserve `wave_toy.py` as the main script name unless instructed otherwise.
 - Prioritize audio lifecycle control, cancellation, debug logging, and responsiveness in upcoming tasks.
 - Avoid introducing large new dependencies unless they are clearly required and documented.
+
+## Waveform Source for Articulation
+
+Articulation Lab can now treat a WaveToy waveform as the excitation/source that the mouth model shapes. A phoneme still defaults to the built-in voice/noise generator, but the user may assign one of these optional source modes per saved phoneme or per Articulation Chain item:
+
+- **Default Voice** — uses the existing vowel, consonant, noise, closure, and burst generators.
+- **Current WaveToy Sound** — uses the currently rendered Play/Mix Wave Shapes sound as the vocal source.
+- **Selected Mix Wave** — renders one dynamic wave layer and uses it as the source; the current soloed layer is preferred, otherwise the first active layer is used.
+- **Imported Audio Palette Item** — uses the selected Timeline Audio Palette item when available.
+
+The shaping pipeline is: waveform source → trim or loop to phoneme duration → safe normalization and short fades → articulation formant/filter/envelope shaping → phoneme family behavior → output audio. Vowels and glides/liquids receive formant shaping, fricatives blend the source with filtered noise according to air pressure, stops preserve closure/burst behavior while using the source for voiced onset, and nasals apply low nasal resonance/softening.
+
+Source metadata is saved with phoneme JSON and chain JSON as recipe/path settings only. Raw audio arrays are not embedded. Older phoneme files without source fields load as **Default Voice**. If a saved imported source path is missing at playback time, WaveToy warns the user and safely falls back to **Default Voice** for that render.
+
+Arbitrary sci-fi waveforms can produce intentionally synthetic speech colors. Complex, noisy, or detuned sources may not preserve natural pitch or intelligibility as well as the default generator, but they remain useful for creature voices, robots, drones, and ambient vowel textures.
