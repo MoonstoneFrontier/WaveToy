@@ -595,12 +595,12 @@ VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
 }
 
 FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
-    "S": {"emoji": "🦷", "ipa": "s", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.85, "teeth_gap": 0.15, "tongue_frontness": 0.85, "mouth_open": 0.28, "tongue_height": 0.72, "lip_rounding": 0.0, "duration_ms": 420, "noise_color": 0.85, "preview_color": "#d7f9ff"},
-    "Z": {"emoji": "🦷", "ipa": "z", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.75, "teeth_gap": 0.18, "tongue_frontness": 0.85, "mouth_open": 0.28, "tongue_height": 0.70, "duration_ms": 420, "noise_color": 0.80, "preview_color": "#c7f9cc"},
-    "SH": {"emoji": "🤫", "ipa": "ʃ", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.80, "teeth_gap": 0.25, "tongue_frontness": 0.45, "mouth_open": 0.32, "tongue_height": 0.62, "lip_rounding": 0.55, "duration_ms": 460, "noise_color": 0.62, "preview_color": "#bde0fe"},
-    "F": {"emoji": "🌬", "ipa": "f", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.75, "teeth_gap": 0.20, "tongue_frontness": 0.50, "mouth_open": 0.22, "tongue_height": 0.45, "lip_rounding": 0.15, "duration_ms": 380, "noise_color": 0.55, "preview_color": "#e0fbfc"},
-    "V": {"emoji": "🌬", "ipa": "v", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.65, "teeth_gap": 0.22, "tongue_frontness": 0.50, "mouth_open": 0.22, "tongue_height": 0.45, "duration_ms": 380, "noise_color": 0.50, "preview_color": "#caffbf"},
-    "H": {"emoji": "💨", "ipa": "h", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.60, "teeth_gap": 0.75, "tongue_frontness": 0.45, "mouth_open": 0.55, "tongue_height": 0.35, "duration_ms": 360, "noise_color": 0.35, "preview_color": "#f1faee"},
+    "S": {"emoji": "🦷", "ipa": "s", "phoneme_family": "fricative", "voiced": False, "voice_strength": 0.20, "air_pressure": 0.85, "teeth_gap": 0.15, "tongue_frontness": 0.85, "mouth_open": 0.28, "tongue_height": 0.72, "lip_rounding": 0.0, "duration_ms": 420, "noise_color": 0.85, "preview_color": "#d7f9ff"},
+    "Z": {"emoji": "🦷", "ipa": "z", "phoneme_family": "fricative", "voiced": True, "voice_strength": 0.72, "air_pressure": 0.75, "teeth_gap": 0.18, "tongue_frontness": 0.85, "mouth_open": 0.28, "tongue_height": 0.70, "duration_ms": 420, "noise_color": 0.80, "preview_color": "#c7f9cc"},
+    "SH": {"emoji": "🤫", "ipa": "ʃ", "phoneme_family": "fricative", "voiced": False, "voice_strength": 0.32, "air_pressure": 0.80, "teeth_gap": 0.25, "tongue_frontness": 0.45, "mouth_open": 0.32, "tongue_height": 0.62, "lip_rounding": 0.55, "duration_ms": 460, "noise_color": 0.62, "preview_color": "#bde0fe"},
+    "F": {"emoji": "🌬", "ipa": "f", "phoneme_family": "fricative", "voiced": False, "voice_strength": 0.18, "air_pressure": 0.75, "teeth_gap": 0.20, "tongue_frontness": 0.50, "mouth_open": 0.22, "tongue_height": 0.45, "lip_rounding": 0.15, "duration_ms": 380, "noise_color": 0.55, "preview_color": "#e0fbfc"},
+    "V": {"emoji": "🌬", "ipa": "v", "phoneme_family": "fricative", "voiced": True, "voice_strength": 0.76, "air_pressure": 0.65, "teeth_gap": 0.22, "tongue_frontness": 0.50, "mouth_open": 0.22, "tongue_height": 0.45, "duration_ms": 380, "noise_color": 0.50, "preview_color": "#caffbf"},
+    "H": {"emoji": "💨", "ipa": "h", "phoneme_family": "fricative", "voiced": False, "voice_strength": 0.24, "air_pressure": 0.60, "teeth_gap": 0.75, "tongue_frontness": 0.45, "mouth_open": 0.55, "tongue_height": 0.35, "duration_ms": 360, "noise_color": 0.35, "preview_color": "#f1faee"},
 }
 
 STOP_PRESETS: Dict[str, Dict[str, object]] = {
@@ -699,7 +699,7 @@ def apply_simple_formant_layer(audio: np.ndarray, phoneme: ArticulationPhoneme) 
     return np.column_stack([filtered, filtered]).astype(np.float32)
 
 
-def _fade_and_normalize_mono(mono: np.ndarray, attack_ms: int, release_ms: int, peak: float = 0.78) -> np.ndarray:
+def _fade_and_normalize_mono(mono: np.ndarray, attack_ms: int, release_ms: int, peak: float = 0.78, normalize: bool = True) -> np.ndarray:
     mono = np.asarray(mono, dtype=np.float64)
     if mono.size == 0:
         return np.zeros((0, 2), dtype=np.float32)
@@ -708,8 +708,10 @@ def _fade_and_normalize_mono(mono: np.ndarray, attack_ms: int, release_ms: int, 
     mono[:attack] *= np.linspace(0.0, 1.0, attack, dtype=np.float64)
     mono[-release:] *= np.linspace(1.0, 0.0, release, dtype=np.float64)
     current_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
-    if current_peak > 0.0:
+    if normalize and current_peak > 0.0:
         mono = mono / current_peak * peak
+    elif not normalize:
+        mono = np.clip(mono, -peak, peak)
     return np.column_stack([mono, mono]).astype(np.float32)
 
 
@@ -734,6 +736,59 @@ def _voiced_tone(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarray:
     tone += 0.35 * np.sin(2.0 * np.pi * pitch * 2.0 * t)
     tone += 0.18 * np.sin(2.0 * np.pi * pitch * 3.0 * t)
     return tone * float(np.clip(phoneme.voice_strength, 0.0, 1.0))
+
+
+def _articulation_voiced_gain(phoneme: ArticulationPhoneme) -> float:
+    """Boolean Voice On gate times continuous Voice Strength."""
+    return float(np.clip(phoneme.voice_strength, 0.0, 1.0)) if phoneme.voiced else 0.0
+
+
+def _fricative_family_mix(phoneme: ArticulationPhoneme) -> Dict[str, float]:
+    """Return independent source gains for the modular fricative model."""
+    name = phoneme.name.upper()
+    voiced_gain = _articulation_voiced_gain(phoneme)
+    air = float(np.clip(phoneme.air_pressure, 0.0, 1.0))
+    noise_base = {"S": 1.05, "Z": 0.86, "SH": 0.92, "F": 0.98, "V": 0.62, "H": 0.70}.get(name, 0.82)
+    tone_base = {"S": 0.10, "Z": 0.42, "SH": 0.28, "F": 0.14, "V": 0.58, "H": 0.18}.get(name, 0.26)
+    turbulent_gain = (0.08 + air * air * 1.18) * noise_base
+    airflow_gain = (0.03 + air * 0.34) * (0.35 + phoneme.teeth_gap * 0.65)
+    tonal_gain = tone_base * (0.18 + voiced_gain * 0.82)
+    return {
+        "voiced_gain": voiced_gain,
+        "noise_gain": float(np.clip(turbulent_gain + airflow_gain, 0.0, 1.8)),
+        "tonal_gain": float(np.clip(tonal_gain, 0.0, 1.0)),
+        "air_pressure": air,
+        "voice_strength": float(np.clip(phoneme.voice_strength, 0.0, 1.0)),
+    }
+
+
+def articulation_synthesis_debug(phoneme: ArticulationPhoneme) -> Dict[str, object]:
+    phoneme = phoneme.clamped()
+    if phoneme.phoneme_family in {"fricative", "affricate"}:
+        mix = _fricative_family_mix(phoneme)
+    else:
+        voiced_gain = _articulation_voiced_gain(phoneme)
+        air = float(np.clip(phoneme.air_pressure, 0.0, 1.0))
+        family = phoneme.phoneme_family
+        noise_gain = air * (0.10 if family in {"vowel", "liquid", "glide"} else 0.35)
+        tonal_gain = voiced_gain * (0.70 if family in {"vowel", "nasal", "liquid", "glide"} else 0.38)
+        mix = {
+            "voiced_gain": voiced_gain,
+            "noise_gain": float(noise_gain),
+            "tonal_gain": float(tonal_gain),
+            "air_pressure": air,
+            "voice_strength": float(np.clip(phoneme.voice_strength, 0.0, 1.0)),
+        }
+    mix["source_mode"] = phoneme.source_mode
+    return mix
+
+
+def _centered_tone(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarray:
+    t = np.arange(sample_count, dtype=np.float64) / SAMPLE_RATE
+    pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
+    tone = np.sin(2.0 * np.pi * pitch * t)
+    tone += 0.16 * np.sin(2.0 * np.pi * pitch * 2.0 * t)
+    return tone
 
 
 def prepare_articulation_source_audio(
@@ -792,7 +847,7 @@ def _shape_articulation_source(source_audio: np.ndarray, phoneme: ArticulationPh
     if family == "stop":
         base = _render_stop_phoneme(phoneme)
         base = prepare_articulation_source_audio(base, phoneme, len(source) / SAMPLE_RATE)
-        if phoneme.voiced:
+        if _articulation_voiced_gain(phoneme) > 0.0:
             onset = apply_simple_formant_layer(source, phoneme) * 0.55
             closure_samples = min(len(source) - 1, int(len(source) * (0.25 + phoneme.closure * 0.30)))
             base[closure_samples:] += onset[closure_samples:]
@@ -812,12 +867,25 @@ def _shape_articulation_source(source_audio: np.ndarray, phoneme: ArticulationPh
 
 
 def _render_fricative_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
+    phoneme = phoneme.clamped()
     duration = float(np.clip(phoneme.duration_ms / 1000.0, 0.30, 0.60))
     sample_count = max(1, int(duration * SAMPLE_RATE))
-    mono = _colored_noise(sample_count, phoneme) * (0.20 + phoneme.air_pressure * 0.80)
-    if phoneme.voiced:
-        mono += _voiced_tone(sample_count, phoneme) * 0.32
-    return _fade_and_normalize_mono(mono, phoneme.attack_ms, phoneme.release_ms)
+    mix = _fricative_family_mix(phoneme)
+
+    noise_source = _colored_noise(sample_count, phoneme)
+    noise_peak = float(np.max(np.abs(noise_source))) if noise_source.size else 0.0
+    if noise_peak > 0.0:
+        noise_source = noise_source / noise_peak
+    tonal_source = _centered_tone(sample_count, phoneme)
+    voiced_source = _voiced_tone(sample_count, phoneme) if phoneme.voiced else np.zeros(sample_count, dtype=np.float64)
+
+    mono = (
+        noise_source * float(mix["noise_gain"])
+        + tonal_source * float(mix["tonal_gain"])
+        + voiced_source * float(mix["voiced_gain"]) * 0.32
+    )
+    peak = 0.18 + float(mix["air_pressure"]) * 0.62 + float(mix["tonal_gain"]) * 0.12
+    return _fade_and_normalize_mono(mono, phoneme.attack_ms, phoneme.release_ms, peak=float(np.clip(peak, 0.16, 0.88)))
 
 
 def _render_stop_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
@@ -828,7 +896,8 @@ def _render_stop_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
     burst_samples = min(sample_count - closure_samples, max(1, int(SAMPLE_RATE * 0.045)))
     burst = _colored_noise(burst_samples, phoneme) * (0.25 + phoneme.burst_strength)
     mono[closure_samples:closure_samples + burst_samples] += burst
-    if phoneme.voiced and closure_samples < sample_count:
+    voiced_gain = _articulation_voiced_gain(phoneme)
+    if voiced_gain > 0.0 and closure_samples < sample_count:
         onset = _voiced_tone(sample_count - closure_samples, phoneme)
         onset *= np.linspace(0.15, 1.0, onset.size)
         mono[closure_samples:] += onset * 0.38
@@ -838,7 +907,7 @@ def _render_stop_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
 def _render_nasal_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
     duration = float(np.clip(phoneme.duration_ms / 1000.0, 0.30, 0.60))
     sample_count = max(1, int(duration * SAMPLE_RATE))
-    tone = _voiced_tone(sample_count, phoneme)
+    tone = _voiced_tone(sample_count, phoneme) if phoneme.voiced else _colored_noise(sample_count, phoneme) * 0.04
     spectrum = np.fft.rfft(tone)
     freqs = np.fft.rfftfreq(sample_count, 1.0 / SAMPLE_RATE)
     nasal_center = 240.0 + (1.0 - phoneme.tongue_frontness) * 180.0
@@ -861,14 +930,15 @@ def render_articulation_phoneme(phoneme: ArticulationPhoneme, source_audio: np.n
         return _render_nasal_phoneme(phoneme)
 
     duration = max(0.12, phoneme.duration_ms / 1000.0)
+    voiced_gain = _articulation_voiced_gain(phoneme)
     settings = SynthSettings(
         wave_start_db={"sine": -7.0, "triangle": -12.0, "sawtooth": -10.0, "square": -20.0},
         wave_end_db={"sine": -7.0, "triangle": -12.0, "sawtooth": -10.0, "square": -20.0},
         wave_delta_time={wave: duration for wave in WAVE_ORDER},
         pitch_start_hz=phoneme.voice_pitch,
         pitch_end_hz=phoneme.voice_pitch,
-        loudness_start=phoneme.voice_strength,
-        loudness_end=phoneme.voice_strength,
+        loudness_start=voiced_gain,
+        loudness_end=voiced_gain,
         duration_seconds=duration,
         curve_type="linear",
         pan_start=0.0,
@@ -882,6 +952,14 @@ def render_articulation_phoneme(phoneme: ArticulationPhoneme, source_audio: np.n
     )
     audio, _time_axis, _freq_env, _loud_env = generate_audio(settings)
     audio = apply_simple_formant_layer(audio, phoneme)
+    if len(audio):
+        breath_gain = float(np.clip(phoneme.air_pressure, 0.0, 1.0)) * (0.025 if voiced_gain > 0.0 else 0.12)
+        if breath_gain > 0.0:
+            breath = _colored_noise(len(audio), phoneme)
+            breath_peak = float(np.max(np.abs(breath))) if breath.size else 0.0
+            if breath_peak > 0.0:
+                breath = breath / breath_peak * breath_gain
+                audio += np.column_stack([breath, breath]).astype(np.float32)
     fade_samples = min(int(0.025 * SAMPLE_RATE), max(1, len(audio) // 3))
     if len(audio) > fade_samples * 2:
         fade_in = np.linspace(0.0, 1.0, fade_samples, dtype=np.float32)
@@ -3833,7 +3911,7 @@ class WaveToyWindow(QMainWindow):
         self.wave_rows_layout: QVBoxLayout | None = None
         self.add_wave_button: QPushButton | None = None
         self.wave_emotion_labels: Dict[str, QLabel] = {}
-        self.visual_panel_buttons: Dict[str, VisualPanelButton] = {}
+        self.visual_panel_buttons: Dict[str, QPushButton] = {}
         self.floating_toy_panels: Dict[str, QWidget] = {}
         self.note_wheel_dialogs: Dict[str, QDialog] = {}
         self.tabs: QTabWidget | None = None
@@ -3893,6 +3971,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_ipa_label: QLabel | None = None
         self.articulation_summary_label: QLabel | None = None
         self.articulation_formant_label: QLabel | None = None
+        self.articulation_mix_debug_label: QLabel | None = None
         self.articulation_wave_status_label: QLabel | None = None
         self.articulation_source_combo: QComboBox | None = None
         self.articulation_source_badge_label: QLabel | None = None
@@ -4802,8 +4881,13 @@ class WaveToyWindow(QMainWindow):
         self.articulation_summary_label.setObjectName("articulationSummaryStrip")
         self.articulation_summary_label.setWordWrap(True)
         self.articulation_summary_label.setAlignment(Qt.AlignCenter)
+        self.articulation_mix_debug_label = QLabel("Mix: voiced_gain 0.65 • noise_gain 0.05 • tonal_gain 0.46 • air_pressure 0.45 • voice_strength 0.65 • source_mode default_voice")
+        self.articulation_mix_debug_label.setObjectName("articulationDebugStrip")
+        self.articulation_mix_debug_label.setWordWrap(True)
+        self.articulation_mix_debug_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.articulation_formant_label)
         status_layout.addWidget(self.articulation_summary_label)
+        status_layout.addWidget(self.articulation_mix_debug_label)
         explorer_layout.addWidget(status_strip)
         left.addWidget(explorer, 3)
 
@@ -5193,6 +5277,17 @@ class WaveToyWindow(QMainWindow):
             self.articulation_formant_label.setText(f"Formants: F1 {f1:.0f} Hz • F2 {f2:.0f} Hz • F3 {f3:.0f} Hz")
         if self.articulation_summary_label is not None:
             self.articulation_summary_label.setText(f"{p.name} /{p.ipa}/  |  {summary}")
+        if self.articulation_mix_debug_label is not None:
+            mix = articulation_synthesis_debug(p)
+            self.articulation_mix_debug_label.setText(
+                "Mix: "
+                f"voiced_gain {float(mix['voiced_gain']):.2f} • "
+                f"noise_gain {float(mix['noise_gain']):.2f} • "
+                f"tonal_gain {float(mix['tonal_gain']):.2f} • "
+                f"air_pressure {float(mix['air_pressure']):.2f} • "
+                f"voice_strength {float(mix['voice_strength']):.2f} • "
+                f"source_mode {mix['source_mode']}"
+            )
         source_badge = articulation_source_badge(p.source_mode, p.source_wave_id, p.source_audio_path)
         self._sync_articulation_source_widgets(p)
         if self.articulation_wave_status_label is not None:
@@ -7098,27 +7193,54 @@ class WaveToyWindow(QMainWindow):
         tab = QWidget()
         tab.setObjectName("waveExplorerTab")
         self.wave_explorer_tab = tab
-        dashboard_layout = QGridLayout(tab)
-        dashboard_layout.setContentsMargins(16, 14, 16, 14)
-        dashboard_layout.setHorizontalSpacing(16)
-        dashboard_layout.setVerticalSpacing(12)
-        dashboard_layout.setColumnMinimumWidth(0, 210)
-        dashboard_layout.setColumnMinimumWidth(1, 680)
-        dashboard_layout.setColumnMinimumWidth(2, 210)
-        dashboard_layout.setColumnStretch(0, 0)
-        dashboard_layout.setColumnStretch(1, 1)
-        dashboard_layout.setColumnStretch(2, 0)
-        dashboard_layout.setRowStretch(1, 1)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(12, 8, 12, 12)
+        tab_layout.setSpacing(8)
+
+        specs = {
+            "shape": ("🎚 Shape Mix", "#5cdb95"),
+            "stereo": ("👂 Stereo Space", "#7bdff2"),
+            "tuning": ("🎼 Tuning Map", "#b8f2e6"),
+            "pitch": ("🎯 Pitch Toys", "#ffd166"),
+            "effects": ("✨ Sound Magic", "#d7b9ff"),
+            "presets": ("🌈 Sound Experiment", "#ff99c8"),
+        }
+        toolbar = QWidget()
+        toolbar.setObjectName("workspaceToolbar")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(8, 6, 8, 6)
+        toolbar_layout.setSpacing(8)
+        self.visual_panel_buttons.clear()
+        for key, (label, color) in specs.items():
+            button = QPushButton(label)
+            button.setObjectName("workspaceToolbarButton")
+            button.setProperty("accentColor", color)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setCheckable(True)
+            button.setMinimumHeight(44)
+            button.setMaximumHeight(52)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.clicked.connect(lambda checked=False, panel_key=key: self._open_toy_panel(panel_key))
+            self.visual_panel_buttons[key] = button
+            toolbar_layout.addWidget(button)
+        tab_layout.addWidget(toolbar, 0)
+
+        dashboard_layout = QGridLayout()
+        dashboard_layout.setContentsMargins(0, 0, 0, 0)
+        dashboard_layout.setHorizontalSpacing(0)
+        dashboard_layout.setVerticalSpacing(0)
+        dashboard_layout.setColumnStretch(0, 1)
+        dashboard_layout.setRowStretch(0, 1)
 
         explorer_panel = QWidget()
         explorer_panel.setObjectName("explorerDashboardPanel")
         explorer_layout = QVBoxLayout(explorer_panel)
-        explorer_layout.setContentsMargins(12, 12, 12, 12)
-        explorer_layout.setSpacing(8)
+        explorer_layout.setContentsMargins(12, 10, 12, 10)
+        explorer_layout.setSpacing(6)
         explorer_title = QLabel("🌊 Wave Explorer")
         explorer_title.setObjectName("dashboardExplorerTitle")
         explorer_title.setAlignment(Qt.AlignCenter)
-        explorer_hint = QLabel("Keep the big waveform in the center. Open toy panels around the edges for detailed edits.")
+        explorer_hint = QLabel("Use the compact toolbar above for toy panels; the center stays reserved for the waveform.")
         explorer_hint.setObjectName("symbolHint")
         explorer_hint.setWordWrap(True)
         explorer_hint.setAlignment(Qt.AlignCenter)
@@ -7131,7 +7253,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_wave_status_label.setWordWrap(True)
         self.articulation_wave_status_label.setAlignment(Qt.AlignCenter)
         self.dashboard_canvas = WaveCanvas()
-        self.dashboard_canvas.setMinimumSize(QSize(720, 400))
+        self.dashboard_canvas.setMinimumSize(QSize(720, 500))
         self.dashboard_canvas.setToolTip("Central Wave Explorer. Mouse wheel zooms only this waveform view.")
         wave_controls = QHBoxLayout()
         wave_controls.setSpacing(8)
@@ -7154,35 +7276,21 @@ class WaveToyWindow(QMainWindow):
         explorer_layout.addLayout(wave_controls)
         explorer_layout.addWidget(self.dashboard_summary_label)
         explorer_layout.addWidget(self.articulation_wave_status_label)
-        dashboard_layout.addWidget(explorer_panel, 0, 1, 3, 1)
-
-        specs = {
-            "shape": ("🎚 Shape Mix", "#5cdb95"),
-            "pitch": ("🎯 Pitch Toys", "#ffd166"),
-            "tuning": ("🎼 Tuning Map", "#b8f2e6"),
-            "stereo": ("👂 Stereo Space", "#7bdff2"),
-            "effects": ("✨ Sound Magic", "#d7b9ff"),
-            "presets": ("🌈 Sound Experiments", "#ff99c8"),
-        }
-        positions = {
-            "shape": (0, 0, Qt.AlignRight | Qt.AlignBottom),
-            "pitch": (0, 2, Qt.AlignLeft | Qt.AlignBottom),
-            "stereo": (1, 0, Qt.AlignRight | Qt.AlignVCenter),
-            "effects": (1, 2, Qt.AlignLeft | Qt.AlignVCenter),
-            "tuning": (2, 0, Qt.AlignRight | Qt.AlignTop),
-            "presets": (2, 2, Qt.AlignLeft | Qt.AlignTop),
-        }
-        self.visual_panel_buttons.clear()
-        for key, (label, color) in specs.items():
-            button = VisualPanelButton(label, key, color)
-            button.clicked.connect(lambda checked=False, panel_key=key: self._open_toy_panel(panel_key))
-            self.visual_panel_buttons[key] = button
-            row, column, alignment = positions[key]
-            dashboard_layout.addWidget(button, row, column, alignment)
+        dashboard_layout.addWidget(explorer_panel, 0, 0)
+        tab_layout.addLayout(dashboard_layout, 1)
 
         self.tabs.insertTab(0, tab, "🌊 Wave Explorer")
 
     def _open_toy_panel(self, panel_key: str) -> None:
+        self.active_dashboard_workspace = panel_key
+        for key, button in self.visual_panel_buttons.items():
+            is_active = key == panel_key
+            button.setChecked(is_active)
+            button.setDown(is_active)
+            button.setProperty("active", is_active)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
         panel = self.floating_toy_panels.get(panel_key)
         if panel is None:
             panel = QWidget(self, Qt.Tool)
@@ -7564,6 +7672,7 @@ class WaveToyWindow(QMainWindow):
     def _update_visual_panel_buttons(self) -> None:
         if not self.visual_panel_buttons:
             return
+        status_buttons = {key: button for key, button in self.visual_panel_buttons.items() if hasattr(button, "set_status")}
         s = self.current_settings
         live_samples = self._dashboard_audio_thumbnail()
         muted = s.wave_muted or {}
@@ -7575,7 +7684,8 @@ class WaveToyWindow(QMainWindow):
         }
         active = [wave for wave in wave_order if not muted.get(wave, False) and (solo is None or solo == wave) and amps[wave] > 0.01]
         shape_status = f"Solo {wave_label_for(s, solo).split()[0]}" if solo else f"{len(active)} Waves"
-        self.visual_panel_buttons["shape"].set_status(shape_status, {"amps": amps, "muted": muted, "solo": solo, "samples": live_samples})
+        if "shape" in status_buttons:
+            status_buttons["shape"].set_status(shape_status, {"amps": amps, "muted": muted, "solo": solo, "samples": live_samples})
 
         follow = s.wave_follow_main_pitch or {wave: True for wave in wave_order}
         notes = s.wave_note or {wave: s.note for wave in wave_order}
@@ -7588,10 +7698,12 @@ class WaveToyWindow(QMainWindow):
             if not follow.get(wave, True):
                 custom.append(f"{wave.title()} {note_text}")
         pitch_status = f"{s.note}{int(round(s.octave))} Main" if not custom else "Custom Notes"
-        self.visual_panel_buttons["pitch"].set_status(pitch_status, {"notes": pitch_items})
+        if "pitch" in status_buttons:
+            status_buttons["pitch"].set_status(pitch_status, {"notes": pitch_items})
 
         tuning_label = TUNING_METHODS.get(s.tuning_method, TUNING_METHODS["equal_temperament_12"])["label"]
-        self.visual_panel_buttons["tuning"].set_status(str(tuning_label), {"method": tuning_label, "root": s.tuning_root_note})
+        if "tuning" in status_buttons:
+            status_buttons["tuning"].set_status(str(tuning_label), {"method": tuning_label, "root": s.tuning_root_note})
 
         positions = []
         wave_pan = s.wave_pan or {}
@@ -7600,15 +7712,18 @@ class WaveToyWindow(QMainWindow):
         for wave in wave_order:
             positions.append((wave, wave_pan.get(wave, 0.0), wave_width.get(wave, 0.65), wave_dance.get(wave, 0.0)))
         stereo_status = "Dancing" if s.auto_pan_depth > 0.05 or any(float(item[3]) > 0.05 for item in positions) else "Wide" if s.stereo_width > 0.55 else "Centered"
-        self.visual_panel_buttons["stereo"].set_status(stereo_status, {"positions": positions})
+        if "stereo" in status_buttons:
+            status_buttons["stereo"].set_status(stereo_status, {"positions": positions})
 
         paul_active = not (s.muted_modules or {}).get("paulstretch", True)
         effect_status = "Paulstretch On" if paul_active else "Paulstretch Off"
-        self.visual_panel_buttons["effects"].set_status(effect_status, {"paul_active": paul_active, "amount": s.paulstretch_amount, "after_samples": live_samples})
+        if "effects" in status_buttons:
+            status_buttons["effects"].set_status(effect_status, {"paul_active": paul_active, "amount": s.paulstretch_amount, "after_samples": live_samples})
 
         recipe_count = len(self._read_user_recipes())
         preset_status = f"{recipe_count} Saved" if recipe_count else "Try Presets"
-        self.visual_panel_buttons["presets"].set_status(preset_status, {"count": recipe_count})
+        if "presets" in status_buttons:
+            status_buttons["presets"].set_status(preset_status, {"count": recipe_count})
         if "save" in self.visual_panel_buttons:
             self.visual_panel_buttons["save"].set_status("WAV + Recipe", {"samples": live_samples})
         self._update_dashboard_summary(s, tuning_label, solo, active)
@@ -7908,6 +8023,26 @@ class WaveToyWindow(QMainWindow):
                 border: 2px solid rgba(0, 0, 0, 0.10);
                 border-radius: 16px;
             }
+            QWidget#workspaceToolbar {
+                background: rgba(255, 255, 255, 0.84);
+                border: 2px solid rgba(0, 0, 0, 0.10);
+                border-radius: 16px;
+            }
+            QPushButton#workspaceToolbarButton {
+                background: rgba(255, 255, 255, 0.90);
+                border: 2px solid rgba(38, 50, 56, 0.16);
+                border-radius: 14px;
+                color: #263238;
+                font-size: 14px;
+                font-weight: 900;
+                padding: 6px 10px;
+            }
+            QPushButton#workspaceToolbarButton:checked,
+            QPushButton#workspaceToolbarButton[active="true"] {
+                background: #fff7c7;
+                border: 4px solid rgba(92, 219, 149, 0.86);
+                padding: 4px 8px;
+            }
             QLabel#workspaceTitle {
                 font-size: 14px;
                 font-weight: 900;
@@ -8121,6 +8256,16 @@ class WaveToyWindow(QMainWindow):
             }
             QLabel#articulationSummaryStrip {
                 background: rgba(255, 247, 230, 0.92);
+            }
+            QLabel#articulationDebugStrip {
+                background: rgba(238, 246, 255, 0.94);
+                border: 2px dashed rgba(58, 80, 107, 0.42);
+                border-radius: 14px;
+                color: #263238;
+                font-family: monospace;
+                font-size: 12px;
+                font-weight: 900;
+                padding: 6px 9px;
             }
             QPushButton#phonemeRailButton {
                 background: #ffffff;
