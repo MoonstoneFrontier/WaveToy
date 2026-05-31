@@ -78,6 +78,28 @@ from PySide6.QtWidgets import (
 )
 
 SAMPLE_RATE = 44_100
+
+ARTICULATION_SOURCE_DEFAULT = "default_voice"
+ARTICULATION_SOURCE_CURRENT = "current_wavetoy_sound"
+ARTICULATION_SOURCE_MIX_WAVE = "selected_mix_wave"
+ARTICULATION_SOURCE_IMPORTED = "imported_audio"
+ARTICULATION_SOURCE_MODES = {
+    ARTICULATION_SOURCE_DEFAULT: "Default Voice",
+    ARTICULATION_SOURCE_CURRENT: "WaveToy Sound",
+    ARTICULATION_SOURCE_MIX_WAVE: "Selected Mix Wave",
+    ARTICULATION_SOURCE_IMPORTED: "Imported WAV",
+}
+
+
+def articulation_source_badge(source_mode: str, source_wave_id: str | None = None, source_audio_path: str | None = None) -> str:
+    if source_mode == ARTICULATION_SOURCE_CURRENT:
+        return "WaveToy Sound"
+    if source_mode == ARTICULATION_SOURCE_MIX_WAVE:
+        return f"Mix Wave {source_wave_id or '?'}"
+    if source_mode == ARTICULATION_SOURCE_IMPORTED:
+        return Path(str(source_audio_path)).name if source_audio_path else "Imported WAV"
+    return "Default Voice"
+
 MAX_PREVIEW_SECONDS = 8.0
 WAVE_ORDER = ["sine", "triangle", "sawtooth", "square"]
 DEFAULT_WAVE_ORDER = list(WAVE_ORDER)
@@ -338,6 +360,15 @@ class ArticulationPhoneme:
     noise_color: float = 0.50
     attack_ms: int = 18
     release_ms: int = 28
+    source_mode: str = ARTICULATION_SOURCE_DEFAULT
+    source_wave_id: str | None = None
+    source_recipe_snapshot: Dict[str, object] | None = None
+    source_audio_path: str | None = None
+    source_start_seconds: float = 0.0
+    source_duration_seconds: float = 0.0
+    source_pitch_follow: bool = True
+    source_loop_to_fit: bool = True
+    source_gain: float = 1.0
 
     def clamped(self) -> "ArticulationPhoneme":
         family = str(self.phoneme_family or "vowel").lower()
@@ -364,6 +395,15 @@ class ArticulationPhoneme:
             noise_color=float(np.clip(self.noise_color, 0.0, 1.0)),
             attack_ms=int(np.clip(self.attack_ms, 1, 250)),
             release_ms=int(np.clip(self.release_ms, 1, 500)),
+            source_mode=str(self.source_mode if self.source_mode in ARTICULATION_SOURCE_MODES else ARTICULATION_SOURCE_DEFAULT),
+            source_wave_id=str(self.source_wave_id) if self.source_wave_id else None,
+            source_recipe_snapshot=dict(self.source_recipe_snapshot or {}),
+            source_audio_path=str(self.source_audio_path) if self.source_audio_path else None,
+            source_start_seconds=float(max(0.0, self.source_start_seconds)),
+            source_duration_seconds=float(max(0.0, self.source_duration_seconds)),
+            source_pitch_follow=bool(self.source_pitch_follow),
+            source_loop_to_fit=bool(self.source_loop_to_fit),
+            source_gain=float(np.clip(self.source_gain, 0.0, 4.0)),
         )
 
     def to_json_dict(self) -> Dict[str, object]:
@@ -394,7 +434,30 @@ class ArticulationPhoneme:
             noise_color=float(data.get("noise_color", 0.50)),
             attack_ms=int(data.get("attack_ms", 18)),
             release_ms=int(data.get("release_ms", 28)),
+            source_mode=str(data.get("source_mode", ARTICULATION_SOURCE_DEFAULT)),
+            source_wave_id=str(data.get("source_wave_id")) if data.get("source_wave_id") else None,
+            source_recipe_snapshot=dict(data.get("source_recipe_snapshot") or {}),
+            source_audio_path=str(data.get("source_audio_path")) if data.get("source_audio_path") else None,
+            source_start_seconds=float(data.get("source_start_seconds", 0.0)),
+            source_duration_seconds=float(data.get("source_duration_seconds", 0.0)),
+            source_pitch_follow=bool(data.get("source_pitch_follow", True)),
+            source_loop_to_fit=bool(data.get("source_loop_to_fit", True)),
+            source_gain=float(data.get("source_gain", 1.0)),
         ).clamped()
+
+
+@dataclass
+class ArticulationChainItem:
+    """One phoneme in an Articulation Chain with optional waveform source metadata."""
+
+    phoneme: ArticulationPhoneme
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return self.phoneme.to_json_dict()
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "ArticulationChainItem":
+        return cls(ArticulationPhoneme.from_json_dict(data))
 
 
 VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
@@ -552,6 +615,81 @@ def _voiced_tone(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarray:
     return tone * float(np.clip(phoneme.voice_strength, 0.0, 1.0))
 
 
+def prepare_articulation_source_audio(
+    source_audio: np.ndarray,
+    phoneme: ArticulationPhoneme,
+    duration_seconds: float | None = None,
+) -> np.ndarray:
+    """Trim, loop, fade, and normalize arbitrary audio for articulation shaping."""
+    duration = max(0.08, float(duration_seconds if duration_seconds is not None else phoneme.duration_ms / 1000.0))
+    target_samples = max(1, int(round(duration * SAMPLE_RATE)))
+    audio = _ensure_stereo_float(source_audio)
+    if audio.size == 0:
+        return np.zeros((target_samples, 2), dtype=np.float32)
+
+    start = min(len(audio), max(0, int(round(phoneme.source_start_seconds * SAMPLE_RATE))))
+    requested = int(round(phoneme.source_duration_seconds * SAMPLE_RATE)) if phoneme.source_duration_seconds > 0 else 0
+    if requested > 0:
+        audio = audio[start:min(len(audio), start + requested)]
+    else:
+        audio = audio[start:]
+    if audio.size == 0:
+        audio = _ensure_stereo_float(source_audio)
+
+    if len(audio) < target_samples and phoneme.source_loop_to_fit:
+        repeats = int(math.ceil(target_samples / max(1, len(audio))))
+        audio = np.tile(audio, (repeats, 1))
+    if len(audio) < target_samples:
+        padding = np.zeros((target_samples - len(audio), 2), dtype=np.float32)
+        audio = np.vstack([audio, padding])
+    audio = np.array(audio[:target_samples], dtype=np.float32, copy=True)
+
+    fade = min(max(1, int(0.012 * SAMPLE_RATE)), max(1, target_samples // 3))
+    if target_samples > fade * 2:
+        audio[:fade] *= np.linspace(0.0, 1.0, fade, dtype=np.float32)[:, None]
+        audio[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)[:, None]
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak > 1e-7:
+        audio = (audio / peak) * float(np.clip(phoneme.source_gain, 0.0, 4.0))
+    return np.clip(audio, -1.0, 1.0).astype(np.float32)
+
+
+def _shape_articulation_source(source_audio: np.ndarray, phoneme: ArticulationPhoneme, duration_seconds: float | None = None) -> np.ndarray:
+    """Use an external waveform as the vocal excitation, preserving consonant character."""
+    source = prepare_articulation_source_audio(source_audio, phoneme, duration_seconds)
+    if source.size == 0:
+        return render_articulation_phoneme(phoneme)
+
+    family = phoneme.phoneme_family
+    if family in {"fricative", "affricate"}:
+        shaped = apply_simple_formant_layer(source, phoneme)
+        noise = _render_fricative_phoneme(phoneme)
+        noise = prepare_articulation_source_audio(noise, phoneme, len(source) / SAMPLE_RATE)
+        source_mix = float(np.clip(1.0 - phoneme.air_pressure * 0.65, 0.20, 0.80))
+        return normalize_audio(shaped * source_mix + noise * (1.0 - source_mix)).astype(np.float32)
+
+    if family == "stop":
+        base = _render_stop_phoneme(phoneme)
+        base = prepare_articulation_source_audio(base, phoneme, len(source) / SAMPLE_RATE)
+        if phoneme.voiced:
+            onset = apply_simple_formant_layer(source, phoneme) * 0.55
+            closure_samples = min(len(source) - 1, int(len(source) * (0.25 + phoneme.closure * 0.30)))
+            base[closure_samples:] += onset[closure_samples:]
+        return normalize_audio(base).astype(np.float32)
+
+    if family == "nasal":
+        mono = source.mean(axis=1).astype(np.float64)
+        spectrum = np.fft.rfft(mono)
+        freqs = np.fft.rfftfreq(mono.size, 1.0 / SAMPLE_RATE)
+        nasal_center = 240.0 + (1.0 - phoneme.tongue_frontness) * 180.0
+        envelope = 0.12 + (1.10 + phoneme.nasal_open * 0.75) * np.exp(-0.5 * ((freqs - nasal_center) / 110.0) ** 2)
+        envelope *= 1.0 / (1.0 + (freqs / (1200.0 + phoneme.nasal_open * 1400.0)) ** 2)
+        mono = np.fft.irfft(spectrum * envelope, n=mono.size)
+        return _fade_and_normalize_mono(mono, phoneme.attack_ms, phoneme.release_ms, peak=0.72)
+
+    return apply_simple_formant_layer(source, phoneme)
+
+
 def _render_fricative_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
     duration = float(np.clip(phoneme.duration_ms / 1000.0, 0.30, 0.60))
     sample_count = max(1, int(duration * SAMPLE_RATE))
@@ -590,8 +728,10 @@ def _render_nasal_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
     return _fade_and_normalize_mono(mono, phoneme.attack_ms, phoneme.release_ms, peak=0.70)
 
 
-def render_articulation_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
+def render_articulation_phoneme(phoneme: ArticulationPhoneme, source_audio: np.ndarray | None = None) -> np.ndarray:
     phoneme = phoneme.clamped()
+    if source_audio is not None and phoneme.source_mode != ARTICULATION_SOURCE_DEFAULT:
+        return _shape_articulation_source(source_audio, phoneme)
     if phoneme.phoneme_family in {"fricative", "affricate"}:
         return _render_fricative_phoneme(phoneme)
     if phoneme.phoneme_family == "stop":
@@ -3510,6 +3650,12 @@ class WaveToyWindow(QMainWindow):
         self.articulation_summary_label: QLabel | None = None
         self.articulation_formant_label: QLabel | None = None
         self.articulation_wave_status_label: QLabel | None = None
+        self.articulation_source_combo: QComboBox | None = None
+        self.articulation_source_badge_label: QLabel | None = None
+        self.articulation_chain_items: List[ArticulationChainItem] = []
+        self.articulation_selected_chain_index: int | None = None
+        self.articulation_chain_widget: QWidget | None = None
+        self.articulation_chain_path = Path("articulation_chain.json")
         self.phoneme_cards_widget: QWidget | None = None
         self.phoneme_drawer_stack: QStackedWidget | None = None
         self.phoneme_drawer_buttons: Dict[str, QPushButton] = {}
@@ -4351,6 +4497,38 @@ class WaveToyWindow(QMainWindow):
         top.addWidget(stop_button)
         explorer_layout.addLayout(top)
 
+        source_panel = QWidget()
+        source_panel.setObjectName("articulationStatusStrip")
+        source_layout = QHBoxLayout(source_panel)
+        source_layout.setContentsMargins(10, 8, 10, 8)
+        source_layout.setSpacing(8)
+        source_title = QLabel("🌊 Source")
+        source_title.setObjectName("articulationToyLabel")
+        self.articulation_source_combo = QComboBox()
+        self.articulation_source_combo.setObjectName("articulationSourceSelector")
+        for mode, label in (
+            (ARTICULATION_SOURCE_DEFAULT, "Default Voice"),
+            (ARTICULATION_SOURCE_CURRENT, "Current WaveToy Sound"),
+            (ARTICULATION_SOURCE_MIX_WAVE, "Selected Mix Wave"),
+            (ARTICULATION_SOURCE_IMPORTED, "Imported Audio Palette Item"),
+        ):
+            self.articulation_source_combo.addItem(label, mode)
+        self.articulation_source_combo.currentIndexChanged.connect(lambda _index: self._articulation_source_mode_changed())
+        apply_wave_button = self._make_story_button("🌊", "Apply Current Wave", "#b8f2e6", self._apply_current_wave_to_phoneme)
+        reset_wave_button = self._make_story_button("♻", "Reset Voice", "#ffd166", self._reset_current_phoneme_source)
+        self.articulation_source_badge_label = QLabel("Default Voice")
+        self.articulation_source_badge_label.setObjectName("articulationIpaBadge")
+        self.articulation_source_badge_label.setAlignment(Qt.AlignCenter)
+        for button in (apply_wave_button, reset_wave_button):
+            button.setMinimumSize(QSize(120, 58))
+            button.setMaximumHeight(64)
+        source_layout.addWidget(source_title)
+        source_layout.addWidget(self.articulation_source_combo, 1)
+        source_layout.addWidget(apply_wave_button)
+        source_layout.addWidget(reset_wave_button)
+        source_layout.addWidget(self.articulation_source_badge_label)
+        explorer_layout.addWidget(source_panel)
+
         self.articulation_canvas = VocalTractCanvas()
         self.articulation_canvas.setMinimumHeight(360)
         self.articulation_canvas.setMaximumHeight(460)
@@ -4425,6 +4603,41 @@ class WaveToyWindow(QMainWindow):
         controls_body_layout.addStretch(1)
         controls_layout.addWidget(controls_body)
         left.addWidget(controls_card)
+
+        chain_card = self._toy_group("Articulation Chain")
+        chain_layout = QVBoxLayout(chain_card)
+        chain_layout.setContentsMargins(12, 18, 12, 12)
+        chain_layout.setSpacing(8)
+        chain_hint = QLabel("Build AH → M → OO → N style chains. Each card can use Default Voice or inherit a WaveToy source.")
+        chain_hint.setObjectName("symbolHint")
+        chain_hint.setWordWrap(True)
+        chain_layout.addWidget(chain_hint)
+        chain_buttons = QHBoxLayout()
+        for icon, label, color, callback in (
+            ("➕", "Add Phoneme", "#5cdb95", self._add_current_phoneme_to_chain),
+            ("▶", "Play Chain", "#b8f2e6", self._play_articulation_chain),
+            ("💾", "Save Chain", "#ffd166", self._save_articulation_chain),
+            ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain),
+        ):
+            button = self._make_story_button(icon, label, color, callback)
+            button.setMinimumHeight(58)
+            chain_buttons.addWidget(button)
+        chain_layout.addLayout(chain_buttons)
+        chain_source_buttons = QHBoxLayout()
+        for icon, label, color, callback in (
+            ("🌊", "Apply Current Wave to Selected Phoneme", "#b8f2e6", self._apply_current_wave_to_selected_chain_item),
+            ("🌊", "Apply Current Wave to Whole Chain", "#caffbf", self._apply_current_wave_to_whole_chain),
+            ("♻", "Reset Selected", "#ffd166", self._reset_selected_chain_item_source),
+            ("♻", "Reset Whole Chain", "#ffadad", self._reset_whole_chain_source),
+        ):
+            button = self._make_story_button(icon, label, color, callback)
+            button.setMinimumHeight(58)
+            chain_source_buttons.addWidget(button)
+        chain_layout.addLayout(chain_source_buttons)
+        self.articulation_chain_widget = QWidget()
+        chain_layout.addWidget(self.articulation_chain_widget)
+        left.addWidget(chain_card)
+        self._refresh_articulation_chain_cards()
 
         drawer_shell = QWidget()
         drawer_shell.setObjectName("phonemeDrawerShell")
@@ -4643,6 +4856,15 @@ class WaveToyWindow(QMainWindow):
             noise_color=self.current_phoneme.noise_color,
             attack_ms=self.current_phoneme.attack_ms,
             release_ms=self.current_phoneme.release_ms,
+            source_mode=self.current_phoneme.source_mode,
+            source_wave_id=self.current_phoneme.source_wave_id,
+            source_recipe_snapshot=dict(self.current_phoneme.source_recipe_snapshot or {}),
+            source_audio_path=self.current_phoneme.source_audio_path,
+            source_start_seconds=self.current_phoneme.source_start_seconds,
+            source_duration_seconds=self.current_phoneme.source_duration_seconds,
+            source_pitch_follow=self.current_phoneme.source_pitch_follow,
+            source_loop_to_fit=self.current_phoneme.source_loop_to_fit,
+            source_gain=self.current_phoneme.source_gain,
         ).clamped()
 
     def _set_articulation_ui_from_phoneme(self, phoneme: ArticulationPhoneme) -> None:
@@ -4696,13 +4918,236 @@ class WaveToyWindow(QMainWindow):
             self.articulation_formant_label.setText(f"Formants: F1 {f1:.0f} Hz • F2 {f2:.0f} Hz • F3 {f3:.0f} Hz")
         if self.articulation_summary_label is not None:
             self.articulation_summary_label.setText(f"{p.name} /{p.ipa}/  |  {summary}")
+        source_badge = articulation_source_badge(p.source_mode, p.source_wave_id, p.source_audio_path)
+        self._sync_articulation_source_widgets(p)
         if self.articulation_wave_status_label is not None:
-            self.articulation_wave_status_label.setText(f"🗣 {p.name} /{p.ipa}/  |  {summary}")
+            self.articulation_wave_status_label.setText(f"🗣 {p.name} /{p.ipa}/  |  {summary}  |  Source: {source_badge}")
         for key, label in self.articulation_value_labels.items():
             value = self._articulation_slider_value(key)
             label.setText(f"{value:.0f} Hz" if key == "voice_pitch" else f"{value:.2f}")
         if regenerate:
-            self.phoneme_preview_audio = render_articulation_phoneme(p)
+            self.phoneme_preview_audio = self._render_articulation_with_source(p)
+
+    def _articulation_source_mode_changed(self) -> None:
+        if self.articulation_source_combo is None:
+            return
+        mode = str(self.articulation_source_combo.currentData() or ARTICULATION_SOURCE_DEFAULT)
+        if mode == ARTICULATION_SOURCE_DEFAULT:
+            self._reset_current_phoneme_source()
+            return
+        self.current_phoneme = self._phoneme_from_articulation_ui()
+        self.current_phoneme.source_mode = mode
+        self.current_phoneme = self.current_phoneme.clamped()
+        self._update_articulation_preview(regenerate=True)
+
+    def _sync_articulation_source_widgets(self, phoneme: ArticulationPhoneme) -> None:
+        if self.articulation_source_combo is not None:
+            index = self.articulation_source_combo.findData(phoneme.source_mode)
+            self.articulation_source_combo.blockSignals(True)
+            self.articulation_source_combo.setCurrentIndex(max(0, index))
+            self.articulation_source_combo.blockSignals(False)
+        if self.articulation_source_badge_label is not None:
+            self.articulation_source_badge_label.setText(articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path))
+
+    def _selected_articulation_source_mode(self) -> str:
+        if self.articulation_source_combo is None:
+            return ARTICULATION_SOURCE_CURRENT
+        mode = str(self.articulation_source_combo.currentData() or ARTICULATION_SOURCE_CURRENT)
+        return mode if mode != ARTICULATION_SOURCE_DEFAULT else ARTICULATION_SOURCE_CURRENT
+
+    def _selected_mix_wave_id(self) -> str:
+        solo = self._solo_wave_from_ui() if hasattr(self, "wave_solo_buttons") else None
+        if solo:
+            return solo
+        for wave_id in getattr(self, "wave_row_order", DEFAULT_WAVE_ORDER):
+            if wave_id in getattr(self, "wave_start_sliders", {}):
+                return wave_id
+        return WAVE_ORDER[0]
+
+    def _mix_wave_audio_for_source(self, wave_id: str) -> np.ndarray:
+        settings = self._settings_from_ui()
+        settings.solo_wave = wave_id
+        settings.wave_muted = {wave: False for wave in active_wave_order(settings)}
+        audio, _time_axis, _freq_env, _loud_env = generate_audio(settings)
+        return audio
+
+    def _source_metadata_for_mode(self, mode: str) -> Dict[str, object]:
+        recipe = self._timeline_recipe_snapshot() if hasattr(self, "_timeline_recipe_snapshot") else {}
+        metadata: Dict[str, object] = {
+            "source_mode": mode,
+            "source_recipe_snapshot": recipe,
+            "source_start_seconds": 0.0,
+            "source_duration_seconds": 0.0,
+            "source_pitch_follow": True,
+            "source_loop_to_fit": True,
+            "source_gain": 1.0,
+        }
+        if mode == ARTICULATION_SOURCE_MIX_WAVE:
+            metadata["source_wave_id"] = self._selected_mix_wave_id()
+        elif mode == ARTICULATION_SOURCE_IMPORTED:
+            item = self._timeline_palette_item_by_id(self.timeline_selected_palette_item_id)
+            if item is not None:
+                metadata["source_audio_path"] = item.source_path
+                metadata["source_duration_seconds"] = item.duration_seconds
+            else:
+                QMessageBox.information(self, "Imported Audio Source", "Select an Audio Palette item first. Falling back to Default Voice.")
+                metadata["source_mode"] = ARTICULATION_SOURCE_DEFAULT
+        return metadata
+
+    def _resolve_articulation_source_audio(self, phoneme: ArticulationPhoneme) -> np.ndarray | None:
+        phoneme = phoneme.clamped()
+        try:
+            if phoneme.source_mode == ARTICULATION_SOURCE_CURRENT:
+                return self._timeline_current_audio(force=True)
+            if phoneme.source_mode == ARTICULATION_SOURCE_MIX_WAVE:
+                return self._mix_wave_audio_for_source(phoneme.source_wave_id or self._selected_mix_wave_id())
+            if phoneme.source_mode == ARTICULATION_SOURCE_IMPORTED:
+                item = self._timeline_palette_item_by_id(self.timeline_selected_palette_item_id)
+                if item is not None and item.source_path == phoneme.source_audio_path:
+                    return np.array(item.audio_data, dtype=np.float32, copy=True)
+                if phoneme.source_audio_path and Path(phoneme.source_audio_path).exists():
+                    audio, _sample_rate = load_audio_file(Path(phoneme.source_audio_path))
+                    return audio
+                QMessageBox.warning(self, "Missing articulation source", "The saved imported source path is missing, so this phoneme will use Default Voice.")
+                return None
+        except Exception as exc:
+            QMessageBox.warning(self, "Articulation source", f"Waveform source could not be prepared, so Default Voice will play.\n\n{exc}")
+        return None
+
+    def _render_articulation_with_source(self, phoneme: ArticulationPhoneme) -> np.ndarray:
+        phoneme = phoneme.clamped()
+        source_audio = self._resolve_articulation_source_audio(phoneme) if phoneme.source_mode != ARTICULATION_SOURCE_DEFAULT else None
+        if source_audio is None:
+            fallback = ArticulationPhoneme.from_json_dict({**phoneme.to_json_dict(), "source_mode": ARTICULATION_SOURCE_DEFAULT})
+            return render_articulation_phoneme(fallback)
+        return render_articulation_phoneme(phoneme, source_audio=source_audio)
+
+    def _apply_current_wave_to_phoneme(self, checked: bool = False) -> None:
+        del checked
+        mode = self._selected_articulation_source_mode()
+        self.current_phoneme = self._phoneme_from_articulation_ui()
+        for key, value in self._source_metadata_for_mode(mode).items():
+            setattr(self.current_phoneme, key, value)
+        self.current_phoneme = self.current_phoneme.clamped()
+        self._update_articulation_preview(regenerate=True)
+
+    def _reset_current_phoneme_source(self, checked: bool = False) -> None:
+        del checked
+        self.current_phoneme = self._phoneme_from_articulation_ui()
+        self.current_phoneme.source_mode = ARTICULATION_SOURCE_DEFAULT
+        self.current_phoneme.source_wave_id = None
+        self.current_phoneme.source_recipe_snapshot = {}
+        self.current_phoneme.source_audio_path = None
+        self.current_phoneme.source_start_seconds = 0.0
+        self.current_phoneme.source_duration_seconds = 0.0
+        self.current_phoneme.source_pitch_follow = True
+        self.current_phoneme.source_loop_to_fit = True
+        self.current_phoneme.source_gain = 1.0
+        self.current_phoneme = self.current_phoneme.clamped()
+        self._update_articulation_preview(regenerate=True)
+
+    def _refresh_articulation_chain_cards(self) -> None:
+        if self.articulation_chain_widget is None:
+            return
+        layout = self.articulation_chain_widget.layout()
+        if layout is None:
+            layout = QVBoxLayout(self.articulation_chain_widget)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+        else:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+        if not self.articulation_chain_items:
+            empty = QLabel("No chain yet. Add phonemes, then assign waveform sources per card or to the whole chain.")
+            empty.setObjectName("symbolHint")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+            return
+        for index, item in enumerate(self.articulation_chain_items):
+            phoneme = item.phoneme.clamped()
+            button = QPushButton(f"{index + 1}. {phoneme.name} /{phoneme.ipa}/  •  {articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)}")
+            button.setCheckable(True)
+            button.setChecked(index == self.articulation_selected_chain_index)
+            button.setObjectName("phonemeCardSecondaryAction")
+            button.setMinimumHeight(WaveToySizing.MIN_TOUCH_TARGET)
+            button.clicked.connect(lambda checked=False, i=index: self._select_articulation_chain_item(i))
+            layout.addWidget(button)
+
+    def _select_articulation_chain_item(self, index: int) -> None:
+        if index < 0 or index >= len(self.articulation_chain_items):
+            return
+        self.articulation_selected_chain_index = index
+        self._set_articulation_ui_from_phoneme(self.articulation_chain_items[index].phoneme)
+        self._refresh_articulation_chain_cards()
+
+    def _add_current_phoneme_to_chain(self, checked: bool = False) -> None:
+        del checked
+        self.current_phoneme = self._phoneme_from_articulation_ui()
+        self.articulation_chain_items.append(ArticulationChainItem(ArticulationPhoneme.from_json_dict(self.current_phoneme.to_json_dict())))
+        self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
+        self._refresh_articulation_chain_cards()
+
+    def _apply_current_wave_to_selected_chain_item(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_selected_chain_index is None or self.articulation_selected_chain_index >= len(self.articulation_chain_items):
+            QMessageBox.information(self, "Articulation Chain", "Select a chain phoneme first.")
+            return
+        phoneme = self.articulation_chain_items[self.articulation_selected_chain_index].phoneme
+        for key, value in self._source_metadata_for_mode(self._selected_articulation_source_mode()).items():
+            setattr(phoneme, key, value)
+        self.articulation_chain_items[self.articulation_selected_chain_index].phoneme = phoneme.clamped()
+        self._refresh_articulation_chain_cards()
+
+    def _apply_current_wave_to_whole_chain(self, checked: bool = False) -> None:
+        del checked
+        metadata = self._source_metadata_for_mode(self._selected_articulation_source_mode())
+        for item in self.articulation_chain_items:
+            for key, value in metadata.items():
+                setattr(item.phoneme, key, value)
+            item.phoneme = item.phoneme.clamped()
+        self._refresh_articulation_chain_cards()
+
+    def _reset_selected_chain_item_source(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_selected_chain_index is None or self.articulation_selected_chain_index >= len(self.articulation_chain_items):
+            return
+        item = self.articulation_chain_items[self.articulation_selected_chain_index]
+        item.phoneme = ArticulationPhoneme.from_json_dict({**item.phoneme.to_json_dict(), "source_mode": ARTICULATION_SOURCE_DEFAULT, "source_wave_id": None, "source_recipe_snapshot": {}, "source_audio_path": None})
+        self._refresh_articulation_chain_cards()
+
+    def _reset_whole_chain_source(self, checked: bool = False) -> None:
+        del checked
+        for item in self.articulation_chain_items:
+            item.phoneme = ArticulationPhoneme.from_json_dict({**item.phoneme.to_json_dict(), "source_mode": ARTICULATION_SOURCE_DEFAULT, "source_wave_id": None, "source_recipe_snapshot": {}, "source_audio_path": None})
+        self._refresh_articulation_chain_cards()
+
+    def _play_articulation_chain(self, checked: bool = False) -> None:
+        del checked
+        if not self.articulation_chain_items:
+            QMessageBox.information(self, "Articulation Chain", "Add at least one phoneme to the chain first.")
+            return
+        rendered = [self._render_articulation_with_source(item.phoneme) for item in self.articulation_chain_items]
+        audio = np.vstack([clip for clip in rendered if clip.size]) if rendered else np.zeros((0, 2), dtype=np.float32)
+        self._play_audio_array(audio)
+
+    def _save_articulation_chain(self, checked: bool = False) -> None:
+        del checked
+        data = {"items": [item.to_json_dict() for item in self.articulation_chain_items]}
+        self.articulation_chain_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        QMessageBox.information(self, "Articulation Chain", f"Saved {len(self.articulation_chain_items)} chain phoneme(s) to {self.articulation_chain_path}.")
+
+    def _load_articulation_chain(self, checked: bool = False) -> None:
+        del checked
+        if not self.articulation_chain_path.exists():
+            QMessageBox.information(self, "Articulation Chain", "No saved articulation_chain.json file was found yet.")
+            return
+        data = json.loads(self.articulation_chain_path.read_text(encoding="utf-8"))
+        self.articulation_chain_items = [ArticulationChainItem.from_json_dict(item) for item in data.get("items", []) if isinstance(item, dict)]
+        self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+        self._refresh_articulation_chain_cards()
 
     def _select_vowel_preset(self, preset_name: str, play: bool = False) -> None:
         data = VOWEL_PRESETS[preset_name]
@@ -4740,7 +5185,7 @@ class WaveToyWindow(QMainWindow):
     def _play_phoneme_preview(self, checked: bool = False) -> None:
         del checked
         self.current_phoneme = self._phoneme_from_articulation_ui()
-        self.phoneme_preview_audio = render_articulation_phoneme(self.current_phoneme)
+        self.phoneme_preview_audio = self._render_articulation_with_source(self.current_phoneme)
         self._play_audio_array(self.phoneme_preview_audio)
         if self.phoneme_loop_enabled:
             duration_ms = max(100, int((len(self.phoneme_preview_audio) / SAMPLE_RATE) * 1000))
@@ -4830,10 +5275,14 @@ class WaveToyWindow(QMainWindow):
         summary = QLabel(articulation_summary(phoneme))
         summary.setObjectName("phonemeCardSummary")
         summary.setWordWrap(True)
+        source_badge = QLabel(articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path))
+        source_badge.setObjectName("articulationIpaBadge")
+        source_badge.setAlignment(Qt.AlignCenter)
         title_stack = QVBoxLayout()
         title_stack.setSpacing(2)
         title_stack.addWidget(title)
         title_stack.addWidget(summary)
+        title_stack.addWidget(source_badge)
 
         play_button = QPushButton("▶ Play")
         play_button.setObjectName("phonemeCardPrimaryAction")
@@ -4867,7 +5316,7 @@ class WaveToyWindow(QMainWindow):
         return card
 
     def _play_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
-        self._play_audio_array(render_articulation_phoneme(phoneme))
+        self._play_audio_array(self._render_articulation_with_source(phoneme))
 
     def _load_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
         self._set_articulation_ui_from_phoneme(phoneme)

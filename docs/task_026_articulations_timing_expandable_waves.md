@@ -53,3 +53,9 @@ Loading behavior:
 - The default four wave rows still use their established fixed waveform identity; shape selection is currently exposed for user-added rows.
 - The dynamic rows use a more compact card layout than the original four large flow-style rows to keep the existing Classic Editor readable.
 - Full audio playback still depends on the user's environment. WaveToy does not require `sounddevice`; when it is absent, existing fallback export/playback behavior is preserved.
+
+## Priority 4b: Waveform Source for Articulation
+
+WaveToy now supports optional waveform sources for Articulation Lab phonemes and Articulation Chain cards. The source modes are Default Voice, Current WaveToy Sound, Selected Mix Wave, and Imported Audio Palette Item. Phoneme and chain metadata stores only source mode, wave id, recipe snapshot, import path, trim/loop/gain options, and timing fields; raw audio arrays are intentionally not written into articulation JSON.
+
+The synthesis path prepares the selected waveform by resampling imported files to the app sample rate, converting to stereo, trimming or looping to the target phoneme duration, adding short fades, and normalizing safely before applying articulation shaping. Vowels use formant filtering, fricatives blend source with filtered noise, stops keep closure/burst behavior with optional voiced source onset, nasals emphasize low nasal resonance, and glides/liquids use approximate formant shaping. Missing imported source paths warn and fall back to Default Voice so old files and portable recipes remain safe.
