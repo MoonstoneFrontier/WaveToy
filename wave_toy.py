@@ -2418,11 +2418,20 @@ class SpeechBinCard(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(76, 10, 10, 10)
         layout.addStretch(1)
-        add_button = QPushButton("➕ Add")
-        add_button.setMinimumSize(QSize(86, WaveToySizing.MIN_TOUCH_TARGET))
-        add_button.setCursor(Qt.PointingHandCursor)
-        add_button.clicked.connect(lambda checked=False: self.owner._timeline_add_speech_item_to_playhead(self.item.id))
-        layout.addWidget(add_button, 0, Qt.AlignRight | Qt.AlignBottom)
+        actions = (
+            ("▶", "Preview", self.owner._timeline_preview_speech_item),
+            ("✏", "Rename", self.owner._timeline_rename_speech_item),
+            ("⧉", "Duplicate", self.owner._timeline_duplicate_speech_item),
+            ("🗑", "Delete", self.owner._timeline_delete_speech_item),
+            ("➕", "Add", self.owner._timeline_add_speech_item_to_playhead),
+        )
+        for icon, tip, callback in actions:
+            button = QPushButton(icon if tip != "Add" else "➕ Add")
+            button.setToolTip(tip)
+            button.setMinimumSize(QSize(48 if tip != "Add" else 86, WaveToySizing.MIN_TOUCH_TARGET))
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda checked=False, item_id=self.item.id, cb=callback: cb(item_id))
+            layout.addWidget(button, 0, Qt.AlignRight | Qt.AlignBottom)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -2439,12 +2448,12 @@ class SpeechBinCard(QWidget):
 
         text_left = rect.left() + 72
         painter.setFont(QFont("Arial", 14, QFont.Bold))
-        painter.drawText(QRectF(text_left, rect.top() + 12, rect.width() - 160, 24), Qt.AlignLeft | Qt.AlignVCenter, self.item.name)
+        painter.drawText(QRectF(text_left, rect.top() + 12, rect.width() - 330, 24), Qt.AlignLeft | Qt.AlignVCenter, self.item.name)
         painter.setFont(QFont("Arial", 11, QFont.Bold))
         painter.setPen(QColor("#7b2cbf"))
-        painter.drawText(QRectF(text_left, rect.top() + 36, rect.width() - 150, 20), Qt.AlignLeft | Qt.AlignVCenter, f"{self.item.item_type} • {self.item.duration_seconds:.2f}s")
+        painter.drawText(QRectF(text_left, rect.top() + 36, rect.width() - 330, 20), Qt.AlignLeft | Qt.AlignVCenter, f"{self.item.item_type} • {self.item.duration_seconds:.2f}s")
         painter.setPen(QColor("#607d8b"))
-        painter.drawText(QRectF(text_left, rect.top() + 60, rect.width() - 150, 22), Qt.AlignLeft | Qt.AlignVCenter, self.item.display_sequence or self.item.ipa_sequence)
+        painter.drawText(QRectF(text_left, rect.top() + 60, rect.width() - 330, 22), Qt.AlignLeft | Qt.AlignVCenter, self.item.display_sequence or self.item.ipa_sequence)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -2477,10 +2486,22 @@ class SpeechBinCard(QWidget):
 
     def _show_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
+        preview_action = menu.addAction("▶ Preview")
+        rename_action = menu.addAction("✏ Rename")
+        duplicate_action = menu.addAction("⧉ Duplicate")
         add_action = menu.addAction("➕ Add to Timeline at Playhead")
+        delete_action = menu.addAction("🗑 Delete from Speech Bin")
         action = menu.exec(self.mapToGlobal(pos))
-        if action == add_action:
+        if action == preview_action:
+            self.owner._timeline_preview_speech_item(self.item.id)
+        elif action == rename_action:
+            self.owner._timeline_rename_speech_item(self.item.id)
+        elif action == duplicate_action:
+            self.owner._timeline_duplicate_speech_item(self.item.id)
+        elif action == add_action:
             self.owner._timeline_add_speech_item_to_playhead(self.item.id)
+        elif action == delete_action:
+            self.owner._timeline_delete_speech_item(self.item.id)
 
 
 class TimelineCanvas(QWidget):
@@ -4846,47 +4867,48 @@ class WaveToyWindow(QMainWindow):
         chain_hint.setObjectName("symbolHint")
         chain_hint.setWordWrap(True)
         chain_layout.addWidget(chain_hint)
-        chain_buttons = QHBoxLayout()
-        for icon, label, color, callback in (
-            ("➕", "Add Current", "#5cdb95", self._add_current_phoneme_to_chain),
-            ("➕", "Send Phoneme to Timeline", "#e7c6ff", self._send_current_phoneme_to_timeline),
-            ("🧩", "Create Word", "#ffd166", self._create_articulation_word),
-            ("🔡", "Create Syllable", "#caffbf", self._create_articulation_syllable),
-            ("➕", "Send Word to Timeline", "#ffc6ff", self._send_articulation_word_to_timeline),
-            ("▶", "Play Word", "#b8f2e6", self._play_articulation_word),
-            ("💾", "Export Word", "#fdffb6", self._export_articulation_word),
-            ("🧹", "Clear Chain", "#ffadad", self._clear_articulation_chain),
-        ):
-            button = self._make_story_button(icon, label, color, callback)
-            button.setMinimumHeight(66)
-            chain_buttons.addWidget(button)
-        chain_layout.addLayout(chain_buttons)
-        chain_file_buttons = QHBoxLayout()
-        for icon, label, color, callback in (
-            ("▶", "Play Chain", "#caffbf", self._play_articulation_chain),
-            ("➕", "Send Chain to Timeline", "#e7c6ff", self._send_articulation_chain_to_timeline),
-            ("💾", "Save Chain", "#ffd166", self._save_articulation_chain),
-            ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain),
-        ):
-            button = self._make_story_button(icon, label, color, callback)
-            button.setMinimumHeight(58)
-            chain_file_buttons.addWidget(button)
-        chain_layout.addLayout(chain_file_buttons)
-        self.articulation_word_status_label = QLabel("Create Word makes a smoothed render without changing the editable chain.")
+        primary_label = QLabel("⭐ Main path: Add Current → Create Word → Send Word to Timeline")
+        primary_label.setObjectName("symbolHint")
+        primary_label.setWordWrap(True)
+        chain_layout.addWidget(primary_label)
+
+        chain_sections = (
+            (
+                "✏️ Chain Editing",
+                (("➕", "Add Current", "#5cdb95", self._add_current_phoneme_to_chain, 76), ("🔡", "Create Syllable", "#caffbf", self._create_articulation_syllable, 58), ("🧹", "Clear Chain", "#ffadad", self._clear_articulation_chain, 58)),
+            ),
+            (
+                "🗣 Render Speech",
+                (("🧩", "Create Word", "#ffd166", self._create_articulation_word, 76), ("▶", "Play Word", "#b8f2e6", self._play_articulation_word, 58), ("▶", "Play Chain", "#caffbf", self._play_articulation_chain, 58), ("💾", "Export Word", "#fdffb6", self._export_articulation_word, 58)),
+            ),
+            (
+                "🎬 Send to Timeline",
+                (("➕", "Send Word to Timeline", "#ffc6ff", self._send_articulation_word_to_timeline, 76), ("➕", "Send Phoneme", "#e7c6ff", self._send_current_phoneme_to_timeline, 54), ("➕", "Send Chain", "#e7c6ff", self._send_articulation_chain_to_timeline, 54)),
+            ),
+            (
+                "💾 Save/Load",
+                (("💾", "Save Chain", "#ffd166", self._save_articulation_chain, 54), ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain, 54)),
+            ),
+            (
+                "🌊 Wave Source",
+                (("🌊", "Apply Wave to Selected", "#b8f2e6", self._apply_current_wave_to_selected_chain_item, 54), ("🌊", "Apply Wave to Whole Chain", "#caffbf", self._apply_current_wave_to_whole_chain, 54), ("♻", "Reset Selected", "#ffd166", self._reset_selected_chain_item_source, 54), ("♻", "Reset Whole Chain", "#ffadad", self._reset_whole_chain_source, 54)),
+            ),
+        )
+        for section_title, actions in chain_sections:
+            label = QLabel(section_title)
+            label.setObjectName("timelineInspectorText")
+            chain_layout.addWidget(label)
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            for icon, button_label, color, callback, height in actions:
+                button = self._make_story_button(icon, button_label, color, callback)
+                button.setMinimumHeight(height)
+                row.addWidget(button)
+            chain_layout.addLayout(row)
+        self.articulation_word_status_label = QLabel("Create Word makes a named Speech Bin card without changing the editable chain.")
         self.articulation_word_status_label.setObjectName("symbolHint")
         self.articulation_word_status_label.setWordWrap(True)
         chain_layout.addWidget(self.articulation_word_status_label)
-        chain_source_buttons = QHBoxLayout()
-        for icon, label, color, callback in (
-            ("🌊", "Apply Current Wave to Selected Phoneme", "#b8f2e6", self._apply_current_wave_to_selected_chain_item),
-            ("🌊", "Apply Current Wave to Whole Chain", "#caffbf", self._apply_current_wave_to_whole_chain),
-            ("♻", "Reset Selected", "#ffd166", self._reset_selected_chain_item_source),
-            ("♻", "Reset Whole Chain", "#ffadad", self._reset_whole_chain_source),
-        ):
-            button = self._make_story_button(icon, label, color, callback)
-            button.setMinimumHeight(58)
-            chain_source_buttons.addWidget(button)
-        chain_layout.addLayout(chain_source_buttons)
         self.articulation_chain_widget = QWidget()
         chain_layout.addWidget(self.articulation_chain_widget)
         left.addWidget(chain_card)
@@ -5602,8 +5624,7 @@ class WaveToyWindow(QMainWindow):
         word = self._fade_word_edges(word)
         return normalize_audio(word).astype(np.float32)
 
-    def _create_articulation_word(self, checked: bool = False) -> np.ndarray:
-        del checked
+    def _render_word_audio_for_current_chain(self) -> np.ndarray:
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Create Word", "Add at least one phoneme to the Articulation Chain first.")
             return np.zeros((0, 2), dtype=np.float32)
@@ -5611,19 +5632,31 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_created_at = time.time()
         self.articulation_last_word_render_path = None
         self._update_articulation_word_status()
-        word_item = self._create_rendered_speech_bin_item("word")
-        bin_text = f" Added to Speech Bin as {word_item.icon} {word_item.name}." if word_item is not None else ""
-        QMessageBox.information(
-            self,
-            "Create Word",
-            f"Word ready: {len(self.articulation_word_render_audio) / SAMPLE_RATE:.2f}s from {len(self.articulation_chain_items)} phoneme(s).{bin_text}",
-        )
         return self.articulation_word_render_audio
+
+    def _create_articulation_word(self, checked: bool = False) -> np.ndarray:
+        del checked
+        audio = self._render_word_audio_for_current_chain()
+        if audio.size == 0:
+            return audio
+        default_name = (self._speech_display_sequence_for_chain().replace(" + ", "").lower() or "word")
+        name, ok = QInputDialog.getText(self, "Create Word", "Name this Speech Bin word:", text=default_name)
+        if not ok:
+            name = default_name
+        name = name.strip() or default_name
+        word_item = self._create_rendered_speech_bin_item("word", name=name)
+        if word_item is not None:
+            self.timeline_selected_speech_item_id = word_item.id
+            self._timeline_refresh_speech_bin_cards()
+            message = f"Word ready: {word_item.name} • {word_item.duration_seconds:.2f}s • selected in Speech Bin."
+            self.articulation_word_status_label.setText(message)
+            self._timeline_debug(message)
+        return audio
 
     def _play_articulation_word(self, checked: bool = False) -> None:
         del checked
         if self.articulation_word_render_audio.size == 0:
-            audio = self._create_articulation_word(checked=False)
+            audio = self._render_word_audio_for_current_chain()
             if audio.size == 0:
                 return
         self._play_audio_array(self.articulation_word_render_audio)
@@ -5977,6 +6010,7 @@ class WaveToyWindow(QMainWindow):
             self._make_story_button("🎚", "Mix Story", "#ffd166", self._timeline_render_mix),
             self._make_story_button("➕", "Drop Sound", "#b8f2e6", self._drop_story_sound),
             self._make_story_button("🛤️", "Add Lane", "#d7b9ff", self._add_story_lane),
+            self._make_story_button("➕", "Add Voice Lane", "#ffc6ff", self._add_voice_lane),
             self._make_story_button("🔍", "Zoom In", "#caffbf", lambda checked=False: self._timeline_zoom(0.72)),
             self._make_story_button("🔎", "Zoom Out", "#ffc6ff", lambda checked=False: self._timeline_zoom(1.28)),
         ]
@@ -6023,22 +6057,34 @@ class WaveToyWindow(QMainWindow):
         self.timeline_palette_list_widget = QWidget()
         self.timeline_palette_list_widget.setObjectName("timelinePaletteList")
         palette_scroll.setWidget(self.timeline_palette_list_widget)
-        palette_layout.addWidget(palette_title)
-        palette_layout.addWidget(palette_subtitle)
-        palette_layout.addWidget(import_button)
-        palette_layout.addWidget(self.timeline_palette_count_label)
-        palette_layout.addWidget(palette_scroll, 1)
+        drawer_tabs = QTabWidget()
+        drawer_tabs.setObjectName("timelineDrawerTabs")
 
+        audio_page = QWidget()
+        audio_layout = QVBoxLayout(audio_page)
+        audio_layout.setContentsMargins(4, 4, 4, 4)
+        audio_layout.setSpacing(10)
+        audio_layout.addWidget(palette_title)
+        audio_layout.addWidget(palette_subtitle)
+        audio_layout.addWidget(import_button)
+        audio_layout.addWidget(self.timeline_palette_count_label)
+        audio_layout.addWidget(palette_scroll, 1)
+        drawer_tabs.addTab(audio_page, "🎧 Audio")
+
+        speech_page = QWidget()
+        speech_page_layout = QVBoxLayout(speech_page)
+        speech_page_layout.setContentsMargins(4, 4, 4, 4)
+        speech_page_layout.setSpacing(10)
         speech_title = QLabel("🗣 Speech Bin")
         speech_title.setObjectName("timelineInspectorTitle")
-        speech_subtitle = QLabel("Created phonemes, chains, syllables, and words appear here. Drag cards into lanes or tap ➕ Add.")
+        speech_subtitle = QLabel("Created phonemes, chains, syllables, and words appear here. Drag cards into voice lanes or tap ➕ Add.")
         speech_subtitle.setObjectName("timelineInspectorText")
         speech_subtitle.setWordWrap(True)
         speech_actions = QHBoxLayout()
         for icon, label, color, callback in (
             ("📥", "Add Created Word", "#ffd166", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("word")),
-            ("📥", "Add Created Syllable", "#e7c6ff", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("syllable")),
-            ("📥", "Add Chain", "#caffbf", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("chain")),
+            ("📥", "Add Syllable", "#e7c6ff", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("syllable")),
+            ("🧹", "Clear Bin", "#ffadad", self._timeline_clear_speech_bin),
         ):
             button = self._make_story_button(icon, label, color, callback)
             button.setMinimumHeight(58)
@@ -6050,11 +6096,13 @@ class WaveToyWindow(QMainWindow):
         self.timeline_speech_bin_widget = QWidget()
         self.timeline_speech_bin_widget.setObjectName("timelineSpeechBinList")
         speech_scroll.setWidget(self.timeline_speech_bin_widget)
-        palette_layout.addWidget(speech_title)
-        palette_layout.addWidget(speech_subtitle)
-        palette_layout.addLayout(speech_actions)
-        palette_layout.addWidget(self.timeline_speech_count_label)
-        palette_layout.addWidget(speech_scroll, 1)
+        speech_page_layout.addWidget(speech_title)
+        speech_page_layout.addWidget(speech_subtitle)
+        speech_page_layout.addLayout(speech_actions)
+        speech_page_layout.addWidget(self.timeline_speech_count_label)
+        speech_page_layout.addWidget(speech_scroll, 1)
+        drawer_tabs.addTab(speech_page, "🗣 Speech")
+        palette_layout.addWidget(drawer_tabs, 1)
         split.addWidget(palette)
         self._timeline_refresh_palette_cards()
         self._timeline_refresh_speech_bin_cards()
@@ -6198,7 +6246,7 @@ class WaveToyWindow(QMainWindow):
             QMessageBox.information(self, "Speech Bin", "Add at least one phoneme to the Articulation Chain first.")
             return None
         if self.articulation_word_render_audio.size == 0:
-            audio = self._create_articulation_word(checked=False)
+            audio = self._render_word_audio_for_current_chain()
             if audio.size == 0:
                 return None
         display = self._speech_display_sequence_for_chain()
@@ -6230,7 +6278,7 @@ class WaveToyWindow(QMainWindow):
     def _create_articulation_syllable(self, checked: bool = False) -> np.ndarray:
         del checked
         if self.articulation_word_render_audio.size == 0:
-            audio = self._create_articulation_word(checked=False)
+            audio = self._render_word_audio_for_current_chain()
             if audio.size == 0:
                 return audio
         item = self._create_rendered_speech_bin_item("syllable")
@@ -6332,6 +6380,98 @@ class WaveToyWindow(QMainWindow):
                 return item
         return None
 
+    def _timeline_preview_speech_item(self, item_id: int | None = None) -> None:
+        item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
+        if item is None:
+            QMessageBox.information(self, "Speech Bin", "Select a speech card to preview.")
+            return
+        audio, warning = self._speech_audio_for_item(item)
+        if audio.size == 0:
+            QMessageBox.warning(self, "Speech Bin Preview", warning or "That speech card could not render audio.")
+            return
+        self.timeline_selected_speech_item_id = item.id
+        self._timeline_refresh_speech_bin_cards()
+        self._play_audio_array(audio)
+        self._timeline_debug(f"Speech preview id={item.id} type={item.item_type} name={item.name} warning={warning}")
+
+    def _timeline_rename_speech_item(self, item_id: int | None = None) -> None:
+        item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
+        if item is None:
+            QMessageBox.information(self, "Speech Bin", "Select a speech card to rename.")
+            return
+        name, ok = QInputDialog.getText(self, "Rename Speech Card", "Speech card name:", text=item.name)
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.information(self, "Speech Bin", "Speech card names cannot be blank.")
+            return
+        item.name = name
+        self.timeline_selected_speech_item_id = item.id
+        self._timeline_refresh_speech_bin_cards()
+        self._timeline_debug(f"Speech item renamed id={item.id} name={item.name}")
+
+    def _timeline_duplicate_speech_item(self, item_id: int | None = None) -> None:
+        item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
+        if item is None:
+            QMessageBox.information(self, "Speech Bin", "Select a speech card to duplicate.")
+            return
+        audio, warning = self._speech_audio_for_item(item)
+        if audio.size == 0:
+            QMessageBox.warning(self, "Speech Bin", warning or "That speech card could not be duplicated because it has no audio.")
+            return
+        duplicate = self._add_speech_bin_item(
+            name=f"{item.name} Copy",
+            item_type=item.item_type,
+            audio=audio,
+            ipa_sequence=item.ipa_sequence,
+            display_sequence=item.display_sequence,
+            articulation_metadata=json.loads(json.dumps(item.articulation_metadata)),
+            source_mode=item.source_mode,
+        )
+        if duplicate is not None:
+            self._timeline_debug(f"Speech item duplicated source_id={item.id} duplicate_id={duplicate.id}")
+
+    def _timeline_delete_speech_item(self, item_id: int | None = None) -> None:
+        item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
+        if item is None:
+            QMessageBox.information(self, "Speech Bin", "Select a speech card to delete.")
+            return
+        response = QMessageBox.question(
+            self,
+            "Delete Speech Card",
+            f"Delete '{item.name}' from the Speech Bin? Existing Timeline clips stay in the arrangement.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        self.timeline_speech_bin = [existing for existing in self.timeline_speech_bin if existing.id != item.id]
+        if self.timeline_selected_speech_item_id == item.id:
+            self.timeline_selected_speech_item_id = None
+        self._timeline_refresh_speech_bin_cards()
+        self._timeline_debug(f"Speech item deleted id={item.id}; timeline clips preserved")
+
+    def _timeline_clear_speech_bin(self, checked: bool = False) -> None:
+        del checked
+        if not self.timeline_speech_bin:
+            QMessageBox.information(self, "Speech Bin", "The Speech Bin is already empty.")
+            return
+        response = QMessageBox.question(
+            self,
+            "Clear Speech Bin",
+            "Clear all Speech Bin source cards? Existing Timeline clips stay in the arrangement.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        count = len(self.timeline_speech_bin)
+        self.timeline_speech_bin.clear()
+        self.timeline_selected_speech_item_id = None
+        self._timeline_refresh_speech_bin_cards()
+        self._timeline_debug(f"Speech Bin cleared count={count}; timeline clips preserved")
+
     def _rerender_speech_item_from_metadata(self, item: SpeechBinItem) -> np.ndarray:
         metadata = item.articulation_metadata or {}
         try:
@@ -6359,6 +6499,10 @@ class WaveToyWindow(QMainWindow):
             return np.zeros((0, 2), dtype=np.float32)
 
     def _speech_audio_for_item(self, item: SpeechBinItem) -> Tuple[np.ndarray, str | None]:
+        cache_missing = not item.audio_cache_path or not Path(item.audio_cache_path).exists()
+        if item.audio_data.size and cache_missing:
+            item.audio_cache_path = self._speech_cache_audio(item.audio_data, item.item_type, item.id)
+            self._timeline_debug(f"Speech cache restored from in-memory audio id={item.id} cache={item.audio_cache_path}")
         if item.audio_data.size:
             return np.array(item.audio_data, dtype=np.float32, copy=True), None
         if item.audio_cache_path:
@@ -6370,13 +6514,14 @@ class WaveToyWindow(QMainWindow):
                     return item.audio_data, None
             except Exception as exc:
                 self._timeline_debug(f"Speech cache load failed id={item.id} path={item.audio_cache_path} error={exc}")
+        self._timeline_debug(f"Speech cache missing; attempting metadata re-render id={item.id} type={item.item_type}")
         rerendered = self._rerender_speech_item_from_metadata(item)
         if rerendered.size:
             item.audio_data = np.array(rerendered, dtype=np.float32, copy=True)
             if not item.audio_cache_path or not Path(item.audio_cache_path).exists():
                 item.audio_cache_path = self._speech_cache_audio(item.audio_data, item.item_type, item.id)
             return item.audio_data, None
-        return np.zeros((0, 2), dtype=np.float32), "Missing speech audio cache and articulation metadata could not be re-rendered."
+        return np.zeros((0, 2), dtype=np.float32), "Missing speech audio cache and articulation metadata could not be re-rendered; clip is visible but muted."
 
     def _timeline_add_first_speech_type_to_playhead(self, item_type: str) -> None:
         item = next((candidate for candidate in reversed(self.timeline_speech_bin) if candidate.item_type == item_type), None)
@@ -6391,7 +6536,7 @@ class WaveToyWindow(QMainWindow):
         if item is None:
             QMessageBox.information(self, "Speech Bin", "Select or create a speech card first.")
             return
-        self._timeline_add_speech_item_to_timeline(item.id, self.timeline_playhead_seconds, 0)
+        self._timeline_add_speech_item_to_timeline(item.id, self.timeline_playhead_seconds, self._first_voice_lane_index())
 
     def _timeline_add_speech_item_to_timeline(self, item_id: int, start_time_seconds: float, lane: int) -> None:
         item = self._timeline_speech_item_by_id(item_id)
@@ -6536,6 +6681,19 @@ class WaveToyWindow(QMainWindow):
             self.timeline_canvas.update()
         self._timeline_debug(f"Lane added index={self.timeline_lane_count - 1} name={name}")
 
+    def _add_voice_lane(self, checked: bool = False) -> None:
+        del checked
+        if not any(name == "🗣 Voice Lane" for name in self.timeline_lane_names):
+            self._add_story_lane(icon="🗣", label="Voice Lane")
+            return
+        self._timeline_debug("Voice Lane already exists")
+
+    def _first_voice_lane_index(self) -> int:
+        for index, name in enumerate(self.timeline_lane_names):
+            if name == "🗣 Voice Lane" or "Voice Lane" in name:
+                return index
+        return 0
+
     def _add_story_clip(self, lane_layout: QHBoxLayout, icon: str, name: str, duration: str, wave_type: str, color: str) -> None:
         # Kept for compatibility with older storyboard code paths; the active timeline uses TimelineClip objects.
         pass
@@ -6632,9 +6790,15 @@ class WaveToyWindow(QMainWindow):
             return
         source_text = f"\nSource: {clip.source_type}"
         if clip.speech_metadata:
-            source_text += f"\nSpeech: {clip.speech_metadata.get('item_type', 'speech')} • {clip.speech_metadata.get('display_sequence', '')}"
-            if clip.speech_metadata.get("audio_cache_path"):
-                source_text += f"\nCache: {clip.speech_metadata.get('audio_cache_path')}"
+            cache_path = str(clip.speech_metadata.get("audio_cache_path") or "")
+            cache_status = "cached" if cache_path and Path(cache_path).exists() else "missing / will re-render if needed"
+            source_text += (
+                f"\nSpeech type: {clip.speech_metadata.get('item_type', 'speech')}"
+                f"\nPhoneme sequence: {clip.speech_metadata.get('display_sequence', '')}"
+                f"\nIPA: {clip.speech_metadata.get('ipa_sequence', '')}"
+                f"\nCache status: {cache_status}"
+                f"\nArticulation source mode: {clip.speech_metadata.get('source_mode', 'unknown')}"
+            )
         if clip.muted_warning:
             source_text += f"\nWarning: {clip.muted_warning}"
         self.timeline_inspector_label.setText(
