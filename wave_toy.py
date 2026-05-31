@@ -119,6 +119,9 @@ ARTICULATION_TRANSITION_RULE_MS = {
 }
 ARTICULATION_DEFAULT_TRANSITION_MS = 35
 ARTICULATION_MOTION_FRAME_MS = 5
+ARTICULATION_MIN_WORD_CROSSFADE_MS = 12
+ARTICULATION_DEFAULT_WORD_CROSSFADE_MS = 24
+
 
 
 def articulation_source_badge(source_mode: str, source_wave_id: str | None = None, source_audio_path: str | None = None) -> str:
@@ -577,7 +580,7 @@ class ArticulationChainItem:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     duration_ms: int | None = None
     gap_after_ms: int = 0
-    crossfade_ms: int = 12
+    crossfade_ms: int = ARTICULATION_DEFAULT_WORD_CROSSFADE_MS
     transition_ms: int | None = None
 
     def __post_init__(self) -> None:
@@ -628,7 +631,7 @@ class ArticulationChainItem:
             id=str(data.get("id") or uuid.uuid4().hex),
             duration_ms=duration_ms,
             gap_after_ms=int(data.get("gap_after_ms", 0)),
-            crossfade_ms=int(data.get("crossfade_ms", 12)),
+            crossfade_ms=int(data.get("crossfade_ms", ARTICULATION_DEFAULT_WORD_CROSSFADE_MS)),
             transition_ms=int(data["transition_ms"]) if data.get("transition_ms") is not None else None,
         )
 
@@ -4108,6 +4111,10 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_total_ms = 0
         self.articulation_motion_loop = False
         self.articulation_motion_speed = 1.0
+        self.word_motion_start_monotonic: float | None = None
+        self.word_motion_duration_seconds = 0.0
+        self.word_motion_timeline_total_ms = 1
+        self.word_motion_play_audio = False
         self.articulation_word_status_label: QLabel | None = None
         self.articulation_chain_path = Path("articulation_chain.json")
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
@@ -4115,7 +4122,9 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_created_at: float | None = None
         self.articulation_word_render_settings: Dict[str, object] = {
             "gap_after_ms": 0,
-            "crossfade_ms": 12,
+            "crossfade_ms": ARTICULATION_DEFAULT_WORD_CROSSFADE_MS,
+            "minimum_crossfade_ms": ARTICULATION_MIN_WORD_CROSSFADE_MS,
+            "allow_word_gaps": False,
             "boundary_smoothing_ms": 8,
             "smooth_mouth_transitions": True,
             "word_fade_in_ms": 5,
@@ -5145,16 +5154,16 @@ class WaveToyWindow(QMainWindow):
         motion_buttons = QHBoxLayout()
         motion_buttons.setSpacing(8)
         for icon, label, color, callback in (
-            ("▶", "Play Motion", "#b8f2e6", self._play_articulation_motion),
+            ("▶", "Play Word Motion", "#b8f2e6", self._play_articulation_motion),
             ("🔁", "Loop Motion", "#caffbf", self._loop_articulation_motion),
             ("⏹", "Stop Motion", "#ffadad", self._stop_articulation_motion),
-            ("🐢", "Slow Motion", "#ffd6a5", self._slow_articulation_motion),
+            ("🐢", "Slow Motion Visual Only", "#ffd6a5", self._slow_articulation_motion),
         ):
             button = self._make_story_button(icon, label, color, callback)
             button.setMinimumHeight(54)
             motion_buttons.addWidget(button)
         motion_layout.addLayout(motion_buttons)
-        self.articulation_motion_status_label = QLabel("Motion idle • add chain phonemes, then use Play Motion or Play Word.")
+        self.articulation_motion_status_label = QLabel("Motion idle • add chain phonemes, then use Play Word Motion or Play Word.")
         self.articulation_motion_status_label.setObjectName("symbolHint")
         self.articulation_motion_status_label.setWordWrap(True)
         motion_layout.addWidget(self.articulation_motion_status_label)
@@ -5790,7 +5799,7 @@ class WaveToyWindow(QMainWindow):
         right_family = right.phoneme_for_render().phoneme_family
         return int(ARTICULATION_TRANSITION_RULE_MS.get((left_family, right_family), ARTICULATION_DEFAULT_TRANSITION_MS))
 
-    def _articulation_motion_timeline(self) -> Tuple[List[Dict[str, object]], int]:
+    def _articulation_motion_timeline(self, include_word_gaps: bool = False) -> Tuple[List[Dict[str, object]], int]:
         segments: List[Dict[str, object]] = []
         cursor = 0
         for index, item in enumerate(self.articulation_chain_items):
@@ -5805,7 +5814,7 @@ class WaveToyWindow(QMainWindow):
                 next_phoneme = self.articulation_chain_items[index + 1].phoneme_for_render()
                 segments.append({"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme})
                 cursor += transition_ms
-            gap_ms = max(0, int(item.gap_after_ms)) if index < len(self.articulation_chain_items) - 1 else 0
+            gap_ms = max(0, int(item.gap_after_ms)) if include_word_gaps and index < len(self.articulation_chain_items) - 1 else 0
             if gap_ms:
                 segments.append({"kind": "gap", "index": index, "start": cursor, "end": cursor + gap_ms, "from": phoneme, "to": phoneme})
                 cursor += gap_ms
@@ -5864,34 +5873,58 @@ class WaveToyWindow(QMainWindow):
                 f"Motion {current_name} → {next_name} • transition {int(transition_progress * 100)}% • playhead {int(playhead * 100)}%"
             )
 
-    def _start_articulation_motion(self, *, loop: bool = False, speed: float = 1.0) -> None:
+    def _start_articulation_motion(self, *, loop: bool = False, speed: float = 1.0, audio: np.ndarray | None = None) -> None:
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Word Motion Preview", "Add at least one phoneme to the Articulation Chain first.")
             return
         self.articulation_motion_loop = bool(loop)
         self.articulation_motion_speed = max(0.05, float(speed))
-        _segments, total_ms = self._articulation_motion_timeline()
-        self.articulation_motion_total_ms = total_ms
-        self.articulation_motion_started_at = time.monotonic()
+        self.word_motion_play_audio = audio is not None and audio.size > 0 and abs(self.articulation_motion_speed - 1.0) < 1e-6
+        _segments, timeline_total_ms = self._articulation_motion_timeline(include_word_gaps=False)
+        self.word_motion_timeline_total_ms = max(1, int(timeline_total_ms))
+        if audio is not None and audio.size > 0:
+            self.word_motion_duration_seconds = max(0.001, len(audio) / SAMPLE_RATE) / self.articulation_motion_speed
+        else:
+            self.word_motion_duration_seconds = max(0.001, self.word_motion_timeline_total_ms / 1000.0) / self.articulation_motion_speed
+        self.articulation_motion_total_ms = max(1, int(round(self.word_motion_duration_seconds * 1000.0)))
+        self.word_motion_start_monotonic = time.monotonic()
+        self.articulation_motion_started_at = self.word_motion_start_monotonic
+        if self.word_motion_play_audio and audio is not None:
+            self._play_audio_array(audio)
         self._refresh_articulation_motion_timeline()
         self.articulation_motion_timer.start(16)
         self._articulation_motion_tick()
 
+    def _current_gapless_word_audio(self) -> np.ndarray:
+        if self.articulation_word_render_audio.size == 0:
+            return self._render_word_audio_for_current_chain()
+        return self.articulation_word_render_audio
+
     def _play_articulation_motion(self, checked: bool = False) -> None:
         del checked
-        self._start_articulation_motion(loop=False, speed=1.0)
+        audio = self._current_gapless_word_audio()
+        if audio.size == 0:
+            return
+        self._start_articulation_motion(loop=False, speed=1.0, audio=audio)
 
     def _loop_articulation_motion(self, checked: bool = False) -> None:
         del checked
-        self._start_articulation_motion(loop=True, speed=1.0)
+        audio = self._current_gapless_word_audio()
+        if audio.size == 0:
+            return
+        self._start_articulation_motion(loop=True, speed=1.0, audio=audio)
 
     def _slow_articulation_motion(self, checked: bool = False) -> None:
         del checked
-        self._start_articulation_motion(loop=False, speed=0.35)
+        self._start_articulation_motion(loop=False, speed=0.35, audio=None)
+        if self.articulation_motion_status_label is not None:
+            self.articulation_motion_status_label.setText("Slow Motion Visual Only • audio is not time-stretched.")
 
     def _stop_articulation_motion(self, checked: bool = False) -> None:
         del checked
         self.articulation_motion_started_at = None
+        self.word_motion_start_monotonic = None
+        self.word_motion_play_audio = False
         self.articulation_motion_timer.stop()
         if sd is not None:
             try:
@@ -5899,7 +5932,7 @@ class WaveToyWindow(QMainWindow):
             except Exception:
                 pass
         if self.articulation_motion_status_label is not None:
-            self.articulation_motion_status_label.setText("Motion stopped.")
+            self.articulation_motion_status_label.setText("Motion stopped • audio stopped.")
 
     def _articulation_motion_tick(self) -> None:
         if self.articulation_motion_started_at is None or self.articulation_motion_total_ms <= 0:
@@ -5909,12 +5942,18 @@ class WaveToyWindow(QMainWindow):
         if elapsed_ms >= self.articulation_motion_total_ms:
             if self.articulation_motion_loop:
                 self.articulation_motion_started_at = time.monotonic()
+                self.word_motion_start_monotonic = self.articulation_motion_started_at
                 elapsed_ms = 0.0
+                if self.word_motion_play_audio and self.articulation_word_render_audio.size:
+                    self._play_audio_array(self.articulation_word_render_audio)
             else:
                 elapsed_ms = float(self.articulation_motion_total_ms)
                 self.articulation_motion_timer.stop()
                 self.articulation_motion_started_at = None
-        self._set_articulation_motion_elapsed(elapsed_ms)
+                self.word_motion_start_monotonic = None
+        progress = 0.0 if self.articulation_motion_total_ms <= 0 else float(np.clip(elapsed_ms / self.articulation_motion_total_ms, 0.0, 1.0))
+        timeline_elapsed_ms = progress * float(max(1, self.word_motion_timeline_total_ms))
+        self._set_articulation_motion_elapsed(timeline_elapsed_ms)
 
     def _mark_articulation_word_dirty(self) -> None:
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
@@ -5944,18 +5983,33 @@ class WaveToyWindow(QMainWindow):
         left_family = left.phoneme_for_render().phoneme_family
         right_family = right.phoneme_for_render().phoneme_family
         if left_family == "stop" and right_family == "vowel":
-            return 4
+            return 8
         if left_family in {"fricative", "affricate"} and right_family == "vowel":
-            return 18
-        if left_family == "nasal" and right_family == "vowel":
-            return 22
-        if left_family in {"glide", "liquid"} and right_family == "vowel":
-            return 28
-        if left_family == "vowel" and right_family != "vowel":
-            return 10
-        if left_family == "vowel" and right_family == "vowel":
             return 30
-        return int(self.articulation_word_render_settings.get("crossfade_ms", 12))
+        if left_family == "nasal" and right_family == "vowel":
+            return 40
+        if left_family in {"glide", "liquid"} and right_family == "vowel":
+            return 55
+        if left_family == "vowel" and right_family == "vowel":
+            return 60
+        if left_family == "vowel" and right_family != "vowel":
+            return ARTICULATION_DEFAULT_WORD_CROSSFADE_MS
+        return int(self.articulation_word_render_settings.get("crossfade_ms", ARTICULATION_DEFAULT_WORD_CROSSFADE_MS))
+
+    def _word_crossfade_ms(self, requested_ms: int, left: ArticulationChainItem | None = None, right: ArticulationChainItem | None = None) -> int:
+        rule_ms = self._chain_boundary_crossfade_ms(left, right) if left is not None and right is not None else ARTICULATION_DEFAULT_WORD_CROSSFADE_MS
+        requested_ms = int(requested_ms)
+        if requested_ms <= 0 or requested_ms in {12, ARTICULATION_DEFAULT_WORD_CROSSFADE_MS}:
+            requested_ms = rule_ms
+        minimum_ms = int(self.articulation_word_render_settings.get("minimum_crossfade_ms", ARTICULATION_MIN_WORD_CROSSFADE_MS))
+        return max(minimum_ms, requested_ms)
+
+    def _word_gap_after_ms(self, item: ArticulationChainItem, index: int) -> int:
+        requested = int(item.gap_after_ms) if index < len(self.articulation_chain_items) - 1 else 0
+        if requested > 0 and not bool(self.articulation_word_render_settings.get("allow_word_gaps", False)):
+            print(f"[WaveToy Word] requested gap ignored after {item.phoneme.name}: {requested} ms")
+            return 0
+        return max(0, requested)
 
     def _fade_word_edges(self, audio: np.ndarray) -> np.ndarray:
         if audio.size == 0:
@@ -5995,19 +6049,20 @@ class WaveToyWindow(QMainWindow):
 
     def _append_word_clip(self, word: np.ndarray, clip: np.ndarray, crossfade_ms: int, gap_after_ms: int, boundaries: List[int]) -> np.ndarray:
         if clip.size == 0:
-            return word
+            return word.astype(np.float32)
         clip = np.array(clip, dtype=np.float32, copy=True)
-        clip = self._fade_word_edges(clip)
         if word.size == 0:
             combined = clip
         else:
             crossfade = int(max(0, crossfade_ms) * SAMPLE_RATE / 1000.0)
-            crossfade = min(crossfade, len(word), len(clip), int(0.40 * min(len(word), len(clip))))
+            crossfade = min(crossfade, len(word) - 1, len(clip) - 1, int(0.50 * min(len(word), len(clip))))
             if crossfade > 1:
                 fade_out = np.linspace(1.0, 0.0, crossfade, dtype=np.float32)[:, None]
                 fade_in = np.linspace(0.0, 1.0, crossfade, dtype=np.float32)[:, None]
                 overlap = word[-crossfade:] * fade_out + clip[:crossfade] * fade_in
-                boundaries.append(len(word) - crossfade // 2)
+                boundary = len(word) - crossfade // 2
+                boundaries.append(boundary)
+                print(f"[WaveToy Word] boundary crossfade duration {crossfade * 1000.0 / SAMPLE_RATE:.1f} ms at sample {boundary}")
                 combined = np.vstack([word[:-crossfade], overlap, clip[crossfade:]])
             else:
                 boundaries.append(len(word))
@@ -6020,19 +6075,21 @@ class WaveToyWindow(QMainWindow):
     def _render_articulation_word_simple(self) -> np.ndarray:
         word = np.zeros((0, 2), dtype=np.float32)
         boundaries: List[int] = []
+        print(f"[WaveToy Word] word render started • mode simple • phoneme count {len(self.articulation_chain_items)}")
         for index, item in enumerate(self.articulation_chain_items):
             clip = self._render_articulation_with_source(item.phoneme_for_render())
-            gap_after_ms = int(item.gap_after_ms)
-            if index >= len(self.articulation_chain_items) - 1:
-                gap_after_ms = 0
-                crossfade_ms = int(item.crossfade_ms)
+            gap_after_ms = self._word_gap_after_ms(item, index)
+            if index < len(self.articulation_chain_items) - 1:
+                crossfade_ms = self._word_crossfade_ms(int(item.crossfade_ms), item, self.articulation_chain_items[index + 1])
             else:
-                rule_ms = self._chain_boundary_crossfade_ms(item, self.articulation_chain_items[index + 1])
-                crossfade_ms = int(item.crossfade_ms) if item.crossfade_ms != 12 else rule_ms
+                crossfade_ms = 0
             word = self._append_word_clip(word, clip, crossfade_ms, gap_after_ms, boundaries)
         word = self._smooth_word_boundaries(word, boundaries)
         word = self._fade_word_edges(word)
-        return normalize_audio(word).astype(np.float32)
+        word = normalize_audio(word).astype(np.float32)
+        self._diagnose_word_boundaries(word, boundaries)
+        print(f"[WaveToy Word] final word duration {len(word) / SAMPLE_RATE:.3f} s")
+        return word
 
     def _render_interpolated_transition_clip(self, left: ArticulationChainItem, right: ArticulationChainItem, transition_ms: int) -> np.ndarray:
         transition_ms = int(np.clip(transition_ms, 0, 250))
@@ -6057,22 +6114,51 @@ class WaveToyWindow(QMainWindow):
         transition = np.vstack(clips).astype(np.float32)
         target_samples = max(1, int(transition_ms * SAMPLE_RATE / 1000.0))
         transition = transition[:target_samples]
-        return self._fade_word_edges(transition)
+        return transition.astype(np.float32)
+
+    def _diagnose_word_boundaries(self, audio: np.ndarray, boundaries: List[int]) -> None:
+        if audio.size == 0 or not boundaries:
+            return
+        threshold = 1.0e-4
+        minimum_silent = max(1, int(0.005 * SAMPLE_RATE))
+        radius = max(minimum_silent, int(0.012 * SAMPLE_RATE))
+        envelope = np.max(np.abs(audio), axis=1)
+        for boundary in boundaries:
+            start = max(0, int(boundary) - radius)
+            end = min(len(envelope), int(boundary) + radius)
+            if end <= start:
+                continue
+            silent = envelope[start:end] <= threshold
+            longest = current = 0
+            for value in silent:
+                if bool(value):
+                    current += 1
+                    longest = max(longest, current)
+                else:
+                    current = 0
+            if longest > minimum_silent:
+                print(f"[WaveToy Word] detected silent boundary region {longest * 1000.0 / SAMPLE_RATE:.1f} ms near sample {boundary}")
 
     def _render_articulation_word_coarticulated(self) -> np.ndarray:
         word = np.zeros((0, 2), dtype=np.float32)
         boundaries: List[int] = []
+        print(f"[WaveToy Word] word render started • mode coarticulated • phoneme count {len(self.articulation_chain_items)}")
         for index, item in enumerate(self.articulation_chain_items):
             clip = self._render_articulation_with_source(item.phoneme_for_render())
-            word = self._append_word_clip(word, clip, 0 if index == 0 else 6, 0, boundaries)
+            phoneme_crossfade_ms = 0 if index == 0 else self._word_crossfade_ms(ARTICULATION_DEFAULT_WORD_CROSSFADE_MS)
+            word = self._append_word_clip(word, clip, phoneme_crossfade_ms, 0, boundaries)
             if index < len(self.articulation_chain_items) - 1:
                 next_item = self.articulation_chain_items[index + 1]
                 transition_ms = self._chain_transition_duration_ms(item, next_item)
                 transition = self._render_interpolated_transition_clip(item, next_item, transition_ms)
-                word = self._append_word_clip(word, transition, min(12, max(4, transition_ms // 2)), int(item.gap_after_ms), boundaries)
+                transition_crossfade_ms = self._word_crossfade_ms(self._chain_boundary_crossfade_ms(item, next_item), item, next_item)
+                word = self._append_word_clip(word, transition, transition_crossfade_ms, self._word_gap_after_ms(item, index), boundaries)
         word = self._smooth_word_boundaries(word, boundaries)
         word = self._fade_word_edges(word)
-        return normalize_audio(word).astype(np.float32)
+        word = normalize_audio(word).astype(np.float32)
+        self._diagnose_word_boundaries(word, boundaries)
+        print(f"[WaveToy Word] final word duration {len(word) / SAMPLE_RATE:.3f} s")
+        return word
 
     def _render_articulation_word(self) -> np.ndarray:
         if self._articulation_smooth_transitions_enabled():
@@ -6114,8 +6200,7 @@ class WaveToyWindow(QMainWindow):
             audio = self._render_word_audio_for_current_chain()
             if audio.size == 0:
                 return
-        self._play_audio_array(self.articulation_word_render_audio)
-        self._start_articulation_motion(loop=False, speed=1.0)
+        self._start_articulation_motion(loop=False, speed=1.0, audio=self.articulation_word_render_audio)
 
     def _export_articulation_word(self, checked: bool = False) -> None:
         del checked
