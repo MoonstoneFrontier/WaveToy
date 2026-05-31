@@ -36,8 +36,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import wave
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -448,16 +449,79 @@ class ArticulationPhoneme:
 
 @dataclass
 class ArticulationChainItem:
-    """One phoneme in an Articulation Chain with optional waveform source metadata."""
+    """One editable phoneme card in an Articulation Chain."""
 
     phoneme: ArticulationPhoneme
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    duration_ms: int | None = None
+    gap_after_ms: int = 0
+    crossfade_ms: int = 12
+
+    def __post_init__(self) -> None:
+        self.phoneme = self.phoneme.clamped()
+        if self.duration_ms is None:
+            self.duration_ms = self.phoneme.duration_ms
+        self.duration_ms = int(np.clip(int(self.duration_ms), 80, 5000))
+        self.gap_after_ms = int(np.clip(int(self.gap_after_ms), 0, 2000))
+        self.crossfade_ms = int(np.clip(int(self.crossfade_ms), 0, 250))
+
+    def phoneme_for_render(self) -> ArticulationPhoneme:
+        data = self.phoneme.to_json_dict()
+        data["duration_ms"] = int(self.duration_ms or self.phoneme.duration_ms)
+        return ArticulationPhoneme.from_json_dict(data)
 
     def to_json_dict(self) -> Dict[str, object]:
-        return self.phoneme.to_json_dict()
+        phoneme = self.phoneme_for_render()
+        data = phoneme.to_json_dict()
+        data.update(
+            {
+                "id": self.id,
+                "phoneme_name": phoneme.name,
+                "ipa": phoneme.ipa,
+                "articulation_snapshot": phoneme.to_json_dict(),
+                "duration_ms": int(self.duration_ms or phoneme.duration_ms),
+                "gap_after_ms": int(self.gap_after_ms),
+                "crossfade_ms": int(self.crossfade_ms),
+                "source_mode": phoneme.source_mode,
+                "source_wave_id": phoneme.source_wave_id,
+                "source_recipe_snapshot": phoneme.source_recipe_snapshot or {},
+                "source_audio_path": phoneme.source_audio_path,
+            }
+        )
+        return data
 
     @classmethod
     def from_json_dict(cls, data: Dict[str, object]) -> "ArticulationChainItem":
-        return cls(ArticulationPhoneme.from_json_dict(data))
+        snapshot = data.get("articulation_snapshot")
+        phoneme_data = snapshot if isinstance(snapshot, dict) else data
+        phoneme = ArticulationPhoneme.from_json_dict(phoneme_data)
+        duration_ms = int(data.get("duration_ms", phoneme.duration_ms))
+        phoneme.duration_ms = duration_ms
+        return cls(
+            phoneme=phoneme,
+            id=str(data.get("id") or uuid.uuid4().hex),
+            duration_ms=duration_ms,
+            gap_after_ms=int(data.get("gap_after_ms", 0)),
+            crossfade_ms=int(data.get("crossfade_ms", 12)),
+        )
+
+
+@dataclass
+class ArticulationChain:
+    """Serializable articulation-chain metadata, including the latest word render."""
+
+    items: List[ArticulationChainItem] = field(default_factory=list)
+    last_word_render_path: str | None = None
+    last_word_render_created_at: float | None = None
+    word_render_settings: Dict[str, object] = field(default_factory=dict)
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "items": [item.to_json_dict() for item in self.items],
+            "last_word_render_path": self.last_word_render_path,
+            "last_word_render_created_at": self.last_word_render_created_at,
+            "word_render_settings": self.word_render_settings,
+        }
 
 
 VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
@@ -3655,7 +3719,18 @@ class WaveToyWindow(QMainWindow):
         self.articulation_chain_items: List[ArticulationChainItem] = []
         self.articulation_selected_chain_index: int | None = None
         self.articulation_chain_widget: QWidget | None = None
+        self.articulation_word_status_label: QLabel | None = None
         self.articulation_chain_path = Path("articulation_chain.json")
+        self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_last_word_render_path: Path | None = None
+        self.articulation_last_word_render_created_at: float | None = None
+        self.articulation_word_render_settings: Dict[str, object] = {
+            "gap_after_ms": 0,
+            "crossfade_ms": 12,
+            "boundary_smoothing_ms": 8,
+            "word_fade_in_ms": 5,
+            "word_fade_out_ms": 8,
+        }
         self.phoneme_cards_widget: QWidget | None = None
         self.phoneme_drawer_stack: QStackedWidget | None = None
         self.phoneme_drawer_buttons: Dict[str, QPushButton] = {}
@@ -4614,15 +4689,30 @@ class WaveToyWindow(QMainWindow):
         chain_layout.addWidget(chain_hint)
         chain_buttons = QHBoxLayout()
         for icon, label, color, callback in (
-            ("➕", "Add Phoneme", "#5cdb95", self._add_current_phoneme_to_chain),
-            ("▶", "Play Chain", "#b8f2e6", self._play_articulation_chain),
+            ("➕", "Add Current", "#5cdb95", self._add_current_phoneme_to_chain),
+            ("🧩", "Create Word", "#ffd166", self._create_articulation_word),
+            ("▶", "Play Word", "#b8f2e6", self._play_articulation_word),
+            ("💾", "Export Word", "#fdffb6", self._export_articulation_word),
+            ("🧹", "Clear Chain", "#ffadad", self._clear_articulation_chain),
+        ):
+            button = self._make_story_button(icon, label, color, callback)
+            button.setMinimumHeight(66)
+            chain_buttons.addWidget(button)
+        chain_layout.addLayout(chain_buttons)
+        chain_file_buttons = QHBoxLayout()
+        for icon, label, color, callback in (
+            ("▶", "Play Chain", "#caffbf", self._play_articulation_chain),
             ("💾", "Save Chain", "#ffd166", self._save_articulation_chain),
             ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain),
         ):
             button = self._make_story_button(icon, label, color, callback)
             button.setMinimumHeight(58)
-            chain_buttons.addWidget(button)
-        chain_layout.addLayout(chain_buttons)
+            chain_file_buttons.addWidget(button)
+        chain_layout.addLayout(chain_file_buttons)
+        self.articulation_word_status_label = QLabel("Create Word makes a smoothed render without changing the editable chain.")
+        self.articulation_word_status_label.setObjectName("symbolHint")
+        self.articulation_word_status_label.setWordWrap(True)
+        chain_layout.addWidget(self.articulation_word_status_label)
         chain_source_buttons = QHBoxLayout()
         for icon, label, color, callback in (
             ("🌊", "Apply Current Wave to Selected Phoneme", "#b8f2e6", self._apply_current_wave_to_selected_chain_item),
@@ -5053,7 +5143,7 @@ class WaveToyWindow(QMainWindow):
         if layout is None:
             layout = QVBoxLayout(self.articulation_chain_widget)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(6)
+            layout.setSpacing(8)
         else:
             while layout.count():
                 item = layout.takeAt(0)
@@ -5061,20 +5151,74 @@ class WaveToyWindow(QMainWindow):
                 if widget is not None:
                     widget.deleteLater()
         if not self.articulation_chain_items:
-            empty = QLabel("No chain yet. Add phonemes, then assign waveform sources per card or to the whole chain.")
+            empty = QLabel("No chain yet. Add phonemes, then use 🧩 Create Word for a smoothed word render.")
             empty.setObjectName("symbolHint")
             empty.setWordWrap(True)
             layout.addWidget(empty)
+            self._update_articulation_word_status()
             return
         for index, item in enumerate(self.articulation_chain_items):
-            phoneme = item.phoneme.clamped()
-            button = QPushButton(f"{index + 1}. {phoneme.name} /{phoneme.ipa}/  •  {articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)}")
-            button.setCheckable(True)
-            button.setChecked(index == self.articulation_selected_chain_index)
-            button.setObjectName("phonemeCardSecondaryAction")
+            layout.addWidget(self._make_articulation_chain_card(index, item))
+        self._update_articulation_word_status()
+
+    def _make_articulation_chain_card(self, index: int, item: ArticulationChainItem) -> QWidget:
+        phoneme = item.phoneme_for_render().clamped()
+        card = QWidget()
+        card.setObjectName("phonemeCard")
+        card.setMinimumHeight(118)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        selected_border = "#1d3557" if index == self.articulation_selected_chain_index else "rgba(0, 0, 0, 0.16)"
+        card.setStyleSheet(
+            f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border: 4px solid {selected_border}; border-radius: 24px; }}"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        number = QLabel(f"{index + 1}")
+        number.setObjectName("articulationIpaBadge")
+        number.setAlignment(Qt.AlignCenter)
+        number.setMinimumWidth(40)
+        title = QLabel(f"{phoneme.name} /{phoneme.ipa}/")
+        title.setObjectName("phonemeCardTitle")
+        title.setWordWrap(True)
+        details = QLabel(
+            f"{phoneme.phoneme_family.title()} • {int(item.duration_ms or phoneme.duration_ms)} ms • "
+            f"gap {int(item.gap_after_ms)} ms • crossfade {int(item.crossfade_ms)} ms"
+        )
+        details.setObjectName("phonemeCardSummary")
+        details.setWordWrap(True)
+        source_badge = QLabel(articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path))
+        source_badge.setObjectName("articulationIpaBadge")
+        source_badge.setAlignment(Qt.AlignCenter)
+        title_stack = QVBoxLayout()
+        title_stack.setSpacing(2)
+        title_stack.addWidget(title)
+        title_stack.addWidget(details)
+        title_stack.addWidget(source_badge)
+        header.addWidget(number)
+        header.addLayout(title_stack, 1)
+        layout.addLayout(header)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        for text, callback, danger in (
+            ("▶ Play", lambda checked=False, i=index: self._play_chain_item(i), False),
+            ("📂 Load/Edit", lambda checked=False, i=index: self._select_articulation_chain_item(i), False),
+            ("⬅ Move Earlier", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
+            ("➡ Move Later", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
+            ("🗑 Remove", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
+        ):
+            button = QPushButton(text)
+            button.setObjectName("phonemeCardDangerAction" if danger else "phonemeCardSecondaryAction")
             button.setMinimumHeight(WaveToySizing.MIN_TOUCH_TARGET)
-            button.clicked.connect(lambda checked=False, i=index: self._select_articulation_chain_item(i))
-            layout.addWidget(button)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(callback)
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        return card
 
     def _select_articulation_chain_item(self, index: int) -> None:
         if index < 0 or index >= len(self.articulation_chain_items):
@@ -5088,6 +5232,7 @@ class WaveToyWindow(QMainWindow):
         self.current_phoneme = self._phoneme_from_articulation_ui()
         self.articulation_chain_items.append(ArticulationChainItem(ArticulationPhoneme.from_json_dict(self.current_phoneme.to_json_dict())))
         self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
+        self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 
     def _apply_current_wave_to_selected_chain_item(self, checked: bool = False) -> None:
@@ -5099,6 +5244,7 @@ class WaveToyWindow(QMainWindow):
         for key, value in self._source_metadata_for_mode(self._selected_articulation_source_mode()).items():
             setattr(phoneme, key, value)
         self.articulation_chain_items[self.articulation_selected_chain_index].phoneme = phoneme.clamped()
+        self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 
     def _apply_current_wave_to_whole_chain(self, checked: bool = False) -> None:
@@ -5108,6 +5254,7 @@ class WaveToyWindow(QMainWindow):
             for key, value in metadata.items():
                 setattr(item.phoneme, key, value)
             item.phoneme = item.phoneme.clamped()
+        self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 
     def _reset_selected_chain_item_source(self, checked: bool = False) -> None:
@@ -5116,26 +5263,274 @@ class WaveToyWindow(QMainWindow):
             return
         item = self.articulation_chain_items[self.articulation_selected_chain_index]
         item.phoneme = ArticulationPhoneme.from_json_dict({**item.phoneme.to_json_dict(), "source_mode": ARTICULATION_SOURCE_DEFAULT, "source_wave_id": None, "source_recipe_snapshot": {}, "source_audio_path": None})
+        self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 
     def _reset_whole_chain_source(self, checked: bool = False) -> None:
         del checked
         for item in self.articulation_chain_items:
             item.phoneme = ArticulationPhoneme.from_json_dict({**item.phoneme.to_json_dict(), "source_mode": ARTICULATION_SOURCE_DEFAULT, "source_wave_id": None, "source_recipe_snapshot": {}, "source_audio_path": None})
+        self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
+
+    def _play_chain_item(self, index: int) -> None:
+        if index < 0 or index >= len(self.articulation_chain_items):
+            return
+        self._play_audio_array(self._render_articulation_with_source(self.articulation_chain_items[index].phoneme_for_render()))
+
+    def _move_articulation_chain_item(self, index: int, direction: int) -> None:
+        new_index = index + direction
+        if index < 0 or index >= len(self.articulation_chain_items) or new_index < 0 or new_index >= len(self.articulation_chain_items):
+            return
+        self.articulation_chain_items[index], self.articulation_chain_items[new_index] = self.articulation_chain_items[new_index], self.articulation_chain_items[index]
+        if self.articulation_selected_chain_index == index:
+            self.articulation_selected_chain_index = new_index
+        elif self.articulation_selected_chain_index == new_index:
+            self.articulation_selected_chain_index = index
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
+    def _remove_articulation_chain_item(self, index: int) -> None:
+        if index < 0 or index >= len(self.articulation_chain_items):
+            return
+        del self.articulation_chain_items[index]
+        if not self.articulation_chain_items:
+            self.articulation_selected_chain_index = None
+        elif self.articulation_selected_chain_index is None:
+            self.articulation_selected_chain_index = min(index, len(self.articulation_chain_items) - 1)
+        elif self.articulation_selected_chain_index == index:
+            self.articulation_selected_chain_index = min(index, len(self.articulation_chain_items) - 1)
+        elif self.articulation_selected_chain_index > index:
+            self.articulation_selected_chain_index -= 1
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
+    def _clear_articulation_chain(self, checked: bool = False) -> None:
+        del checked
+        if not self.articulation_chain_items:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Clear Articulation Chain",
+            "Clear every editable phoneme card from the Articulation Chain? Saved phonemes are not deleted.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.articulation_chain_items = []
+        self.articulation_selected_chain_index = None
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
+    def _mark_articulation_word_dirty(self) -> None:
+        self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_last_word_render_path = None
+        self.articulation_last_word_render_created_at = None
+        self._update_articulation_word_status()
+
+    def _update_articulation_word_status(self) -> None:
+        if self.articulation_word_status_label is None:
+            return
+        if self.articulation_word_render_audio.size:
+            duration = len(self.articulation_word_render_audio) / SAMPLE_RATE
+            path_text = f" • exported: {self.articulation_last_word_render_path}" if self.articulation_last_word_render_path else ""
+            self.articulation_word_status_label.setText(
+                f"Word ready • {duration:.2f}s • {len(self.articulation_chain_items)} phoneme(s){path_text}"
+            )
+        elif self.articulation_chain_items:
+            self.articulation_word_status_label.setText(
+                f"{len(self.articulation_chain_items)} phoneme(s) in chain • use 🧩 Create Word for smoothed crossfades."
+            )
+        else:
+            self.articulation_word_status_label.setText("Create Word makes a smoothed render without changing the editable chain.")
+
+    def _chain_boundary_crossfade_ms(self, left: ArticulationChainItem, right: ArticulationChainItem) -> int:
+        left_family = left.phoneme_for_render().phoneme_family
+        right_family = right.phoneme_for_render().phoneme_family
+        if left_family == "stop" and right_family == "vowel":
+            return 4
+        if left_family in {"fricative", "affricate"} and right_family == "vowel":
+            return 18
+        if left_family == "nasal" and right_family == "vowel":
+            return 22
+        if left_family in {"glide", "liquid"} and right_family == "vowel":
+            return 28
+        if left_family == "vowel" and right_family != "vowel":
+            return 10
+        if left_family == "vowel" and right_family == "vowel":
+            return 30
+        return int(self.articulation_word_render_settings.get("crossfade_ms", 12))
+
+    def _fade_word_edges(self, audio: np.ndarray) -> np.ndarray:
+        if audio.size == 0:
+            return audio.astype(np.float32)
+        audio = np.array(audio, dtype=np.float32, copy=True)
+        fade_in = int(float(self.articulation_word_render_settings.get("word_fade_in_ms", 5)) * SAMPLE_RATE / 1000.0)
+        fade_out = int(float(self.articulation_word_render_settings.get("word_fade_out_ms", 8)) * SAMPLE_RATE / 1000.0)
+        if fade_in > 0:
+            fade_in = min(fade_in, len(audio))
+            audio[:fade_in] *= np.linspace(0.0, 1.0, fade_in, dtype=np.float32)[:, None]
+        if fade_out > 0:
+            fade_out = min(fade_out, len(audio))
+            audio[-fade_out:] *= np.linspace(1.0, 0.0, fade_out, dtype=np.float32)[:, None]
+        return audio
+
+    def _smooth_word_boundaries(self, audio: np.ndarray, boundaries: List[int]) -> np.ndarray:
+        if audio.size == 0:
+            return audio.astype(np.float32)
+        radius = int(float(self.articulation_word_render_settings.get("boundary_smoothing_ms", 8)) * SAMPLE_RATE / 1000.0)
+        if radius <= 1:
+            return audio.astype(np.float32)
+        smoothed = np.array(audio, dtype=np.float32, copy=True)
+        kernel_size = max(3, min(radius, 801))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = np.ones(kernel_size, dtype=np.float32) / float(kernel_size)
+        for boundary in boundaries:
+            start = max(0, int(boundary) - radius)
+            end = min(len(smoothed), int(boundary) + radius)
+            if end - start <= kernel_size:
+                continue
+            window = smoothed[start:end]
+            filtered = np.column_stack([np.convolve(window[:, channel], kernel, mode="same") for channel in range(window.shape[1])])
+            blend = np.sin(np.linspace(0.0, math.pi, end - start, dtype=np.float32))[:, None] * 0.35
+            smoothed[start:end] = window * (1.0 - blend) + filtered * blend
+        return smoothed.astype(np.float32)
+
+    def _append_word_clip(self, word: np.ndarray, clip: np.ndarray, crossfade_ms: int, gap_after_ms: int, boundaries: List[int]) -> np.ndarray:
+        if clip.size == 0:
+            return word
+        clip = np.array(clip, dtype=np.float32, copy=True)
+        clip = self._fade_word_edges(clip)
+        if word.size == 0:
+            combined = clip
+        else:
+            crossfade = int(max(0, crossfade_ms) * SAMPLE_RATE / 1000.0)
+            crossfade = min(crossfade, len(word), len(clip), int(0.40 * min(len(word), len(clip))))
+            if crossfade > 1:
+                fade_out = np.linspace(1.0, 0.0, crossfade, dtype=np.float32)[:, None]
+                fade_in = np.linspace(0.0, 1.0, crossfade, dtype=np.float32)[:, None]
+                overlap = word[-crossfade:] * fade_out + clip[:crossfade] * fade_in
+                boundaries.append(len(word) - crossfade // 2)
+                combined = np.vstack([word[:-crossfade], overlap, clip[crossfade:]])
+            else:
+                boundaries.append(len(word))
+                combined = np.vstack([word, clip])
+        gap_samples = int(max(0, gap_after_ms) * SAMPLE_RATE / 1000.0)
+        if gap_samples:
+            combined = np.vstack([combined, np.zeros((gap_samples, 2), dtype=np.float32)])
+        return combined.astype(np.float32)
+
+    def _render_articulation_word(self) -> np.ndarray:
+        word = np.zeros((0, 2), dtype=np.float32)
+        boundaries: List[int] = []
+        for index, item in enumerate(self.articulation_chain_items):
+            clip = self._render_articulation_with_source(item.phoneme_for_render())
+            gap_after_ms = int(item.gap_after_ms)
+            if index >= len(self.articulation_chain_items) - 1:
+                gap_after_ms = 0
+                crossfade_ms = int(item.crossfade_ms)
+            else:
+                rule_ms = self._chain_boundary_crossfade_ms(item, self.articulation_chain_items[index + 1])
+                crossfade_ms = int(item.crossfade_ms) if item.crossfade_ms != 12 else rule_ms
+            word = self._append_word_clip(word, clip, crossfade_ms, gap_after_ms, boundaries)
+        word = self._smooth_word_boundaries(word, boundaries)
+        word = self._fade_word_edges(word)
+        return normalize_audio(word).astype(np.float32)
+
+    def _create_articulation_word(self, checked: bool = False) -> np.ndarray:
+        del checked
+        if not self.articulation_chain_items:
+            QMessageBox.information(self, "Create Word", "Add at least one phoneme to the Articulation Chain first.")
+            return np.zeros((0, 2), dtype=np.float32)
+        self.articulation_word_render_audio = self._render_articulation_word()
+        self.articulation_last_word_render_created_at = time.time()
+        self.articulation_last_word_render_path = None
+        self._update_articulation_word_status()
+        QMessageBox.information(
+            self,
+            "Create Word",
+            f"Word ready: {len(self.articulation_word_render_audio) / SAMPLE_RATE:.2f}s from {len(self.articulation_chain_items)} phoneme(s).",
+        )
+        return self.articulation_word_render_audio
+
+    def _play_articulation_word(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_word_render_audio.size == 0:
+            audio = self._create_articulation_word(checked=False)
+            if audio.size == 0:
+                return
+        self._play_audio_array(self.articulation_word_render_audio)
+
+    def _export_articulation_word(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_word_render_audio.size == 0:
+            audio = self._create_articulation_word(checked=False)
+            if audio.size == 0:
+                return
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        chain_name = "_".join(item.phoneme.name.lower() for item in self.articulation_chain_items[:6]) or "word"
+        safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in chain_name)
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Created Word",
+            f"wave_toy_word_{safe_name}_{timestamp}.wav",
+            "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.suffix:
+            if "Ogg" in selected_filter:
+                path = path.with_suffix(".ogg")
+            elif "MP3" in selected_filter:
+                path = path.with_suffix(".mp3")
+            elif "FLAC" in selected_filter:
+                path = path.with_suffix(".flac")
+            else:
+                path = path.with_suffix(".wav")
+        try:
+            save_audio_file(path, self.articulation_word_render_audio)
+            sidecar = path.with_suffix(path.suffix + ".wave-toy-word.json")
+            data = ArticulationChain(
+                items=self.articulation_chain_items,
+                last_word_render_path=str(path),
+                last_word_render_created_at=self.articulation_last_word_render_created_at,
+                word_render_settings=dict(self.articulation_word_render_settings),
+            ).to_json_dict()
+            data.update(
+                {
+                    "version": 1,
+                    "sample_rate": SAMPLE_RATE,
+                    "duration_seconds": len(self.articulation_word_render_audio) / SAMPLE_RATE,
+                    "notes": "Created Word metadata stores articulation snapshots and source paths only; raw audio is not embedded.",
+                }
+            )
+            sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self.articulation_last_word_render_path = path
+            self._update_articulation_word_status()
+            QMessageBox.information(self, "Word Exported", f"Saved created word:\n{path}\n\nSaved word metadata:\n{sidecar}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not export word", str(exc))
 
     def _play_articulation_chain(self, checked: bool = False) -> None:
         del checked
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Articulation Chain", "Add at least one phoneme to the chain first.")
             return
-        rendered = [self._render_articulation_with_source(item.phoneme) for item in self.articulation_chain_items]
+        rendered = [self._render_articulation_with_source(item.phoneme_for_render()) for item in self.articulation_chain_items]
         audio = np.vstack([clip for clip in rendered if clip.size]) if rendered else np.zeros((0, 2), dtype=np.float32)
         self._play_audio_array(audio)
 
     def _save_articulation_chain(self, checked: bool = False) -> None:
         del checked
-        data = {"items": [item.to_json_dict() for item in self.articulation_chain_items]}
+        data = ArticulationChain(
+            items=self.articulation_chain_items,
+            last_word_render_path=str(self.articulation_last_word_render_path) if self.articulation_last_word_render_path else None,
+            last_word_render_created_at=self.articulation_last_word_render_created_at,
+            word_render_settings=dict(self.articulation_word_render_settings),
+        ).to_json_dict()
         self.articulation_chain_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         QMessageBox.information(self, "Articulation Chain", f"Saved {len(self.articulation_chain_items)} chain phoneme(s) to {self.articulation_chain_path}.")
 
@@ -5147,6 +5542,11 @@ class WaveToyWindow(QMainWindow):
         data = json.loads(self.articulation_chain_path.read_text(encoding="utf-8"))
         self.articulation_chain_items = [ArticulationChainItem.from_json_dict(item) for item in data.get("items", []) if isinstance(item, dict)]
         self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+        self.articulation_last_word_render_path = Path(data["last_word_render_path"]) if data.get("last_word_render_path") else None
+        self.articulation_last_word_render_created_at = data.get("last_word_render_created_at") if isinstance(data.get("last_word_render_created_at"), (int, float)) else None
+        if isinstance(data.get("word_render_settings"), dict):
+            self.articulation_word_render_settings.update(data["word_render_settings"])
+        self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
         self._refresh_articulation_chain_cards()
 
     def _select_vowel_preset(self, preset_name: str, play: bool = False) -> None:
