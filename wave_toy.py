@@ -80,13 +80,17 @@ from PySide6.QtWidgets import (
 SAMPLE_RATE = 44_100
 MAX_PREVIEW_SECONDS = 8.0
 WAVE_ORDER = ["sine", "triangle", "sawtooth", "square"]
+DEFAULT_WAVE_ORDER = list(WAVE_ORDER)
+MAX_WAVE_ROWS = 12
+TIMELINE_MIN_CLIP_SECONDS = 0.01
+TIMELINE_TIME_STEP_SECONDS = 0.005
 
 # Internal UI resolution. Sliders remain child-friendly visually, but internally
 # they have fine enough resolution for tuned harmonies and subtle modulation.
 DB_SLIDER_SCALE = 100          # -2000..0 => -20.00 dB..0.00 dB
 MIDI_SLIDER_SCALE = 100        # 3600..8400 => MIDI 36.00..84.00
 OCTAVE_SLIDER_SCALE = 100      # 200..600 => octave 2.00..6.00
-SECONDS_SLIDER_SCALE = 100     # 50..800 => 0.50s..8.00s
+SECONDS_SLIDER_SCALE = 200     # 2..1600 => 0.01s..8.00s in 0.005s steps
 PERCENT_SLIDER_SCALE = 10      # 0..1000 => 0.0%..100.0%
 RATE_SLIDER_SCALE = 100        # 5..800 => 0.05Hz..8.00Hz
 PAULSTRETCH_SCALE = 100        # 100..3000 => 1.00x..30.00x
@@ -337,7 +341,7 @@ class ArticulationPhoneme:
 
     def clamped(self) -> "ArticulationPhoneme":
         family = str(self.phoneme_family or "vowel").lower()
-        if family not in {"vowel", "fricative", "stop", "nasal"}:
+        if family not in {"vowel", "fricative", "stop", "nasal", "glide", "liquid", "affricate"}:
             family = "vowel"
         return ArticulationPhoneme(
             name=str(self.name or "untitled_phoneme"),
@@ -399,7 +403,11 @@ VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
     "AH": {"emoji": "😮", "ipa": "a", "tongue_height": 0.20, "tongue_frontness": 0.40, "mouth_open": 0.95, "lip_rounding": 0.00, "preview_color": "#ffadad"},
     "OH": {"emoji": "😯", "ipa": "o", "tongue_height": 0.50, "tongue_frontness": 0.20, "mouth_open": 0.55, "lip_rounding": 0.60, "preview_color": "#ffd6a5"},
     "OO": {"emoji": "😗", "ipa": "u", "tongue_height": 0.90, "tongue_frontness": 0.10, "mouth_open": 0.15, "lip_rounding": 1.00, "preview_color": "#a0c4ff"},
-    "UH": {"emoji": "😐", "ipa": "ə", "tongue_height": 0.45, "tongue_frontness": 0.50, "mouth_open": 0.45, "lip_rounding": 0.10, "preview_color": "#d7b9ff"},
+    "UH": {"emoji": "😐", "ipa": "ʌ", "tongue_height": 0.38, "tongue_frontness": 0.42, "mouth_open": 0.55, "lip_rounding": 0.12, "preview_color": "#d7b9ff"},
+    "AE": {"emoji": "😺", "ipa": "æ", "tongue_height": 0.32, "tongue_frontness": 0.86, "mouth_open": 0.78, "lip_rounding": 0.02, "preview_color": "#ffb3c6"},
+    "IH": {"emoji": "🙂", "ipa": "ɪ", "tongue_height": 0.78, "tongue_frontness": 0.82, "mouth_open": 0.30, "lip_rounding": 0.04, "preview_color": "#b9fbc0"},
+    "IY": {"emoji": "😁", "ipa": "i", "tongue_height": 0.96, "tongue_frontness": 0.96, "mouth_open": 0.18, "lip_rounding": 0.03, "preview_color": "#98f5e1"},
+    "ER": {"emoji": "🌀", "ipa": "ɝ", "tongue_height": 0.56, "tongue_frontness": 0.36, "mouth_open": 0.42, "lip_rounding": 0.32, "voice_pitch": 210.0, "preview_color": "#cdb4db"},
 }
 
 FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
@@ -426,10 +434,35 @@ NASAL_PRESETS: Dict[str, Dict[str, object]] = {
     "NG": {"emoji": "👃", "ipa": "ŋ", "phoneme_family": "nasal", "voiced": True, "nasal_open": 0.90, "closure": 0.80, "tongue_frontness": 0.20, "mouth_open": 0.12, "tongue_height": 0.72, "duration_ms": 500, "preview_color": "#a2d2ff"},
 }
 
+GLIDE_PRESETS: Dict[str, Dict[str, object]] = {
+    "W": {"emoji": "〰️", "ipa": "w", "phoneme_family": "glide", "voiced": True, "mouth_open": 0.28, "tongue_height": 0.82, "tongue_frontness": 0.18, "lip_rounding": 0.92, "duration_ms": 260, "preview_color": "#a0c4ff"},
+    "Y": {"emoji": "➰", "ipa": "j", "phoneme_family": "glide", "voiced": True, "mouth_open": 0.24, "tongue_height": 0.90, "tongue_frontness": 0.92, "lip_rounding": 0.05, "duration_ms": 240, "preview_color": "#b8f2e6"},
+}
+
+LIQUID_PRESETS: Dict[str, Dict[str, object]] = {
+    "L": {"emoji": "👅", "ipa": "l", "phoneme_family": "liquid", "voiced": True, "mouth_open": 0.42, "tongue_height": 0.68, "tongue_frontness": 0.88, "lip_rounding": 0.10, "duration_ms": 360, "preview_color": "#fdffb6"},
+    "R": {"emoji": "🌀", "ipa": "ɹ", "phoneme_family": "liquid", "voiced": True, "mouth_open": 0.38, "tongue_height": 0.58, "tongue_frontness": 0.35, "lip_rounding": 0.36, "duration_ms": 380, "preview_color": "#ffc6ff"},
+}
+
+AFFRICATE_PRESETS: Dict[str, Dict[str, object]] = {
+    "CH": {"emoji": "💥", "ipa": "tʃ", "phoneme_family": "affricate", "voiced": False, "air_pressure": 0.84, "teeth_gap": 0.24, "closure": 0.82, "burst_strength": 0.74, "tongue_frontness": 0.72, "mouth_open": 0.26, "tongue_height": 0.68, "lip_rounding": 0.34, "duration_ms": 260, "noise_color": 0.68, "preview_color": "#ffadad"},
+    "JH": {"emoji": "💥", "ipa": "dʒ", "phoneme_family": "affricate", "voiced": True, "air_pressure": 0.72, "teeth_gap": 0.25, "closure": 0.74, "burst_strength": 0.56, "tongue_frontness": 0.70, "mouth_open": 0.28, "tongue_height": 0.66, "lip_rounding": 0.30, "duration_ms": 280, "noise_color": 0.62, "preview_color": "#ffd6a5"},
+}
+
+EXTRA_FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
+    "TH": {"emoji": "🦷", "ipa": "θ", "phoneme_family": "fricative", "voiced": False, "air_pressure": 0.78, "teeth_gap": 0.32, "tongue_frontness": 0.96, "mouth_open": 0.24, "tongue_height": 0.52, "lip_rounding": 0.02, "duration_ms": 390, "noise_color": 0.72, "preview_color": "#e0fbfc"},
+    "DH": {"emoji": "🦷", "ipa": "ð", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.68, "teeth_gap": 0.34, "tongue_frontness": 0.95, "mouth_open": 0.24, "tongue_height": 0.52, "lip_rounding": 0.02, "duration_ms": 390, "noise_color": 0.68, "preview_color": "#caffbf"},
+    "ZH": {"emoji": "🤫", "ipa": "ʒ", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.70, "teeth_gap": 0.28, "tongue_frontness": 0.42, "mouth_open": 0.30, "tongue_height": 0.62, "lip_rounding": 0.48, "duration_ms": 440, "noise_color": 0.58, "preview_color": "#bde0fe"},
+}
+
 CONSONANT_PRESET_SECTIONS: Tuple[Tuple[str, Dict[str, Dict[str, object]]], ...] = (
     ("🌬 Friction Sounds", FRICATIVE_PRESETS),
     ("💥 Pop Sounds", STOP_PRESETS),
     ("👃 Nose Sounds", NASAL_PRESETS),
+    ("〰️ Glides", GLIDE_PRESETS),
+    ("👅 Liquids", LIQUID_PRESETS),
+    ("💥 Affricates", AFFRICATE_PRESETS),
+    ("🦷 Extra Fricatives", EXTRA_FRICATIVE_PRESETS),
 )
 
 
@@ -559,7 +592,7 @@ def _render_nasal_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
 
 def render_articulation_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
     phoneme = phoneme.clamped()
-    if phoneme.phoneme_family == "fricative":
+    if phoneme.phoneme_family in {"fricative", "affricate"}:
         return _render_fricative_phoneme(phoneme)
     if phoneme.phoneme_family == "stop":
         return _render_stop_phoneme(phoneme)
@@ -629,6 +662,8 @@ class SynthSettings:
     wave_octave: Dict[str, int] | None = None
     wave_cents: Dict[str, float] | None = None
     wave_follow_main_pitch: Dict[str, bool] | None = None
+    wave_shapes: Dict[str, str] | None = None
+    wave_order: List[str] | None = None
     paulstretch_enabled: bool = False
     paulstretch_amount: float = 1.0
     paulstretch_evolution: float = 0.0
@@ -694,6 +729,34 @@ def frequency_for_note(
     return root_frequency * (2.0 ** octave_delta) * ratio * (2.0 ** (cents / 1200.0))
 
 
+def active_wave_order(settings: SynthSettings) -> List[str]:
+    order = list(settings.wave_order or [])
+    if not order:
+        keys: List[str] = []
+        for mapping in (settings.wave_start_db, settings.wave_end_db, settings.wave_pan):
+            if isinstance(mapping, dict):
+                keys.extend(str(key) for key in mapping)
+        order = [wave for wave in DEFAULT_WAVE_ORDER if wave in keys or not keys]
+        order.extend(key for key in keys if key not in order)
+    if not order:
+        order = list(DEFAULT_WAVE_ORDER)
+    return order[:MAX_WAVE_ROWS]
+
+
+def wave_shape_for(settings: SynthSettings, wave_id: str) -> str:
+    shapes = settings.wave_shapes or {}
+    shape = str(shapes.get(wave_id, wave_id))
+    return shape if shape in DEFAULT_WAVE_ORDER else "sine"
+
+
+def default_wave_pan_for(wave_id: str, index: int = 0) -> float:
+    defaults = {"sine": -0.45, "triangle": 0.45, "sawtooth": -0.85, "square": 0.85}
+    if wave_id in defaults:
+        return defaults[wave_id]
+    spread = [-0.65, 0.65, -0.25, 0.25, -0.90, 0.90]
+    return spread[index % len(spread)]
+
+
 def effective_wave_frequency_env(settings: SynthSettings, wave_type: str, global_freq_env: np.ndarray) -> np.ndarray:
     """Return the global pitch curve or a per-wave custom pitch curve."""
     follow_map = settings.wave_follow_main_pitch or {name: True for name in WAVE_ORDER}
@@ -730,6 +793,12 @@ def wave_effective_frequency_env(settings: SynthSettings, wave_type: str, global
     """Backward-compatible alias for the per-wave pitch helper."""
     return effective_wave_frequency_env(settings, wave_type, global_freq_env)
 
+
+def wave_label_for(settings: SynthSettings, wave_id: str) -> str:
+    base = WAVE_LABELS.get(wave_shape_for(settings, wave_id), "Smooth Wave")
+    if wave_id in DEFAULT_WAVE_ORDER:
+        return base
+    return f"Extra {base}"
 
 def make_curve(start: float, end: float, samples: int, curve_type: str) -> np.ndarray:
     if samples <= 1:
@@ -793,13 +862,14 @@ def equal_power_pan(mono: np.ndarray, pan: np.ndarray) -> np.ndarray:
 def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_count: int = 160) -> Dict[str, np.ndarray | Dict[str, float | bool]]:
     """Build compact cached preview samples without running the full audio render."""
     sample_count = max(120, min(240, int(sample_count)))
-    duration = max(0.1, min(float(settings.duration_seconds), MAX_PREVIEW_SECONDS))
+    duration = max(TIMELINE_MIN_CLIP_SECONDS, min(float(settings.duration_seconds), MAX_PREVIEW_SECONDS))
+    wave_order = active_wave_order(settings)
 
     start_levels = settings.wave_start_db or {"sine": 0.0, "triangle": -20.0, "sawtooth": -20.0, "square": -20.0}
     end_levels = settings.wave_end_db or dict(start_levels)
-    delta_times = settings.wave_delta_time or {name: duration for name in WAVE_ORDER}
-    muted = settings.wave_muted or {name: False for name in WAVE_ORDER}
-    solo_wave = settings.solo_wave if settings.solo_wave in WAVE_ORDER else None
+    delta_times = settings.wave_delta_time or {name: duration for name in wave_order}
+    muted = settings.wave_muted or {name: False for name in wave_order}
+    solo_wave = settings.solo_wave if settings.solo_wave in wave_order else None
     is_audible = not muted.get(wave_type, False) and (solo_wave is None or solo_wave == wave_type)
 
     start_db = float(start_levels.get(wave_type, -20.0))
@@ -818,16 +888,16 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
     preview_anchor = max(1.0, float(np.mean(global_freq))) if global_freq.size else 440.0
     cycles = 2.35 * max(0.25, min(4.0, float(np.mean(wave_freq)) / preview_anchor))
     phase = np.linspace(0.0, 2.0 * np.pi * cycles, sample_count, dtype=np.float64)
-    raw_wave = waveform_from_phase(wave_type, phase)
+    raw_wave = waveform_from_phase(wave_shape_for(settings, wave_type), phase)
     mono = raw_wave * gain_env
     if not is_audible:
         mono = np.zeros_like(mono)
         gain_env = np.zeros_like(gain_env)
 
-    default_pan_offsets = {"sine": -0.45, "triangle": 0.45, "sawtooth": -0.85, "square": 0.85}
-    wave_pan = settings.wave_pan or {name: default_pan_offsets[name] for name in WAVE_ORDER}
-    wave_width = settings.wave_width or {name: 1.0 for name in WAVE_ORDER}
-    wave_dance = settings.wave_dance or {name: 0.0 for name in WAVE_ORDER}
+    wave_index = wave_order.index(wave_type) if wave_type in wave_order else 0
+    wave_pan = settings.wave_pan or {name: default_wave_pan_for(name, idx) for idx, name in enumerate(wave_order)}
+    wave_width = settings.wave_width or {name: 1.0 for name in wave_order}
+    wave_dance = settings.wave_dance or {name: 0.0 for name in wave_order}
 
     time_axis = np.linspace(0.0, duration, sample_count, endpoint=False, dtype=np.float64)
     pan_base = make_curve(float(settings.pan_start), float(settings.pan_end), sample_count, settings.curve_type)
@@ -836,10 +906,10 @@ def build_wave_preview_samples(settings: SynthSettings, wave_type: str, sample_c
     auto_rate = max(0.01, float(settings.auto_pan_rate))
     auto_pan = auto_depth * np.sin(2.0 * np.pi * auto_rate * time_axis)
 
-    individual_pan = np.clip(float(wave_pan.get(wave_type, default_pan_offsets.get(wave_type, 0.0))), -1.0, 1.0)
+    individual_pan = np.clip(float(wave_pan.get(wave_type, default_wave_pan_for(wave_type, wave_index))), -1.0, 1.0)
     individual_width = np.clip(float(wave_width.get(wave_type, 1.0)), 0.0, 1.0)
     individual_dance = np.clip(float(wave_dance.get(wave_type, 0.0)), 0.0, 1.0)
-    dance_phase = WAVE_ORDER.index(wave_type) * (math.pi / 2.0) if wave_type in WAVE_ORDER else 0.0
+    dance_phase = wave_index * (math.pi / 2.0)
     dance_pan = individual_dance * np.sin(2.0 * np.pi * auto_rate * time_axis + dance_phase)
     pan_env = np.clip(pan_base + auto_pan + (individual_pan * global_width * individual_width) + dance_pan, -1.0, 1.0)
 
@@ -972,7 +1042,7 @@ def apply_modules(audio: np.ndarray, settings: SynthSettings) -> np.ndarray:
     return audio
 
 def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    duration = max(0.1, min(float(settings.duration_seconds), MAX_PREVIEW_SECONDS))
+    duration = max(TIMELINE_MIN_CLIP_SECONDS, min(float(settings.duration_seconds), MAX_PREVIEW_SECONDS))
     total_samples = int(SAMPLE_RATE * duration)
 
     time_axis = np.arange(total_samples, dtype=np.float64) / SAMPLE_RATE
@@ -992,22 +1062,17 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
         "square": -20.0,
     }
     end_levels = settings.wave_end_db or dict(start_levels)
-    delta_times = settings.wave_delta_time or {wave_type: duration for wave_type in WAVE_ORDER}
+    wave_order = active_wave_order(settings)
+    delta_times = settings.wave_delta_time or {wave_type: duration for wave_type in wave_order}
 
     mixed_stereo = np.zeros((total_samples, 2), dtype=np.float64)
 
     width = np.clip(float(settings.stereo_width), 0.0, 1.0)
-    default_pan_offsets = {
-        "sine": -0.45,
-        "triangle": 0.45,
-        "sawtooth": -0.85,
-        "square": 0.85,
-    }
-    wave_pan = settings.wave_pan or {wave_type: default_pan_offsets[wave_type] for wave_type in WAVE_ORDER}
-    wave_width = settings.wave_width or {wave_type: 1.0 for wave_type in WAVE_ORDER}
-    wave_dance = settings.wave_dance or {wave_type: 0.0 for wave_type in WAVE_ORDER}
-    wave_muted = settings.wave_muted or {wave_type: False for wave_type in WAVE_ORDER}
-    solo_wave = settings.solo_wave if settings.solo_wave in WAVE_ORDER else None
+    wave_pan = settings.wave_pan or {wave_type: default_wave_pan_for(wave_type, idx) for idx, wave_type in enumerate(wave_order)}
+    wave_width = settings.wave_width or {wave_type: 1.0 for wave_type in wave_order}
+    wave_dance = settings.wave_dance or {wave_type: 0.0 for wave_type in wave_order}
+    wave_muted = settings.wave_muted or {wave_type: False for wave_type in wave_order}
+    solo_wave = settings.solo_wave if settings.solo_wave in wave_order else None
 
     pan_base = make_curve(float(settings.pan_start), float(settings.pan_end), total_samples, settings.curve_type)
 
@@ -1017,7 +1082,7 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
 
     active_gain_total = 0.0
 
-    for wave_type in WAVE_ORDER:
+    for wave_index, wave_type in enumerate(wave_order):
         if wave_muted.get(wave_type, False) or (solo_wave is not None and solo_wave != wave_type):
             continue
 
@@ -1043,11 +1108,11 @@ def generate_audio(settings: SynthSettings) -> Tuple[np.ndarray, np.ndarray, np.
                 f"freq≈{float(np.mean(wave_freq_env)):.1f}"
             )
         phase = np.cumsum(2.0 * np.pi * wave_freq_env / SAMPLE_RATE)
-        mono_wave = waveform_from_phase(wave_type, phase) * gain_env
-        individual_pan = np.clip(float(wave_pan.get(wave_type, default_pan_offsets[wave_type])), -1.0, 1.0)
+        mono_wave = waveform_from_phase(wave_shape_for(settings, wave_type), phase) * gain_env
+        individual_pan = np.clip(float(wave_pan.get(wave_type, default_wave_pan_for(wave_type, wave_index))), -1.0, 1.0)
         individual_width = np.clip(float(wave_width.get(wave_type, 1.0)), 0.0, 1.0)
         individual_dance = np.clip(float(wave_dance.get(wave_type, 0.0)), 0.0, 1.0)
-        dance_phase = WAVE_ORDER.index(wave_type) * (math.pi / 2.0)
+        dance_phase = wave_index * (math.pi / 2.0)
         individual_auto_pan = individual_dance * np.sin(2.0 * np.pi * auto_rate * time_axis + dance_phase)
         wave_pan_env = np.clip(
             pan_base + auto_pan + (individual_pan * width * individual_width) + individual_auto_pan,
@@ -2235,7 +2300,7 @@ class TimelineCanvas(QWidget):
         if clip is None:
             return
         old_start, old_lane = clip.start_time_seconds, clip.lane
-        clip.start_time_seconds = max(0.0, self._x_to_time(event.position().x()) - self.drag_offset_seconds)
+        clip.start_time_seconds = max(0.0, round((self._x_to_time(event.position().x()) - self.drag_offset_seconds) / TIMELINE_TIME_STEP_SECONDS) * TIMELINE_TIME_STEP_SECONDS)
         clip.lane = self._lane_from_y(event.position().y())
         self.drag_started = True
         self.owner._timeline_update_duration()
@@ -3383,6 +3448,12 @@ class WaveToyWindow(QMainWindow):
         self.wave_cents_sliders: Dict[str, QSlider] = {}
         self.wave_pitch_labels: Dict[str, QLabel] = {}
         self.wave_pitch_panels: Dict[str, QWidget] = {}
+        self.wave_shape_combos: Dict[str, QComboBox] = {}
+        self.wave_row_order: List[str] = list(DEFAULT_WAVE_ORDER)
+        self.user_wave_ids: List[str] = []
+        self.next_user_wave_index = len(DEFAULT_WAVE_ORDER) + 1
+        self.wave_rows_layout: QVBoxLayout | None = None
+        self.add_wave_button: QPushButton | None = None
         self.wave_emotion_labels: Dict[str, QLabel] = {}
         self.visual_panel_buttons: Dict[str, VisualPanelButton] = {}
         self.floating_toy_panels: Dict[str, QWidget] = {}
@@ -3677,6 +3748,8 @@ class WaveToyWindow(QMainWindow):
             "square": 85,
         }
 
+        self.wave_rows_layout = wave_layout
+
         for wave_type in WAVE_ORDER:
             card = QWidget()
             card.setObjectName("waveCard")
@@ -3859,8 +3932,13 @@ class WaveToyWindow(QMainWindow):
             card_layout.addWidget(output_stage, 0, 6)
             wave_layout.addWidget(card)
 
-        for wave_type in WAVE_ORDER:
+        for wave_type in list(self.wave_row_order):
             self._update_wave_pitch_label(wave_type)
+
+        self.add_wave_button = QPushButton("➕ Add Wave")
+        self.add_wave_button.setToolTip(f"Add another wave row. Soft limit: {MAX_WAVE_ROWS} waves.")
+        self.add_wave_button.clicked.connect(self._add_user_wave_row)
+        wave_layout.addWidget(self.add_wave_button, 0, Qt.AlignRight)
 
         self.clear_solo_button = QPushButton("🌈 All Waves")
         self.clear_solo_button.setToolTip("Clear solo so the full mix plays again.")
@@ -3969,7 +4047,7 @@ class WaveToyWindow(QMainWindow):
         motion_layout.setColumnStretch(1, 2)
 
         self.duration_slider = NoWheelSlider(Qt.Horizontal)
-        self.duration_slider.setRange(int(0.5 * SECONDS_SLIDER_SCALE), int(MAX_PREVIEW_SECONDS * SECONDS_SLIDER_SCALE))
+        self.duration_slider.setRange(int(TIMELINE_MIN_CLIP_SECONDS * SECONDS_SLIDER_SCALE), int(MAX_PREVIEW_SECONDS * SECONDS_SLIDER_SCALE))
         self.duration_slider.setValue(int(1.5 * SECONDS_SLIDER_SCALE))
         self.duration_label = QLabel("⏱️ Short")
         self.duration_slider.valueChanged.connect(self._sync_duration_slider_to_spin)
@@ -4362,7 +4440,7 @@ class WaveToyWindow(QMainWindow):
         rail.setFixedWidth(64)
         rail_layout = QVBoxLayout(rail)
         rail_layout.setContentsMargins(6, 8, 6, 8)
-        rail_layout.setSpacing(8)
+        rail_layout.setSpacing(4)
         self.phoneme_drawer_buttons = {}
         self.phoneme_drawer_stack = QStackedWidget()
         self.phoneme_drawer_stack.setObjectName("phonemeDrawerStack")
@@ -4372,6 +4450,10 @@ class WaveToyWindow(QMainWindow):
             ("fricatives", "🌬", "Fricatives", dict(CONSONANT_PRESET_SECTIONS[0][1]), lambda name, data: self._select_consonant_preset(name, data)),
             ("stops", "💥", "Stops", dict(CONSONANT_PRESET_SECTIONS[1][1]), lambda name, data: self._select_consonant_preset(name, data)),
             ("nasals", "👃", "Nasals", dict(CONSONANT_PRESET_SECTIONS[2][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("glides", "〰️", "Glides", dict(CONSONANT_PRESET_SECTIONS[3][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("liquids", "👅", "Liquids", dict(CONSONANT_PRESET_SECTIONS[4][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("affricates", "💥", "Affricates", dict(CONSONANT_PRESET_SECTIONS[5][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("extra_fricatives", "🦷", "Extra Fricatives", dict(CONSONANT_PRESET_SECTIONS[6][1]), lambda name, data: self._select_consonant_preset(name, data)),
             ("saved", "💾", "Saved Phonemes", {}, None),
         ]
         for index, (key, icon, title_text, presets, callback) in enumerate(drawer_specs):
@@ -4380,8 +4462,8 @@ class WaveToyWindow(QMainWindow):
             button.setCheckable(True)
             button.setToolTip(title_text)
             button.setAccessibleName(title_text)
-            button.setMinimumSize(QSize(52, 56))
-            button.setMaximumHeight(60)
+            button.setMinimumSize(QSize(52, 44))
+            button.setMaximumHeight(48)
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(lambda checked=False, drawer_key=key: self._set_phoneme_drawer(drawer_key))
             self.phoneme_drawer_buttons[key] = button
@@ -4481,7 +4563,7 @@ class WaveToyWindow(QMainWindow):
         return page
 
     def _set_phoneme_drawer(self, drawer_key: str) -> None:
-        order = ["vowels", "fricatives", "stops", "nasals", "saved"]
+        order = ["vowels", "fricatives", "stops", "nasals", "glides", "liquids", "affricates", "extra_fricatives", "saved"]
         if self.phoneme_drawer_stack is None or drawer_key not in order:
             return
         self.active_phoneme_drawer = drawer_key
@@ -5079,7 +5161,7 @@ class WaveToyWindow(QMainWindow):
             clip_id=clip_id,
             name=item.name,
             audio=np.array(item.audio_data, dtype=np.float32, copy=True),
-            start_time_seconds=max(0.0, start_time_seconds),
+            start_time_seconds=max(0.0, round(start_time_seconds / TIMELINE_TIME_STEP_SECONDS) * TIMELINE_TIME_STEP_SECONDS),
             lane=max(0, min(self.timeline_lane_count - 1, lane)),
             sample_rate=item.sample_rate,
             recipe=None,
@@ -5840,8 +5922,8 @@ class WaveToyWindow(QMainWindow):
         headers = ["Wave", "Mute", "Solo", "Start", "End", "Time"]
         for column, header in enumerate(headers):
             self.dashboard_workspace_layout.addWidget(QLabel(header), 0, column)
-        for row, wave_type in enumerate(WAVE_ORDER, start=1):
-            self.dashboard_workspace_layout.addWidget(QLabel(f"{self._wave_icon(wave_type)} {WAVE_LABELS[wave_type]}"), row, 0)
+        for row, wave_type in enumerate(self.wave_row_order, start=1):
+            self.dashboard_workspace_layout.addWidget(QLabel(f"{self._wave_icon(wave_type)} {wave_label_for(self._settings_from_ui(), wave_type)}"), row, 0)
             mute = QCheckBox()
             mute.setChecked(self.wave_mute_buttons[wave_type].isChecked())
             mute.stateChanged.connect(lambda state, wt=wave_type: self.wave_mute_buttons[wt].setChecked(bool(state)))
@@ -5866,7 +5948,7 @@ class WaveToyWindow(QMainWindow):
         self._add_workspace_slider_row(2, "🎯 Wiggle", self.cents_slider)
         self._add_workspace_slider_row(3, "Start Pitch", self.pitch_start)
         self._add_workspace_slider_row(4, "End Pitch", self.pitch_end)
-        for index, wave_type in enumerate(WAVE_ORDER, start=5):
+        for index, wave_type in enumerate(self.wave_row_order, start=5):
             follow = QCheckBox("👯 Follow Main")
             follow.setChecked(self.wave_follow_pitch_buttons[wave_type].isChecked())
             follow.stateChanged.connect(lambda state, wt=wave_type: self.wave_follow_pitch_buttons[wt].setChecked(bool(state)))
@@ -5907,7 +5989,7 @@ class WaveToyWindow(QMainWindow):
         self._add_workspace_slider_row(2, "Mix Width", self.width_slider)
         self._add_workspace_slider_row(3, "Mix Dance", self.auto_pan_depth_slider)
         self._add_workspace_slider_row(4, "Dance Speed", self.auto_pan_rate)
-        for row, wave_type in enumerate(WAVE_ORDER, start=5):
+        for row, wave_type in enumerate(self.wave_row_order, start=5):
             self.dashboard_workspace_layout.addWidget(QLabel(f"{self._wave_icon(wave_type)}"), row, 0)
             self.dashboard_workspace_layout.addWidget(self._make_synced_slider(self.wave_pan_sliders[wave_type]), row, 1)
             self.dashboard_workspace_layout.addWidget(self._make_synced_slider(self.wave_width_sliders[wave_type]), row, 2)
@@ -5965,21 +6047,22 @@ class WaveToyWindow(QMainWindow):
         s = self.current_settings
         live_samples = self._dashboard_audio_thumbnail()
         muted = s.wave_muted or {}
-        solo = s.solo_wave if s.solo_wave in WAVE_ORDER else None
+        wave_order = active_wave_order(s)
+        solo = s.solo_wave if s.solo_wave in wave_order else None
         amps = {
             wave: max(db_to_gain((s.wave_start_db or {}).get(wave, -20.0)), db_to_gain((s.wave_end_db or {}).get(wave, -20.0)))
-            for wave in WAVE_ORDER
+            for wave in wave_order
         }
-        active = [wave for wave in WAVE_ORDER if not muted.get(wave, False) and (solo is None or solo == wave) and amps[wave] > 0.01]
-        shape_status = f"Solo {WAVE_LABELS[solo].split()[0]}" if solo else f"{len(active)} Waves"
+        active = [wave for wave in wave_order if not muted.get(wave, False) and (solo is None or solo == wave) and amps[wave] > 0.01]
+        shape_status = f"Solo {wave_label_for(s, solo).split()[0]}" if solo else f"{len(active)} Waves"
         self.visual_panel_buttons["shape"].set_status(shape_status, {"amps": amps, "muted": muted, "solo": solo, "samples": live_samples})
 
-        follow = s.wave_follow_main_pitch or {wave: True for wave in WAVE_ORDER}
-        notes = s.wave_note or {wave: s.note for wave in WAVE_ORDER}
+        follow = s.wave_follow_main_pitch or {wave: True for wave in wave_order}
+        notes = s.wave_note or {wave: s.note for wave in wave_order}
         pitch_items = []
         custom = []
-        for wave in WAVE_ORDER:
-            color = VisualPanelButton.COLORS.get(wave, QColor("#ff4fa3"))
+        for wave in wave_order:
+            color = VisualPanelButton.COLORS.get(wave_shape_for(s, wave), QColor("#ff4fa3"))
             note_text = s.note if follow.get(wave, True) else str(notes.get(wave, s.note))
             pitch_items.append((wave, note_text, color))
             if not follow.get(wave, True):
@@ -5994,7 +6077,7 @@ class WaveToyWindow(QMainWindow):
         wave_pan = s.wave_pan or {}
         wave_width = s.wave_width or {}
         wave_dance = s.wave_dance or {}
-        for wave in WAVE_ORDER:
+        for wave in wave_order:
             positions.append((wave, wave_pan.get(wave, 0.0), wave_width.get(wave, 0.65), wave_dance.get(wave, 0.0)))
         stereo_status = "Dancing" if s.auto_pan_depth > 0.05 or any(float(item[3]) > 0.05 for item in positions) else "Wide" if s.stereo_width > 0.55 else "Centered"
         self.visual_panel_buttons["stereo"].set_status(stereo_status, {"positions": positions})
@@ -6018,7 +6101,7 @@ class WaveToyWindow(QMainWindow):
         bend_hz = abs(float(s.pitch_start_hz) - float(s.pitch_end_hz))
         bend_text = "Pitch bend on" if bend_hz > 0.5 else "No bends"
         if solo:
-            mute_text = f"Solo {WAVE_LABELS[solo].split()[0]}"
+            mute_text = f"Solo {wave_label_for(s, solo).split()[0]}"
         else:
             muted_count = sum(1 for muted_value in (s.wave_muted or {}).values() if muted_value)
             mute_text = "All waves" if muted_count == 0 else f"{muted_count} muted • {len(active)} active"
@@ -6040,12 +6123,13 @@ class WaveToyWindow(QMainWindow):
         return slider
 
     def _wave_icon(self, wave_type: str) -> str:
+        shape = self._wave_shapes_from_ui().get(wave_type, wave_type) if hasattr(self, "wave_shape_combos") else wave_type
         return {
             "sine": "〰️",
             "triangle": "🔺",
             "sawtooth": "📐",
             "square": "🧱",
-        }.get(wave_type, "〰️")
+        }.get(shape, "〰️")
 
     def _slider_style_sheet(self) -> str:
         """Return centralized slider styling for larger, rounder controls."""
@@ -6743,7 +6827,7 @@ class WaveToyWindow(QMainWindow):
             self.paul_amount_label.setText(self._stretch_picture_text(self.paul_amount_slider.value()))
             self.paul_evolution_label.setText(self._evolution_picture_text(self.paul_evolution_slider.value()))
             self._update_module_labels()
-        for wave_type in WAVE_ORDER:
+        for wave_type in self.wave_row_order:
             if wave_type in self.wave_pan_sliders:
                 self._update_wave_stereo_labels(wave_type)
 
@@ -6804,7 +6888,7 @@ class WaveToyWindow(QMainWindow):
         card.update()
 
     def _refresh_all_wave_card_states(self) -> None:
-        for wave_type in WAVE_ORDER:
+        for wave_type in list(self.wave_row_order):
             self._update_wave_card_state(wave_type)
 
     def _update_module_labels(self) -> None:
@@ -6844,7 +6928,7 @@ class WaveToyWindow(QMainWindow):
         }
 
     def _clip_duration_seconds(self) -> float:
-        return self.duration_slider.value() / SECONDS_SLIDER_SCALE
+        return max(TIMELINE_MIN_CLIP_SECONDS, self.duration_slider.value() / SECONDS_SLIDER_SCALE)
 
     def _slider_midi_to_hz(self, midi_value: int) -> float:
         scaled_midi = midi_value / MIDI_SLIDER_SCALE
@@ -6899,6 +6983,13 @@ class WaveToyWindow(QMainWindow):
             wave_type: button.isChecked()
             for wave_type, button in self.wave_follow_pitch_buttons.items()
         }
+
+    def _wave_shapes_from_ui(self) -> Dict[str, str]:
+        shapes = {wave_type: wave_type for wave_type in DEFAULT_WAVE_ORDER}
+        for wave_type, combo in self.wave_shape_combos.items():
+            shape = str(combo.currentData() or combo.currentText()).lower()
+            shapes[wave_type] = shape if shape in DEFAULT_WAVE_ORDER else "sine"
+        return shapes
 
     def _open_note_wheel(self, wave_type: str) -> None:
         combo = self.wave_note_combos.get(wave_type)
@@ -7019,6 +7110,8 @@ class WaveToyWindow(QMainWindow):
             wave_octave=self._wave_octave_from_ui(),
             wave_cents=self._wave_cents_from_ui(),
             wave_follow_main_pitch=self._wave_follow_main_pitch_from_ui(),
+            wave_shapes=self._wave_shapes_from_ui(),
+            wave_order=list(self.wave_row_order),
             paulstretch_enabled=self.paulstretch_enabled.isChecked(),
             paulstretch_amount=self.paul_amount_slider.value() / PAULSTRETCH_SCALE,
             paulstretch_evolution=self.paul_evolution_slider.value() / (100.0 * PERCENT_SLIDER_SCALE),
@@ -7075,7 +7168,7 @@ class WaveToyWindow(QMainWindow):
     def _visual_conditions_from_ui(self) -> Dict[str, Dict[str, float | bool]]:
         conditions: Dict[str, Dict[str, float | bool]] = {}
 
-        for wave_type in WAVE_ORDER:
+        for wave_type in self.wave_row_order:
             start_db = self.wave_start_sliders[wave_type].value() / DB_SLIDER_SCALE
             end_db = self.wave_end_sliders[wave_type].value() / DB_SLIDER_SCALE
             change_fraction = self.wave_time_sliders[wave_type].value() / (100.0 * PERCENT_SLIDER_SCALE)
@@ -7103,6 +7196,148 @@ class WaveToyWindow(QMainWindow):
 
     def _connect_scheduled_generate(self, signal, reason: str) -> None:
         signal.connect(lambda *args, reason=reason: self._schedule_generate(reason))
+
+    def _add_user_wave_row(self, checked: bool = False) -> None:
+        del checked
+        if len(self.wave_row_order) >= MAX_WAVE_ROWS:
+            QMessageBox.warning(self, "Add Wave", f"WaveToy keeps mixes to {MAX_WAVE_ROWS} wave rows so preview and export stay responsive.")
+            return
+        while True:
+            wave_id = f"wave_{self.next_user_wave_index}"
+            self.next_user_wave_index += 1
+            if wave_id not in self.wave_row_order:
+                break
+        self._create_user_wave_row(wave_id)
+        self._schedule_generate("add_wave")
+
+    def _create_user_wave_row(self, wave_id: str, shape: str = "sine", values: Dict[str, object] | None = None) -> None:
+        if self.wave_rows_layout is None or wave_id in self.wave_row_order or len(self.wave_row_order) >= MAX_WAVE_ROWS:
+            return
+        values = values or {}
+        self.wave_row_order.append(wave_id)
+        self.user_wave_ids.append(wave_id)
+
+        card = QWidget()
+        card.setObjectName("waveCard")
+        self.wave_cards[wave_id] = card
+        layout = QGridLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(5)
+
+        title = QLabel(f"Extra Wave {len(self.wave_row_order)}")
+        title.setObjectName("waveCardTitle")
+        shape_combo = NoWheelComboBox()
+        for shape_id in DEFAULT_WAVE_ORDER:
+            shape_combo.addItem(WAVE_LABELS[shape_id], shape_id)
+        shape_combo.setCurrentIndex(max(0, shape_combo.findData(shape if shape in DEFAULT_WAVE_ORDER else "sine")))
+        shape_combo.currentIndexChanged.connect(lambda _index, wt=wave_id: self._user_wave_shape_changed(wt))
+        self._connect_scheduled_generate(shape_combo.currentIndexChanged, "wave_shape")
+        self.wave_shape_combos[wave_id] = shape_combo
+
+        mute_button = QCheckBox("🎵 On")
+        mute_button.stateChanged.connect(lambda state, wt=wave_id: self._set_wave_muted(wt, bool(state)))
+        solo_button = QCheckBox("⭐ Only Me")
+        solo_button.stateChanged.connect(lambda state, wt=wave_id: self._set_wave_solo(wt, bool(state)))
+        remove_button = QPushButton("➖ Remove")
+        remove_button.clicked.connect(lambda checked=False, wt=wave_id: self._remove_user_wave_row(wt))
+        self.wave_mute_buttons[wave_id] = mute_button
+        self.wave_solo_buttons[wave_id] = solo_button
+
+        follow_pitch = QCheckBox("👯 Follow Main")
+        follow_pitch.setChecked(bool(values.get("follow_main_pitch", True)))
+        pitch_label = QLabel("👯 Main")
+        note_combo = NoWheelComboBox(); note_combo.addItems(NOTE_NAMES); note_combo.setCurrentText(str(values.get("note", "A")) if str(values.get("note", "A")) in NOTE_TO_INDEX else "A")
+        note_button = QPushButton(f"🎡 {emotional_note_text(note_combo.currentText())}")
+        octave_spin = NoWheelSpinBox(); octave_spin.setRange(0, 8); octave_spin.setValue(int(values.get("octave", 4)))
+        cents_slider = NoWheelSlider(Qt.Horizontal); cents_slider.setRange(-50 * 100, 50 * 100); cents_slider.setValue(int(float(values.get("cents", 0.0)) * 100))
+        follow_pitch.stateChanged.connect(lambda _state, wt=wave_id: self._update_wave_pitch_label(wt))
+        note_combo.currentTextChanged.connect(lambda _value, wt=wave_id: self._update_wave_pitch_label(wt))
+        note_button.clicked.connect(lambda checked=False, wt=wave_id: self._open_note_wheel(wt))
+        octave_spin.valueChanged.connect(lambda _value, wt=wave_id: self._update_wave_pitch_label(wt))
+        cents_slider.valueChanged.connect(lambda _value, wt=wave_id: self._update_wave_pitch_label(wt))
+        self._connect_scheduled_generate(follow_pitch.stateChanged, "wave_follow_pitch")
+        self._connect_scheduled_generate(note_combo.currentIndexChanged, "wave_note")
+        self._connect_scheduled_generate(octave_spin.valueChanged, "wave_octave")
+        self._connect_scheduled_generate(cents_slider.valueChanged, "wave_cents")
+        self.wave_follow_pitch_buttons[wave_id] = follow_pitch
+        self.wave_note_combos[wave_id] = note_combo
+        self.wave_note_buttons[wave_id] = note_button
+        self.wave_octave_spins[wave_id] = octave_spin
+        self.wave_cents_sliders[wave_id] = cents_slider
+        self.wave_pitch_labels[wave_id] = pitch_label
+
+        def slider(minimum: int, maximum: int, value: int, reason: str) -> NoWheelSlider:
+            control = NoWheelSlider(Qt.Horizontal)
+            control.setRange(minimum, maximum)
+            control.setValue(value)
+            self._connect_scheduled_generate(control.valueChanged, reason)
+            return control
+
+        start_slider = slider(-20 * DB_SLIDER_SCALE, 0, int(values.get("start_db", -12 * DB_SLIDER_SCALE)), "wave_start_slider")
+        end_slider = slider(-20 * DB_SLIDER_SCALE, 0, int(values.get("end_db", -12 * DB_SLIDER_SCALE)), "wave_end_slider")
+        time_slider = slider(1, 100 * PERCENT_SLIDER_SCALE, int(values.get("change_time_percent", 100 * PERCENT_SLIDER_SCALE)), "wave_time_slider")
+        pan_slider = slider(-100 * PERCENT_SLIDER_SCALE, 100 * PERCENT_SLIDER_SCALE, int(values.get("pan", round(default_wave_pan_for(wave_id, len(self.wave_row_order)) * 100 * PERCENT_SLIDER_SCALE))), "wave_pan_slider")
+        width_slider = slider(0, 100 * PERCENT_SLIDER_SCALE, int(values.get("spread", 65 * PERCENT_SLIDER_SCALE)), "wave_width_slider")
+        dance_slider = slider(0, 100 * PERCENT_SLIDER_SCALE, int(values.get("dance", 0)), "wave_dance_slider")
+        self.wave_start_sliders[wave_id] = start_slider; self.wave_end_sliders[wave_id] = end_slider; self.wave_time_sliders[wave_id] = time_slider
+        self.wave_pan_sliders[wave_id] = pan_slider; self.wave_width_sliders[wave_id] = width_slider; self.wave_dance_sliders[wave_id] = dance_slider
+        self.wave_start_labels[wave_id] = QLabel(); self.wave_end_labels[wave_id] = QLabel(); self.wave_time_labels[wave_id] = QLabel()
+        self.wave_pan_labels[wave_id] = QLabel(); self.wave_width_labels[wave_id] = QLabel(); self.wave_dance_labels[wave_id] = QLabel()
+        for control, updater in ((start_slider, self._update_wave_envelope_labels), (end_slider, self._update_wave_envelope_labels), (time_slider, self._update_wave_envelope_labels), (pan_slider, self._update_wave_stereo_labels), (width_slider, self._update_wave_stereo_labels), (dance_slider, self._update_wave_stereo_labels)):
+            control.valueChanged.connect(lambda _value, wt=wave_id, fn=updater: fn(wt))
+
+        shape_preview = MiniWavePreview(shape if shape in DEFAULT_WAVE_ORDER else "sine", size=QSize(112, 54))
+        self.wave_mix_previews[wave_id] = shape_preview
+        self.wave_envelope_previews[wave_id] = EnvelopePreview(size=QSize(220, 54))
+        self.wave_stereo_field_previews[wave_id] = StereoFieldPreview(shape if shape in DEFAULT_WAVE_ORDER else "sine", size=QSize(220, 54))
+        self.wave_stereo_previews[wave_id] = (MiniWavePreview(shape, channel="left", size=QSize(62, 34)), MiniWavePreview(shape, channel="right", size=QSize(62, 34)))
+
+        layout.addWidget(title, 0, 0)
+        layout.addWidget(QLabel("Shape"), 0, 1); layout.addWidget(shape_combo, 0, 2)
+        layout.addWidget(mute_button, 0, 3); layout.addWidget(solo_button, 0, 4); layout.addWidget(remove_button, 0, 5)
+        layout.addWidget(shape_preview, 1, 0)
+        for col, (caption, label, control) in enumerate((("Start", self.wave_start_labels[wave_id], start_slider), ("End", self.wave_end_labels[wave_id], end_slider), ("Time", self.wave_time_labels[wave_id], time_slider)), start=1):
+            box = QWidget(); box_layout = QVBoxLayout(box); box_layout.setContentsMargins(0, 0, 0, 0); box_layout.addWidget(QLabel(caption)); box_layout.addWidget(label); box_layout.addWidget(control); layout.addWidget(box, 1, col)
+        pitch_box = QWidget(); pitch_layout = QVBoxLayout(pitch_box); pitch_layout.setContentsMargins(0, 0, 0, 0); pitch_layout.addWidget(pitch_label); pitch_layout.addWidget(follow_pitch); pitch_layout.addWidget(note_button); pitch_layout.addWidget(octave_spin); pitch_layout.addWidget(cents_slider); layout.addWidget(pitch_box, 1, 4)
+        stereo_box = QWidget(); stereo_layout = QGridLayout(stereo_box); stereo_layout.setContentsMargins(0, 0, 0, 0)
+        for row, (caption, label, control) in enumerate((("Pan", self.wave_pan_labels[wave_id], pan_slider), ("Width", self.wave_width_labels[wave_id], width_slider), ("Auto-pan", self.wave_dance_labels[wave_id], dance_slider))):
+            stereo_layout.addWidget(QLabel(caption), row, 0); stereo_layout.addWidget(label, row, 1); stereo_layout.addWidget(control, row, 2)
+        layout.addWidget(stereo_box, 1, 5)
+        row_index = max(0, self.wave_rows_layout.count() - 2)
+        self.wave_rows_layout.insertWidget(row_index, card)
+        self._update_wave_pitch_label(wave_id)
+        self._update_wave_envelope_labels(wave_id)
+        self._update_wave_stereo_labels(wave_id)
+        self._user_wave_shape_changed(wave_id)
+
+    def _user_wave_shape_changed(self, wave_id: str) -> None:
+        shape = self._wave_shapes_from_ui().get(wave_id, "sine")
+        for preview in (self.wave_mix_previews.get(wave_id), self.wave_stereo_field_previews.get(wave_id)):
+            if preview is not None and hasattr(preview, "wave_type"):
+                preview.wave_type = shape
+                preview.update()
+        for preview in self.wave_stereo_previews.get(wave_id, ()):
+            preview.wave_type = shape
+            preview.update()
+        self._update_all_wave_previews()
+
+    def _remove_user_wave_row(self, wave_id: str) -> None:
+        if wave_id not in self.user_wave_ids:
+            return
+        widget = self.wave_cards.pop(wave_id, None)
+        if widget is not None:
+            widget.setParent(None)
+            widget.deleteLater()
+        for mapping in (self.wave_start_sliders, self.wave_end_sliders, self.wave_time_sliders, self.wave_start_labels, self.wave_end_labels, self.wave_time_labels, self.wave_pan_sliders, self.wave_width_sliders, self.wave_dance_sliders, self.wave_pan_labels, self.wave_width_labels, self.wave_dance_labels, self.wave_mix_previews, self.wave_envelope_previews, self.wave_stereo_field_previews, self.wave_stereo_previews, self.wave_mute_buttons, self.wave_solo_buttons, self.wave_follow_pitch_buttons, self.wave_note_combos, self.wave_note_buttons, self.wave_octave_spins, self.wave_cents_sliders, self.wave_pitch_labels, self.wave_pitch_panels, self.wave_emotion_labels, self.wave_shape_combos):
+            mapping.pop(wave_id, None)
+        if wave_id in self.wave_row_order:
+            self.wave_row_order.remove(wave_id)
+        if wave_id in self.user_wave_ids:
+            self.user_wave_ids.remove(wave_id)
+        if self.current_settings.solo_wave == wave_id:
+            self._clear_solo()
+        self._schedule_generate("remove_wave")
 
     def _schedule_generate(self, reason: str = "ui_change") -> None:
         was_pending = self._generate_timer.isActive()
@@ -7148,7 +7383,7 @@ class WaveToyWindow(QMainWindow):
         self.current_audio = audio
 
         wave_muted = self.current_settings.wave_muted or {}
-        solo_wave = self.current_settings.solo_wave if self.current_settings.solo_wave in WAVE_ORDER else None
+        solo_wave = self.current_settings.solo_wave if self.current_settings.solo_wave in active_wave_order(self.current_settings) else None
         active_count = sum(
             1
             for wave_type, db in (self.current_settings.wave_start_db or {}).items()
@@ -7188,7 +7423,7 @@ class WaveToyWindow(QMainWindow):
 
             if start_db > -20 or end_db > -20:
                 active.append(
-                    f"{WAVE_LABELS[wave_type]} {start_db:.1f}→{end_db:.1f} dB over {change_time:.1f}s"
+                    f"{wave_label_for(s, wave_type)} {start_db:.1f}→{end_db:.1f} dB over {change_time:.1f}s"
                 )
 
         active_text = ", ".join(active) if active else "no waves yet"
@@ -7200,7 +7435,7 @@ class WaveToyWindow(QMainWindow):
                 end_db = (s.wave_end_db or {}).get(wave_type, start_db)
 
                 if start_db > -20 or end_db > -20:
-                    simple_wave_words.append(WAVE_LABELS[wave_type].lower())
+                    simple_wave_words.append(wave_label_for(s, wave_type).lower())
 
             if not simple_wave_words:
                 wave_sentence = "You have not turned on any waves yet."
@@ -7531,8 +7766,27 @@ class WaveToyWindow(QMainWindow):
                         "octave": self.wave_octave_spins[wave_type].value(),
                         "cents": self.wave_cents_sliders[wave_type].value() / 100.0,
                     }
-                    for wave_type in WAVE_ORDER
+                    for wave_type in self.wave_row_order
                 },
+                "dynamic_wave_entries": [
+                    {
+                        "id": wave_type,
+                        "shape": self._wave_shapes_from_ui().get(wave_type, wave_type),
+                        "user_added": wave_type in self.user_wave_ids,
+                        "start_db": self.wave_start_sliders[wave_type].value(),
+                        "end_db": self.wave_end_sliders[wave_type].value(),
+                        "change_time_percent": self.wave_time_sliders[wave_type].value(),
+                        "pan": self.wave_pan_sliders[wave_type].value(),
+                        "spread": self.wave_width_sliders[wave_type].value(),
+                        "dance": self.wave_dance_sliders[wave_type].value(),
+                        "muted": self.wave_mute_buttons[wave_type].isChecked(),
+                        "follow_main_pitch": self.wave_follow_pitch_buttons[wave_type].isChecked(),
+                        "note": self.wave_note_combos[wave_type].currentText(),
+                        "octave": self.wave_octave_spins[wave_type].value(),
+                        "cents": self.wave_cents_sliders[wave_type].value() / 100.0,
+                    }
+                    for wave_type in self.wave_row_order
+                ],
             },
         }
 
@@ -7617,6 +7871,11 @@ class WaveToyWindow(QMainWindow):
         waves = ui.get("waves", {})
         if not isinstance(waves, dict):
             waves = {}
+        dynamic_entries = ui.get("dynamic_wave_entries", settings.get("dynamic_wave_entries", []))
+        if not isinstance(dynamic_entries, list):
+            dynamic_entries = []
+        for old_wave_id in list(self.user_wave_ids):
+            self._remove_user_wave_row(old_wave_id)
 
         self.note_combo.setCurrentText(str(ui.get("note", settings.get("note", "A"))))
         loaded_octave = float(ui.get("octave", settings.get("octave", 4)))
@@ -7634,7 +7893,7 @@ class WaveToyWindow(QMainWindow):
         self.tuning_reference_spin.setValue(float(ui.get("tuning_reference_hz", settings.get("tuning_reference_hz", 440.0))))
         self.pitch_start.setValue(int(ui.get("pitch_start_slider", round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_start_hz", 440.0))) / 440.0)) * MIDI_SLIDER_SCALE))))
         self.pitch_end.setValue(int(ui.get("pitch_end_slider", round((69 + 12 * math.log2(max(1.0, float(settings.get("pitch_end_hz", 440.0))) / 440.0)) * MIDI_SLIDER_SCALE))))
-        self.duration_slider.setValue(int(round(float(settings.get("duration_seconds", 1.5)) * SECONDS_SLIDER_SCALE)))
+        self.duration_slider.setValue(max(int(TIMELINE_MIN_CLIP_SECONDS * SECONDS_SLIDER_SCALE), int(round(float(settings.get("duration_seconds", 1.5)) * SECONDS_SLIDER_SCALE))))
         self.loud_start.setValue(self._load_scaled_value(ui.get("loudness_start_slider", 40), PERCENT_SLIDER_SCALE, 0, 100))
         self.loud_end.setValue(self._load_scaled_value(ui.get("loudness_end_slider", 40), PERCENT_SLIDER_SCALE, 0, 100))
         self.pan_start_slider.setValue(self._load_scaled_value(ui.get("pan_start_slider", 0), PERCENT_SLIDER_SCALE, -100, 100))
@@ -7668,8 +7927,22 @@ class WaveToyWindow(QMainWindow):
         settings_wave_note = settings.get("wave_note", {}) if isinstance(settings.get("wave_note", {}), dict) else {}
         settings_wave_octave = settings.get("wave_octave", {}) if isinstance(settings.get("wave_octave", {}), dict) else {}
         settings_wave_cents = settings.get("wave_cents", {}) if isinstance(settings.get("wave_cents", {}), dict) else {}
+        settings_wave_shapes = settings.get("wave_shapes", {}) if isinstance(settings.get("wave_shapes", {}), dict) else {}
 
-        for wave_type in WAVE_ORDER:
+        for entry in dynamic_entries[:MAX_WAVE_ROWS]:
+            if not isinstance(entry, dict):
+                continue
+            wave_id = str(entry.get("id", "")).strip()
+            if not wave_id or wave_id in DEFAULT_WAVE_ORDER or wave_id in self.wave_row_order:
+                continue
+            shape = str(entry.get("shape", settings_wave_shapes.get(wave_id, "sine")))
+            self._create_user_wave_row(wave_id, shape if shape in DEFAULT_WAVE_ORDER else "sine", entry)
+
+        for entry in dynamic_entries:
+            if isinstance(entry, dict) and entry.get("id"):
+                waves.setdefault(str(entry.get("id")), entry)
+
+        for wave_type in list(self.wave_row_order):
             wave_data = waves.get(wave_type, {})
             if isinstance(wave_data, dict):
                 start_levels[wave_type] = int(wave_data.get("start_db", -20))
@@ -7692,14 +7965,14 @@ class WaveToyWindow(QMainWindow):
 
         self._set_wave_levels(start_levels, end_levels, times)
         self._set_wave_stereo(wave_pan, wave_width, wave_dance)
-        for wave_type in WAVE_ORDER:
+        for wave_type in list(self.wave_row_order):
             button = self.wave_mute_buttons.get(wave_type)
             if button is not None:
                 button.blockSignals(True)
                 button.setChecked(bool(wave_muted.get(wave_type, False)))
                 button.setText("🤫 Quiet" if button.isChecked() else "🎵 On")
                 button.blockSignals(False)
-        for wave_type in WAVE_ORDER:
+        for wave_type in list(self.wave_row_order):
             follow = self.wave_follow_pitch_buttons.get(wave_type)
             note = self.wave_note_combos.get(wave_type)
             octave = self.wave_octave_spins.get(wave_type)
@@ -7720,6 +7993,13 @@ class WaveToyWindow(QMainWindow):
                 cents.blockSignals(True)
                 cents.setValue(max(-5000, min(5000, int(round(wave_cents.get(wave_type, 0.0) * 100)))))
                 cents.blockSignals(False)
+            shape_combo = self.wave_shape_combos.get(wave_type)
+            if shape_combo is not None:
+                shape_value = str((waves.get(wave_type, {}) if isinstance(waves.get(wave_type, {}), dict) else {}).get("shape", settings_wave_shapes.get(wave_type, "sine")))
+                shape_combo.blockSignals(True)
+                shape_combo.setCurrentIndex(max(0, shape_combo.findData(shape_value if shape_value in DEFAULT_WAVE_ORDER else "sine")))
+                shape_combo.blockSignals(False)
+                self._user_wave_shape_changed(wave_type)
             self._update_wave_pitch_label(wave_type)
 
         solo_wave = ui.get("solo_wave", settings.get("solo_wave"))
@@ -7916,7 +8196,7 @@ class WaveToyWindow(QMainWindow):
         width_values: Dict[str, int],
         dance_values: Dict[str, int],
     ) -> None:
-        for wave_type in WAVE_ORDER:
+        for wave_type in list(self.wave_row_order):
             for slider_dict, value_dict, default_value in [
                 (self.wave_pan_sliders, pan_values, self.wave_pan_sliders[wave_type].value()),
                 (self.wave_width_sliders, width_values, self.wave_width_sliders[wave_type].value()),
@@ -7948,9 +8228,9 @@ class WaveToyWindow(QMainWindow):
         times: Dict[str, int] | None = None,
     ) -> None:
         end_levels = end_levels or levels
-        times = times or {wave_type: 100 for wave_type in WAVE_ORDER}
+        times = times or {wave_type: 100 for wave_type in self.wave_row_order}
 
-        for wave_type in WAVE_ORDER:
+        for wave_type in list(self.wave_row_order):
             for slider_dict, value_dict, default_value in [
                 (self.wave_start_sliders, levels, -20),
                 (self.wave_end_sliders, end_levels, -20),
@@ -7995,7 +8275,7 @@ class WaveToyWindow(QMainWindow):
         return build_wave_preview_samples(self._settings_from_ui(), wave_type)
 
     def _update_all_wave_previews(self) -> None:
-        for wave_type in WAVE_ORDER:
+        for wave_type in list(self.wave_row_order):
             self._update_wave_previews(wave_type)
 
     def _wave_preview_amplitude(self, wave_type: str) -> float:
