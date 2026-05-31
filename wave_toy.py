@@ -4145,6 +4145,7 @@ class WaveToyWindow(QMainWindow):
             "allow_word_gaps": False,
             "boundary_smoothing_ms": 8,
             "smooth_mouth_transitions": True,
+            "transition_debug_verbose": False,
             "word_fade_in_ms": 5,
             "word_fade_out_ms": 8,
         }
@@ -6164,8 +6165,8 @@ class WaveToyWindow(QMainWindow):
             crossfade = int(max(0, crossfade_ms) * SAMPLE_RATE / 1000.0)
             crossfade = min(crossfade, len(word) - 1, len(clip) - 1, int(0.50 * min(len(word), len(clip))))
             if crossfade > 1:
-                fade_out = np.linspace(1.0, 0.0, crossfade, dtype=np.float32)[:, None]
-                fade_in = np.linspace(0.0, 1.0, crossfade, dtype=np.float32)[:, None]
+                fade_out = np.cos(np.linspace(0.0, math.pi / 2.0, crossfade, dtype=np.float32))[:, None]
+                fade_in = np.sin(np.linspace(0.0, math.pi / 2.0, crossfade, dtype=np.float32))[:, None]
                 overlap = word[-crossfade:] * fade_out + clip[:crossfade] * fade_in
                 boundary = len(word) - crossfade // 2
                 boundaries.append(boundary)
@@ -6178,6 +6179,76 @@ class WaveToyWindow(QMainWindow):
         if gap_samples:
             combined = np.vstack([combined, np.zeros((gap_samples, 2), dtype=np.float32)])
         return combined.astype(np.float32)
+
+    def _effective_transition_samples(self, left_clip: np.ndarray, right_clip: np.ndarray, requested_ms: int, left: ArticulationChainItem, right: ArticulationChainItem) -> int:
+        requested_samples = int(max(0, requested_ms) * SAMPLE_RATE / 1000.0)
+        if requested_samples <= 0 or left_clip.size == 0 or right_clip.size == 0:
+            return 0
+        shorter = max(1, min(len(left_clip), len(right_clip)))
+        left_family = left.phoneme_for_render().phoneme_family
+        right_family = right.phoneme_for_render().phoneme_family
+        fraction = 0.45
+        if left_family == "stop" or right_family == "stop":
+            fraction = 0.30
+        if left_family == "stop" and right_family == "vowel":
+            fraction = 0.22
+        maximum_samples = max(1, int(shorter * fraction))
+        return int(min(requested_samples, maximum_samples))
+
+    def _overlap_word_clip(self, word: np.ndarray, clip: np.ndarray, overlap_samples: int, boundaries: List[int]) -> np.ndarray:
+        if clip.size == 0:
+            return word.astype(np.float32)
+        clip = np.array(clip, dtype=np.float32, copy=True)
+        if word.size == 0:
+            return clip.astype(np.float32)
+        overlap_samples = int(min(max(0, overlap_samples), len(word) - 1, len(clip) - 1))
+        if overlap_samples <= 1:
+            boundaries.append(len(word))
+            return np.vstack([word, clip]).astype(np.float32)
+        fade_out = np.cos(np.linspace(0.0, math.pi / 2.0, overlap_samples, dtype=np.float32))[:, None]
+        fade_in = np.sin(np.linspace(0.0, math.pi / 2.0, overlap_samples, dtype=np.float32))[:, None]
+        overlap = word[-overlap_samples:] * fade_out + clip[:overlap_samples] * fade_in
+        boundary = len(word) - overlap_samples // 2
+        boundaries.append(boundary)
+        return np.vstack([word[:-overlap_samples], overlap, clip[overlap_samples:]]).astype(np.float32)
+
+    def _transition_gain_snapshot(self, phoneme: ArticulationPhoneme) -> Dict[str, float]:
+        debug = articulation_synthesis_debug(phoneme)
+        return {
+            "voiced_gain": float(debug.get("voiced_gain", 0.0)),
+            "noise_gain": float(debug.get("noise_gain", 0.0)),
+            "tonal_gain": float(debug.get("tonal_gain", 0.0)),
+        }
+
+    def _log_transition_boundary(self, left: ArticulationChainItem, right: ArticulationChainItem, requested_ms: int, effective_samples: int, inserted_silence_samples: int = 0, transition_render_samples: int = 0, interpolated_articulation_used: bool = False) -> None:
+        left_phoneme = left.phoneme_for_render()
+        right_phoneme = right.phoneme_for_render()
+        start_gain = self._transition_gain_snapshot(left_phoneme)
+        end_gain = self._transition_gain_snapshot(right_phoneme)
+        effective_ms = effective_samples * 1000.0 / SAMPLE_RATE
+        print(
+            "[WaveToy Transition] "
+            f"{left_phoneme.name}->{right_phoneme.name} "
+            f"families={left_phoneme.phoneme_family}->{right_phoneme.phoneme_family} "
+            f"requested_transition_ms={int(requested_ms)} "
+            f"effective_transition_ms={effective_ms:.1f} "
+            f"crossfade_samples={int(effective_samples)} "
+            f"inserted_silence_samples={int(inserted_silence_samples)} "
+            f"transition_render_samples={int(transition_render_samples)} "
+            f"interpolated_articulation_used={bool(interpolated_articulation_used)} "
+            f"voiced_gain_start={start_gain['voiced_gain']:.3f} "
+            f"voiced_gain_end={end_gain['voiced_gain']:.3f} "
+            f"noise_gain_start={start_gain['noise_gain']:.3f} "
+            f"noise_gain_end={end_gain['noise_gain']:.3f} "
+            f"tonal_gain_start={start_gain['tonal_gain']:.3f} "
+            f"tonal_gain_end={end_gain['tonal_gain']:.3f}"
+        )
+        if bool(self.articulation_word_render_settings.get("transition_debug_verbose", False)):
+            print(
+                "[WaveToy Transition] verbose "
+                f"left_duration_ms={left_phoneme.duration_ms} right_duration_ms={right_phoneme.duration_ms} "
+                f"left_source={left_phoneme.source_mode} right_source={right_phoneme.source_mode}"
+            )
 
     def _render_articulation_word_simple(self) -> np.ndarray:
         word = np.zeros((0, 2), dtype=np.float32)
@@ -6249,17 +6320,25 @@ class WaveToyWindow(QMainWindow):
     def _render_articulation_word_coarticulated(self) -> np.ndarray:
         word = np.zeros((0, 2), dtype=np.float32)
         boundaries: List[int] = []
-        print(f"[WaveToy Word] word render started • mode coarticulated • phoneme count {len(self.articulation_chain_items)}")
-        for index, item in enumerate(self.articulation_chain_items):
-            clip = self._render_articulation_with_source(item.phoneme_for_render())
-            phoneme_crossfade_ms = 0 if index == 0 else self._word_crossfade_ms(ARTICULATION_DEFAULT_WORD_CROSSFADE_MS)
-            word = self._append_word_clip(word, clip, phoneme_crossfade_ms, 0, boundaries)
-            if index < len(self.articulation_chain_items) - 1:
-                next_item = self.articulation_chain_items[index + 1]
-                transition_ms = self._chain_transition_duration_ms(item, next_item)
-                transition = self._render_interpolated_transition_clip(item, next_item, transition_ms)
-                transition_crossfade_ms = self._word_crossfade_ms(self._chain_boundary_crossfade_ms(item, next_item), item, next_item)
-                word = self._append_word_clip(word, transition, transition_crossfade_ms, self._word_gap_after_ms(item, index), boundaries)
+        print(f"[WaveToy Word] word render started • mode coarticulated overlap • phoneme count {len(self.articulation_chain_items)}")
+        clips = [self._render_articulation_with_source(item.phoneme_for_render()) for item in self.articulation_chain_items]
+        for index, (item, clip) in enumerate(zip(self.articulation_chain_items, clips)):
+            if index == 0:
+                word = self._overlap_word_clip(word, clip, 0, boundaries)
+                continue
+            previous_item = self.articulation_chain_items[index - 1]
+            requested_transition_ms = self._chain_transition_duration_ms(previous_item, item)
+            effective_samples = self._effective_transition_samples(clips[index - 1], clip, requested_transition_ms, previous_item, item)
+            self._log_transition_boundary(
+                previous_item,
+                item,
+                requested_transition_ms,
+                effective_samples,
+                inserted_silence_samples=0,
+                transition_render_samples=0,
+                interpolated_articulation_used=False,
+            )
+            word = self._overlap_word_clip(word, clip, effective_samples, boundaries)
         word = self._smooth_word_boundaries(word, boundaries)
         word = self._fade_word_edges(word)
         word = normalize_audio(word).astype(np.float32)
