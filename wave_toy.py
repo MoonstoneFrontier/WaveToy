@@ -303,6 +303,55 @@ class AudioPaletteItem:
 
 
 @dataclass
+class SpeechBinItem:
+    """Created articulation audio source available inside the Timeline Speech Bin."""
+
+    id: int
+    name: str
+    item_type: str
+    ipa_sequence: str
+    display_sequence: str
+    duration_seconds: float
+    audio_cache_path: str | None
+    articulation_metadata: Dict[str, object]
+    source_mode: str
+    created_at: float
+    audio_data: np.ndarray
+
+    @property
+    def icon(self) -> str:
+        return {
+            "phoneme": "🔤",
+            "syllable": "🔡",
+            "word": "🧩",
+            "chain": "🧬",
+        }.get(self.item_type, "🗣")
+
+    @property
+    def source_type(self) -> str:
+        return {
+            "phoneme": "articulation_phoneme",
+            "syllable": "articulation_syllable_render",
+            "word": "articulation_word_render",
+            "chain": "articulation_chain_raw",
+        }.get(self.item_type, "articulation_word_render")
+
+    def metadata(self) -> Dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "item_type": self.item_type,
+            "ipa_sequence": self.ipa_sequence,
+            "display_sequence": self.display_sequence,
+            "duration_seconds": self.duration_seconds,
+            "audio_cache_path": self.audio_cache_path,
+            "articulation_metadata": self.articulation_metadata,
+            "source_mode": self.source_mode,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
 class TimelineClip:
     """Audio clip placed on the Timeline storyboard."""
 
@@ -315,6 +364,9 @@ class TimelineClip:
     recipe: Dict[str, object] | None = None
     source_path: str | None = None
     import_metadata: Dict[str, object] | None = None
+    source_type: str = "generated_wavetoy_sound"
+    speech_metadata: Dict[str, object] | None = None
+    muted_warning: str | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -328,12 +380,17 @@ class TimelineClip:
             "lane": self.lane,
             "duration_seconds": self.duration_seconds,
             "sample_rate": self.sample_rate,
+            "source_type": self.source_type,
             "recipe": self.recipe or {},
         }
         if self.source_path:
             data["source_path"] = self.source_path
         if self.import_metadata:
             data["import_metadata"] = self.import_metadata
+        if self.speech_metadata:
+            data["speech_metadata"] = self.speech_metadata
+        if self.muted_warning:
+            data["muted_warning"] = self.muted_warning
         return data
 
 
@@ -2344,6 +2401,88 @@ class AudioPaletteCard(QWidget):
             self.owner._timeline_add_palette_item_to_playhead(self.item.item_id)
 
 
+class SpeechBinCard(QWidget):
+    """Large draggable toy card for created articulation speech units."""
+
+    def __init__(self, owner: "WaveToyWindow", item: SpeechBinItem) -> None:
+        super().__init__()
+        self.owner = owner
+        self.item = item
+        self.drag_start_pos: QPoint | None = None
+        self.setObjectName("speechBinCard")
+        self.setMinimumHeight(96)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_menu)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(76, 10, 10, 10)
+        layout.addStretch(1)
+        add_button = QPushButton("➕ Add")
+        add_button.setMinimumSize(QSize(86, WaveToySizing.MIN_TOUCH_TARGET))
+        add_button.setCursor(Qt.PointingHandCursor)
+        add_button.clicked.connect(lambda checked=False: self.owner._timeline_add_speech_item_to_playhead(self.item.id))
+        layout.addWidget(add_button, 0, Qt.AlignRight | Qt.AlignBottom)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(3, 3, -3, -3)
+        selected = getattr(self.owner, "timeline_selected_speech_item_id", None) == self.item.id
+        painter.setPen(QPen(QColor("#ff4fa3" if selected else "#7b2cbf"), 4))
+        painter.setBrush(QColor("#fff1fb" if selected else "#ffffff"))
+        painter.drawRoundedRect(rect, 22, 22)
+
+        painter.setFont(QFont("Arial", 28, QFont.Bold))
+        painter.setPen(QColor("#263238"))
+        painter.drawText(QRectF(rect.left() + 10, rect.top() + 12, 54, 46), Qt.AlignCenter, self.item.icon)
+
+        text_left = rect.left() + 72
+        painter.setFont(QFont("Arial", 14, QFont.Bold))
+        painter.drawText(QRectF(text_left, rect.top() + 12, rect.width() - 160, 24), Qt.AlignLeft | Qt.AlignVCenter, self.item.name)
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        painter.setPen(QColor("#7b2cbf"))
+        painter.drawText(QRectF(text_left, rect.top() + 36, rect.width() - 150, 20), Qt.AlignLeft | Qt.AlignVCenter, f"{self.item.item_type} • {self.item.duration_seconds:.2f}s")
+        painter.setPen(QColor("#607d8b"))
+        painter.drawText(QRectF(text_left, rect.top() + 60, rect.width() - 150, 22), Qt.AlignLeft | Qt.AlignVCenter, self.item.display_sequence or self.item.ipa_sequence)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            self.owner._timeline_select_speech_item(self.item.id)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.drag_start_pos is None or not (event.buttons() & Qt.LeftButton):
+            return super().mouseMoveEvent(event)
+        if (event.pos() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+            return
+        mime = QMimeData()
+        mime.setData("application/x-wavetoy-speech-id", str(self.item.id).encode("utf-8"))
+        mime.setText(self.item.name)
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.transparent)
+        self.render(pixmap)
+        drag.setPixmap(pixmap.scaledToWidth(220, Qt.SmoothTransformation))
+        drag.setHotSpot(QPoint(30, 30))
+        drag.exec(Qt.CopyAction)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.setCursor(Qt.OpenHandCursor)
+        self.drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _show_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+        add_action = menu.addAction("➕ Add to Timeline at Playhead")
+        action = menu.exec(self.mapToGlobal(pos))
+        if action == add_action:
+            self.owner._timeline_add_speech_item_to_playhead(self.item.id)
+
+
 class TimelineCanvas(QWidget):
     """Large draggable timeline canvas for arranging sound clips."""
 
@@ -2448,24 +2587,29 @@ class TimelineCanvas(QWidget):
         for clip in getattr(self.owner, "timeline_clips", []):
             rect = self._clip_rect(clip)
             selected = clip.clip_id == self.selected_clip_id
+            is_speech = str(getattr(clip, "source_type", "")).startswith("articulation_")
+            speech_type = str((clip.speech_metadata or {}).get("item_type", "speech")) if is_speech else ""
+            icon = {"phoneme": "🔤", "syllable": "🔡", "word": "🧩", "chain": "🧬"}.get(speech_type, "🌊")
             gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            gradient.setColorAt(0.0, QColor("#fff8d9"))
-            gradient.setColorAt(1.0, QColor("#b8f2e6" if not selected else "#ffd166"))
-            painter.setPen(QPen(QColor("#ff4fa3" if selected else "#5c6bc0"), 5 if selected else 4))
+            gradient.setColorAt(0.0, QColor("#fff8d9" if not is_speech else "#fff1fb"))
+            gradient.setColorAt(1.0, QColor(("#e7c6ff" if is_speech else "#b8f2e6") if not selected else "#ffd166"))
+            painter.setPen(QPen(QColor("#ff4fa3" if selected else ("#7b2cbf" if is_speech else "#5c6bc0")), 5 if selected else 4))
             painter.setBrush(gradient)
             painter.drawRoundedRect(rect, 22, 22)
 
             painter.setFont(QFont("Arial", 30, QFont.Bold))
             painter.setPen(QColor("#263238"))
-            painter.drawText(QRectF(rect.left() + 12, rect.top() + 10, 48, 42), Qt.AlignCenter, "🌊")
+            painter.drawText(QRectF(rect.left() + 12, rect.top() + 10, 48, 42), Qt.AlignCenter, icon)
             painter.setFont(QFont("Arial", 16, QFont.Bold))
             painter.drawText(QRectF(rect.left() + 66, rect.top() + 10, rect.width() - 80, 28), Qt.AlignLeft | Qt.AlignVCenter, clip.name)
             painter.setFont(QFont("Arial", 12, QFont.Bold))
-            painter.setPen(QColor("#607d8b"))
-            painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, rect.width() - 80, 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • Lane {clip.lane + 1}")
+            painter.setPen(QColor("#7b2cbf" if is_speech else "#607d8b"))
+            badge = f" • {speech_type}" if is_speech else ""
+            warning = " • muted" if clip.muted_warning else ""
+            painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, rect.width() - 80, 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • Lane {clip.lane + 1}{badge}{warning}")
 
             wave_rect = rect.adjusted(14, 62, -14, -12)
-            painter.setPen(QPen(QColor("#00a8cc"), 3, Qt.SolidLine, Qt.RoundCap))
+            painter.setPen(QPen(QColor("#7b2cbf" if is_speech else "#00a8cc"), 3, Qt.SolidLine, Qt.RoundCap))
             audio = np.asarray(clip.audio)
             if audio.ndim == 2 and len(audio) > 1:
                 mono = audio.mean(axis=1)
@@ -2524,13 +2668,13 @@ class TimelineCanvas(QWidget):
         self.update()
 
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasFormat("application/x-wavetoy-palette-id"):
+        if event.mimeData().hasFormat("application/x-wavetoy-palette-id") or event.mimeData().hasFormat("application/x-wavetoy-speech-id"):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if not event.mimeData().hasFormat("application/x-wavetoy-palette-id"):
+        if not (event.mimeData().hasFormat("application/x-wavetoy-palette-id") or event.mimeData().hasFormat("application/x-wavetoy-speech-id")):
             event.ignore()
             return
         self.drop_highlight_lane = self._lane_from_y(event.position().y())
@@ -2543,18 +2687,27 @@ class TimelineCanvas(QWidget):
         event.accept()
 
     def dropEvent(self, event) -> None:
-        if not event.mimeData().hasFormat("application/x-wavetoy-palette-id"):
-            event.ignore()
-            return
-        try:
-            item_id = int(bytes(event.mimeData().data("application/x-wavetoy-palette-id")).decode("utf-8"))
-        except ValueError:
-            event.ignore()
-            return
         start_time = self._x_to_time(event.position().x())
         lane = self._lane_from_y(event.position().y())
-        self.owner._timeline_debug(f"Palette item dropped on timeline id={item_id} start={start_time:.3f}s lane={lane}")
-        self.owner._timeline_add_palette_item_to_timeline(item_id, start_time, lane)
+        if event.mimeData().hasFormat("application/x-wavetoy-speech-id"):
+            try:
+                item_id = int(bytes(event.mimeData().data("application/x-wavetoy-speech-id")).decode("utf-8"))
+            except ValueError:
+                event.ignore()
+                return
+            self.owner._timeline_debug(f"Speech item dropped on timeline id={item_id} start={start_time:.3f}s lane={lane}")
+            self.owner._timeline_add_speech_item_to_timeline(item_id, start_time, lane)
+        elif event.mimeData().hasFormat("application/x-wavetoy-palette-id"):
+            try:
+                item_id = int(bytes(event.mimeData().data("application/x-wavetoy-palette-id")).decode("utf-8"))
+            except ValueError:
+                event.ignore()
+                return
+            self.owner._timeline_debug(f"Palette item dropped on timeline id={item_id} start={start_time:.3f}s lane={lane}")
+            self.owner._timeline_add_palette_item_to_timeline(item_id, start_time, lane)
+        else:
+            event.ignore()
+            return
         self.drop_highlight_lane = None
         self.update()
         event.acceptProposedAction()
@@ -3691,6 +3844,12 @@ class WaveToyWindow(QMainWindow):
         self.timeline_selected_palette_item_id: int | None = None
         self.timeline_palette_list_widget: QWidget | None = None
         self.timeline_palette_count_label: QLabel | None = None
+        self.timeline_speech_bin: List[SpeechBinItem] = []
+        self.timeline_next_speech_item_id = 1
+        self.timeline_selected_speech_item_id: int | None = None
+        self.timeline_speech_bin_widget: QWidget | None = None
+        self.timeline_speech_count_label: QLabel | None = None
+        self.timeline_speech_cache_dir = Path(".wavetoy_speech_cache")
         self.timeline_playhead_seconds = 0.0
         self.timeline_duration_seconds = 0.0
         self.timeline_last_mix = np.zeros((0, 2), dtype=np.float32)
@@ -4690,7 +4849,10 @@ class WaveToyWindow(QMainWindow):
         chain_buttons = QHBoxLayout()
         for icon, label, color, callback in (
             ("➕", "Add Current", "#5cdb95", self._add_current_phoneme_to_chain),
+            ("➕", "Send Phoneme to Timeline", "#e7c6ff", self._send_current_phoneme_to_timeline),
             ("🧩", "Create Word", "#ffd166", self._create_articulation_word),
+            ("🔡", "Create Syllable", "#caffbf", self._create_articulation_syllable),
+            ("➕", "Send Word to Timeline", "#ffc6ff", self._send_articulation_word_to_timeline),
             ("▶", "Play Word", "#b8f2e6", self._play_articulation_word),
             ("💾", "Export Word", "#fdffb6", self._export_articulation_word),
             ("🧹", "Clear Chain", "#ffadad", self._clear_articulation_chain),
@@ -4702,6 +4864,7 @@ class WaveToyWindow(QMainWindow):
         chain_file_buttons = QHBoxLayout()
         for icon, label, color, callback in (
             ("▶", "Play Chain", "#caffbf", self._play_articulation_chain),
+            ("➕", "Send Chain to Timeline", "#e7c6ff", self._send_articulation_chain_to_timeline),
             ("💾", "Save Chain", "#ffd166", self._save_articulation_chain),
             ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain),
         ):
@@ -5448,10 +5611,12 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_created_at = time.time()
         self.articulation_last_word_render_path = None
         self._update_articulation_word_status()
+        word_item = self._create_rendered_speech_bin_item("word")
+        bin_text = f" Added to Speech Bin as {word_item.icon} {word_item.name}." if word_item is not None else ""
         QMessageBox.information(
             self,
             "Create Word",
-            f"Word ready: {len(self.articulation_word_render_audio) / SAMPLE_RATE:.2f}s from {len(self.articulation_chain_items)} phoneme(s).",
+            f"Word ready: {len(self.articulation_word_render_audio) / SAMPLE_RATE:.2f}s from {len(self.articulation_chain_items)} phoneme(s).{bin_text}",
         )
         return self.articulation_word_render_audio
 
@@ -5863,8 +6028,36 @@ class WaveToyWindow(QMainWindow):
         palette_layout.addWidget(import_button)
         palette_layout.addWidget(self.timeline_palette_count_label)
         palette_layout.addWidget(palette_scroll, 1)
+
+        speech_title = QLabel("🗣 Speech Bin")
+        speech_title.setObjectName("timelineInspectorTitle")
+        speech_subtitle = QLabel("Created phonemes, chains, syllables, and words appear here. Drag cards into lanes or tap ➕ Add.")
+        speech_subtitle.setObjectName("timelineInspectorText")
+        speech_subtitle.setWordWrap(True)
+        speech_actions = QHBoxLayout()
+        for icon, label, color, callback in (
+            ("📥", "Add Created Word", "#ffd166", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("word")),
+            ("📥", "Add Created Syllable", "#e7c6ff", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("syllable")),
+            ("📥", "Add Chain", "#caffbf", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("chain")),
+        ):
+            button = self._make_story_button(icon, label, color, callback)
+            button.setMinimumHeight(58)
+            speech_actions.addWidget(button)
+        self.timeline_speech_count_label = QLabel("No created speech yet.")
+        self.timeline_speech_count_label.setObjectName("timelineInspectorText")
+        self.timeline_speech_count_label.setWordWrap(True)
+        speech_scroll = WaveToyScrollArea(scroll_speed=0.9)
+        self.timeline_speech_bin_widget = QWidget()
+        self.timeline_speech_bin_widget.setObjectName("timelineSpeechBinList")
+        speech_scroll.setWidget(self.timeline_speech_bin_widget)
+        palette_layout.addWidget(speech_title)
+        palette_layout.addWidget(speech_subtitle)
+        palette_layout.addLayout(speech_actions)
+        palette_layout.addWidget(self.timeline_speech_count_label)
+        palette_layout.addWidget(speech_scroll, 1)
         split.addWidget(palette)
         self._timeline_refresh_palette_cards()
+        self._timeline_refresh_speech_bin_cards()
 
         scroll = WaveToyScrollArea(scroll_speed=1.0, content_drag_scroll=False)
         scroll.setWidgetResizable(False)
@@ -5899,6 +6092,161 @@ class WaveToyWindow(QMainWindow):
         self._timeline_update_inspector()
         self.tabs.insertTab(min(3, self.tabs.count()), tab, "🎬 Timeline")
         self._timeline_debug("Timeline tab constructed")
+
+    def _speech_display_sequence_for_chain(self) -> str:
+        return " + ".join(item.phoneme.name for item in self.articulation_chain_items) or "Empty Chain"
+
+    def _speech_ipa_sequence_for_chain(self) -> str:
+        return " ".join(f"/{item.phoneme.ipa}/" for item in self.articulation_chain_items)
+
+    def _speech_chain_metadata_snapshot(self) -> Dict[str, object]:
+        return ArticulationChain(
+            items=self.articulation_chain_items,
+            last_word_render_path=str(self.articulation_last_word_render_path) if self.articulation_last_word_render_path else None,
+            last_word_render_created_at=self.articulation_last_word_render_created_at,
+            word_render_settings=dict(self.articulation_word_render_settings),
+        ).to_json_dict()
+
+    def _speech_cache_audio(self, audio: np.ndarray, prefix: str, item_id: int) -> str | None:
+        if audio.size == 0:
+            return None
+        try:
+            self.timeline_speech_cache_dir.mkdir(parents=True, exist_ok=True)
+            path = self.timeline_speech_cache_dir / f"{prefix}_{item_id}_{int(time.time())}.wav"
+            save_wav(path, audio, SAMPLE_RATE)
+            return str(path)
+        except Exception as exc:
+            self._timeline_debug(f"Speech cache write failed prefix={prefix} error={exc}")
+            return None
+
+    def _add_speech_bin_item(
+        self,
+        name: str,
+        item_type: str,
+        audio: np.ndarray,
+        ipa_sequence: str,
+        display_sequence: str,
+        articulation_metadata: Dict[str, object],
+        source_mode: str,
+    ) -> SpeechBinItem | None:
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim == 1:
+            audio = np.column_stack([audio, audio]).astype(np.float32)
+        if audio.ndim != 2 or audio.size == 0:
+            QMessageBox.warning(self, "Speech Bin", "That speech item did not render any audio, so it was not added to the Speech Bin.")
+            return None
+        if audio.shape[1] == 1:
+            audio = np.repeat(audio, 2, axis=1)
+        if audio.shape[1] > 2:
+            audio = audio[:, :2]
+        item_id = self.timeline_next_speech_item_id
+        self.timeline_next_speech_item_id += 1
+        item = SpeechBinItem(
+            id=item_id,
+            name=name,
+            item_type=item_type,
+            ipa_sequence=ipa_sequence,
+            display_sequence=display_sequence,
+            duration_seconds=len(audio) / SAMPLE_RATE,
+            audio_cache_path=self._speech_cache_audio(audio, item_type, item_id),
+            articulation_metadata=articulation_metadata,
+            source_mode=source_mode,
+            created_at=time.time(),
+            audio_data=np.array(audio, dtype=np.float32, copy=True),
+        )
+        self.timeline_speech_bin.append(item)
+        self.timeline_selected_speech_item_id = item.id
+        self._timeline_refresh_speech_bin_cards()
+        self._timeline_debug(f"Speech Bin item added id={item.id} type={item.item_type} name={item.name} duration={item.duration_seconds:.3f}s cache={item.audio_cache_path}")
+        return item
+
+    def _current_phoneme_speech_name(self, phoneme: ArticulationPhoneme) -> str:
+        return f"{phoneme.name} /{phoneme.ipa}/"
+
+    def _create_phoneme_speech_bin_item(self) -> SpeechBinItem | None:
+        self.current_phoneme = self._phoneme_from_articulation_ui().clamped()
+        audio = self._render_articulation_with_source(self.current_phoneme)
+        metadata = {"phoneme": self.current_phoneme.to_json_dict()}
+        return self._add_speech_bin_item(
+            name=self._current_phoneme_speech_name(self.current_phoneme),
+            item_type="phoneme",
+            audio=audio,
+            ipa_sequence=f"/{self.current_phoneme.ipa}/",
+            display_sequence=self.current_phoneme.name,
+            articulation_metadata=metadata,
+            source_mode=self.current_phoneme.source_mode,
+        )
+
+    def _create_chain_speech_bin_item(self) -> SpeechBinItem | None:
+        if not self.articulation_chain_items:
+            QMessageBox.information(self, "Speech Bin", "Add at least one phoneme to the Articulation Chain first.")
+            return None
+        rendered = [self._render_articulation_with_source(item.phoneme_for_render()) for item in self.articulation_chain_items]
+        audio = np.vstack([clip for clip in rendered if clip.size]) if rendered else np.zeros((0, 2), dtype=np.float32)
+        return self._add_speech_bin_item(
+            name=self._speech_display_sequence_for_chain(),
+            item_type="chain",
+            audio=audio,
+            ipa_sequence=self._speech_ipa_sequence_for_chain(),
+            display_sequence=self._speech_display_sequence_for_chain(),
+            articulation_metadata=self._speech_chain_metadata_snapshot(),
+            source_mode="articulation_chain_raw",
+        )
+
+    def _create_rendered_speech_bin_item(self, item_type: str, name: str | None = None) -> SpeechBinItem | None:
+        if not self.articulation_chain_items:
+            QMessageBox.information(self, "Speech Bin", "Add at least one phoneme to the Articulation Chain first.")
+            return None
+        if self.articulation_word_render_audio.size == 0:
+            audio = self._create_articulation_word(checked=False)
+            if audio.size == 0:
+                return None
+        display = self._speech_display_sequence_for_chain()
+        if not name:
+            default = display.replace(" + ", "").lower() if item_type == "word" else display.replace(" + ", "")
+            name = default or item_type.title()
+        return self._add_speech_bin_item(
+            name=name,
+            item_type=item_type,
+            audio=self.articulation_word_render_audio,
+            ipa_sequence=self._speech_ipa_sequence_for_chain(),
+            display_sequence=display,
+            articulation_metadata=self._speech_chain_metadata_snapshot(),
+            source_mode=f"articulation_{item_type}_render",
+        )
+
+    def _send_current_phoneme_to_timeline(self, checked: bool = False) -> None:
+        del checked
+        item = self._create_phoneme_speech_bin_item()
+        if item is not None:
+            self._timeline_add_speech_item_to_playhead(item.id)
+
+    def _send_articulation_chain_to_timeline(self, checked: bool = False) -> None:
+        del checked
+        item = self._create_chain_speech_bin_item()
+        if item is not None:
+            self._timeline_add_speech_item_to_playhead(item.id)
+
+    def _create_articulation_syllable(self, checked: bool = False) -> np.ndarray:
+        del checked
+        if self.articulation_word_render_audio.size == 0:
+            audio = self._create_articulation_word(checked=False)
+            if audio.size == 0:
+                return audio
+        item = self._create_rendered_speech_bin_item("syllable")
+        if item is not None:
+            QMessageBox.information(self, "Create Syllable", f"Syllable ready in Speech Bin: {item.name} ({item.duration_seconds:.2f}s).")
+        return self.articulation_word_render_audio
+
+    def _send_articulation_word_to_timeline(self, checked: bool = False) -> None:
+        del checked
+        word_item = next((item for item in reversed(self.timeline_speech_bin) if item.item_type == "word"), None)
+        if self.articulation_word_render_audio.size == 0 or word_item is None:
+            if self._create_articulation_word(checked=False).size == 0:
+                return
+            word_item = next((item for item in reversed(self.timeline_speech_bin) if item.item_type == "word"), None)
+        if word_item is not None:
+            self._timeline_add_speech_item_to_playhead(word_item.id)
 
     def _timeline_refresh_palette_cards(self) -> None:
         if self.timeline_palette_list_widget is None:
@@ -5941,6 +6289,145 @@ class WaveToyWindow(QMainWindow):
             if item.item_id == item_id:
                 return item
         return None
+
+    def _timeline_refresh_speech_bin_cards(self) -> None:
+        if self.timeline_speech_bin_widget is None:
+            return
+        layout = self.timeline_speech_bin_widget.layout()
+        if layout is None:
+            layout = QVBoxLayout(self.timeline_speech_bin_widget)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(10)
+        else:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+        if not self.timeline_speech_bin:
+            empty = QLabel("🧩 Create a word, syllable, chain, or phoneme in Articulation Lab to fill this phrase palette.")
+            empty.setObjectName("timelineInspectorText")
+            empty.setWordWrap(True)
+            empty.setMinimumHeight(96)
+            layout.addWidget(empty)
+        else:
+            for item in self.timeline_speech_bin:
+                layout.addWidget(SpeechBinCard(self, item))
+        layout.addStretch(1)
+        if self.timeline_speech_count_label is not None:
+            count = len(self.timeline_speech_bin)
+            self.timeline_speech_count_label.setText(f"{count} speech card{'s' if count != 1 else ''} ready for phrases." if count else "No created speech yet.")
+
+    def _timeline_select_speech_item(self, item_id: int) -> None:
+        item = self._timeline_speech_item_by_id(item_id)
+        if item is None:
+            return
+        self.timeline_selected_speech_item_id = item_id
+        self._timeline_refresh_speech_bin_cards()
+        self._timeline_debug(f"Speech item selected id={item.id} type={item.item_type} name={item.name}")
+
+    def _timeline_speech_item_by_id(self, item_id: int | None) -> SpeechBinItem | None:
+        for item in self.timeline_speech_bin:
+            if item.id == item_id:
+                return item
+        return None
+
+    def _rerender_speech_item_from_metadata(self, item: SpeechBinItem) -> np.ndarray:
+        metadata = item.articulation_metadata or {}
+        try:
+            if item.item_type == "phoneme" and isinstance(metadata.get("phoneme"), dict):
+                phoneme = ArticulationPhoneme.from_json_dict(metadata["phoneme"])
+                return self._render_articulation_with_source(phoneme)
+            chain_items = [ArticulationChainItem.from_json_dict(data) for data in metadata.get("items", []) if isinstance(data, dict)]
+            if not chain_items:
+                return np.zeros((0, 2), dtype=np.float32)
+            previous_items = self.articulation_chain_items
+            previous_settings = dict(self.articulation_word_render_settings)
+            try:
+                self.articulation_chain_items = chain_items
+                if isinstance(metadata.get("word_render_settings"), dict):
+                    self.articulation_word_render_settings.update(metadata["word_render_settings"])
+                if item.item_type == "chain":
+                    clips = [self._render_articulation_with_source(chain_item.phoneme_for_render()) for chain_item in chain_items]
+                    return np.vstack([clip for clip in clips if clip.size]) if clips else np.zeros((0, 2), dtype=np.float32)
+                return self._render_articulation_word()
+            finally:
+                self.articulation_chain_items = previous_items
+                self.articulation_word_render_settings = previous_settings
+        except Exception as exc:
+            self._timeline_debug(f"Speech rerender failed id={item.id} error={exc}")
+            return np.zeros((0, 2), dtype=np.float32)
+
+    def _speech_audio_for_item(self, item: SpeechBinItem) -> Tuple[np.ndarray, str | None]:
+        if item.audio_data.size:
+            return np.array(item.audio_data, dtype=np.float32, copy=True), None
+        if item.audio_cache_path:
+            try:
+                path = Path(item.audio_cache_path)
+                if path.exists():
+                    audio, _sample_rate = load_audio_file(path)
+                    item.audio_data = np.array(audio, dtype=np.float32, copy=True)
+                    return item.audio_data, None
+            except Exception as exc:
+                self._timeline_debug(f"Speech cache load failed id={item.id} path={item.audio_cache_path} error={exc}")
+        rerendered = self._rerender_speech_item_from_metadata(item)
+        if rerendered.size:
+            item.audio_data = np.array(rerendered, dtype=np.float32, copy=True)
+            if not item.audio_cache_path or not Path(item.audio_cache_path).exists():
+                item.audio_cache_path = self._speech_cache_audio(item.audio_data, item.item_type, item.id)
+            return item.audio_data, None
+        return np.zeros((0, 2), dtype=np.float32), "Missing speech audio cache and articulation metadata could not be re-rendered."
+
+    def _timeline_add_first_speech_type_to_playhead(self, item_type: str) -> None:
+        item = next((candidate for candidate in reversed(self.timeline_speech_bin) if candidate.item_type == item_type), None)
+        if item is None:
+            QMessageBox.information(self, "Speech Bin", f"No created {item_type} cards are in the Speech Bin yet.")
+            return
+        self._timeline_add_speech_item_to_playhead(item.id)
+
+    def _timeline_add_speech_item_to_playhead(self, item_id: int | None = None) -> None:
+        target_id = item_id if item_id is not None else self.timeline_selected_speech_item_id
+        item = self._timeline_speech_item_by_id(target_id)
+        if item is None:
+            QMessageBox.information(self, "Speech Bin", "Select or create a speech card first.")
+            return
+        self._timeline_add_speech_item_to_timeline(item.id, self.timeline_playhead_seconds, 0)
+
+    def _timeline_add_speech_item_to_timeline(self, item_id: int, start_time_seconds: float, lane: int) -> None:
+        item = self._timeline_speech_item_by_id(item_id)
+        if item is None:
+            QMessageBox.warning(self, "Speech Bin", "That speech card is no longer available.")
+            return
+        audio, warning = self._speech_audio_for_item(item)
+        if audio.size == 0:
+            QMessageBox.warning(self, "Speech Bin", warning or "That speech card could not render audio.")
+        clip_id = self.timeline_next_clip_id
+        self.timeline_next_clip_id += 1
+        clip = TimelineClip(
+            clip_id=clip_id,
+            name=f"{item.icon} {item.name}",
+            audio=np.array(audio, dtype=np.float32, copy=True),
+            start_time_seconds=max(0.0, round(start_time_seconds / TIMELINE_TIME_STEP_SECONDS) * TIMELINE_TIME_STEP_SECONDS),
+            lane=max(0, min(self.timeline_lane_count - 1, lane)),
+            sample_rate=SAMPLE_RATE,
+            recipe=None,
+            source_path=item.audio_cache_path,
+            source_type=item.source_type,
+            speech_metadata=item.metadata(),
+            muted_warning=warning,
+        )
+        self.timeline_clips.append(clip)
+        self.timeline_selected_clip_id = clip.clip_id
+        self.timeline_selected_speech_item_id = item.id
+        self._timeline_update_duration()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = clip.clip_id
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_refresh_speech_bin_cards()
+        self._timeline_debug(f"Clip created from speech clip_id={clip.clip_id} speech_id={item.id} type={item.item_type} start={clip.start_time_seconds:.3f}s lane={clip.lane} duration={clip.duration_seconds:.3f}s warning={warning}")
 
     def _timeline_import_sounds(self, checked: bool = False) -> None:
         self._timeline_debug("Audio import requested")
@@ -6021,6 +6508,7 @@ class WaveToyWindow(QMainWindow):
                 "source_path": item.source_path,
                 "duration_seconds": item.duration_seconds,
             },
+            source_type="imported_audio",
         )
         self.timeline_clips.append(clip)
         self.timeline_selected_clip_id = clip.clip_id
@@ -6142,8 +6630,15 @@ class WaveToyWindow(QMainWindow):
         if clip is None:
             self.timeline_inspector_label.setText(f"No clip selected. Playhead: {self.timeline_playhead_seconds:.2f}s")
             return
+        source_text = f"\nSource: {clip.source_type}"
+        if clip.speech_metadata:
+            source_text += f"\nSpeech: {clip.speech_metadata.get('item_type', 'speech')} • {clip.speech_metadata.get('display_sequence', '')}"
+            if clip.speech_metadata.get("audio_cache_path"):
+                source_text += f"\nCache: {clip.speech_metadata.get('audio_cache_path')}"
+        if clip.muted_warning:
+            source_text += f"\nWarning: {clip.muted_warning}"
         self.timeline_inspector_label.setText(
-            f"{clip.name}\nID: {clip.clip_id}\nStart: {clip.start_time_seconds:.2f}s\nLane: {clip.lane + 1}\nDuration: {clip.duration_seconds:.2f}s"
+            f"{clip.name}\nID: {clip.clip_id}\nStart: {clip.start_time_seconds:.2f}s\nLane: {clip.lane + 1}\nDuration: {clip.duration_seconds:.2f}s{source_text}"
         )
 
     def _timeline_update_duration(self) -> None:
@@ -6173,6 +6668,9 @@ class WaveToyWindow(QMainWindow):
             recipe=source.recipe,
             source_path=source.source_path,
             import_metadata=source.import_metadata,
+            source_type=source.source_type,
+            speech_metadata=source.speech_metadata,
+            muted_warning=source.muted_warning,
         )
         self.timeline_clips.append(duplicate)
         self.timeline_selected_clip_id = duplicate.clip_id
@@ -6368,8 +6866,17 @@ class WaveToyWindow(QMainWindow):
                 "duration_seconds": len(mix) / SAMPLE_RATE,
                 "clip_count": len(self.timeline_clips),
                 "palette_sources": [item.metadata() for item in self.timeline_audio_palette],
+                "speech_bin_sources": [item.metadata() for item in self.timeline_speech_bin],
+                "clip_source_types": [
+                    "generated_wavetoy_sound",
+                    "imported_audio",
+                    "articulation_phoneme",
+                    "articulation_chain_raw",
+                    "articulation_word_render",
+                    "articulation_syllable_render",
+                ],
                 "clips": [clip.metadata() for clip in self.timeline_clips],
-                "notes": "Imported clip metadata stores source paths only; raw audio arrays are not embedded. Reloading imported audio requires the source files to remain available.",
+                "notes": "Timeline metadata stores imported and speech source paths plus articulation snapshots only; raw audio arrays are not embedded. Missing speech cache audio should be re-rendered from speech_metadata.articulation_metadata when possible, otherwise the clip stays visible as muted with a warning.",
             }
             sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
             self.timeline_last_mix_path = path
