@@ -45,3 +45,6 @@ deprecated/
 *.bak
 *.wave-toy-word.json
 articulation_chain.json
+
+# WaveToy local speech render cache
+.wavetoy_speech_cache/

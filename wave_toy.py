@@ -5742,6 +5742,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_status_label: QLabel | None = None
         self.articulation_chain_path = Path("articulation_chain.json")
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_word_render_signature: str | None = None
         self.articulation_last_word_render_path: Path | None = None
         self.articulation_last_word_render_created_at: float | None = None
         self.articulation_word_render_settings: Dict[str, object] = {
@@ -5751,7 +5752,7 @@ class WaveToyWindow(QMainWindow):
             "allow_word_gaps": False,
             "boundary_smoothing_ms": 8,
             "smooth_mouth_transitions": True,
-            "word_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
+            "word_render_mode": ARTICULATION_WORD_RENDER_CLIP_CROSSFADE,
             "transition_debug_verbose": False,
             "word_fade_in_ms": 5,
             "word_fade_out_ms": 8,
@@ -7096,7 +7097,8 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_mode_combo.addItems(list(ARTICULATION_WORD_RENDER_MODES))
         current_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
         if current_mode not in ARTICULATION_WORD_RENDER_MODES:
-            current_mode = ARTICULATION_WORD_RENDER_CONTINUOUS
+            current_mode = ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
+        self.articulation_word_render_settings["word_render_mode"] = current_mode
         self.articulation_word_render_mode_combo.setCurrentText(current_mode)
         self.articulation_word_render_mode_combo.setToolTip("Compare the Task 032 clip-overlap fallback with the prototype continuous articulator-envelope renderer.")
         self.articulation_word_render_mode_combo.currentTextChanged.connect(self._set_articulation_word_render_mode)
@@ -7918,7 +7920,7 @@ class WaveToyWindow(QMainWindow):
 
     def _set_articulation_word_render_mode(self, mode: str) -> None:
         if mode not in ARTICULATION_WORD_RENDER_MODES:
-            mode = ARTICULATION_WORD_RENDER_CONTINUOUS
+            mode = ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
         self.articulation_word_render_settings["word_render_mode"] = mode
         self._mark_articulation_word_dirty()
         self._refresh_articulation_motion_timeline()
@@ -7928,8 +7930,8 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_word_render_mode_combo is not None:
             mode = str(self.articulation_word_render_mode_combo.currentText())
         else:
-            mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CONTINUOUS))
-        return mode if mode in ARTICULATION_WORD_RENDER_MODES else ARTICULATION_WORD_RENDER_CONTINUOUS
+            mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
+        return mode if mode in ARTICULATION_WORD_RENDER_MODES else ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
 
     def _apply_voice_profile_to_chain(self, profile: str) -> None:
         if profile == "Neutral" or not self.articulation_chain_items:
@@ -8079,7 +8081,7 @@ class WaveToyWindow(QMainWindow):
         self._articulation_motion_tick()
 
     def _current_gapless_word_audio(self) -> np.ndarray:
-        if self.articulation_word_render_audio.size == 0:
+        if not self._current_word_audio_is_fresh():
             return self._render_word_audio_for_current_chain()
         return self.articulation_word_render_audio
 
@@ -8147,6 +8149,7 @@ class WaveToyWindow(QMainWindow):
 
     def _mark_articulation_word_dirty(self) -> None:
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_word_render_signature = None
         self.articulation_last_word_render_path = None
         self.articulation_last_word_render_created_at = None
         self._update_articulation_word_status()
@@ -8358,6 +8361,20 @@ class WaveToyWindow(QMainWindow):
             f"noise_gain={noise_gain:.3f} "
             f"source_mode={source_modes} "
             f"final_peak={final_peak:.3f}"
+        )
+
+    def _log_play_word_render_path(self, render_mode: str, audio: np.ndarray, cached_reused: bool, fresh_render_created: bool) -> None:
+        duration = float(len(audio)) / float(SAMPLE_RATE) if audio.size else 0.0
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        phoneme_sequence = " + ".join(item.phoneme.name for item in self.articulation_chain_items) or "<empty>"
+        print(
+            "[WaveToy Play Word] "
+            f"render_mode={render_mode} "
+            f"duration={duration:.3f}s "
+            f"peak={peak:.3f} "
+            f"phonemes={phoneme_sequence} "
+            f"cached_reused={cached_reused} "
+            f"fresh_render_created={fresh_render_created}"
         )
 
     def _render_articulation_word_plain(self) -> np.ndarray:
@@ -8709,11 +8726,28 @@ class WaveToyWindow(QMainWindow):
             return self._render_articulation_word_clip_crossfade()
         return self._render_articulation_word_clip_crossfade()
 
+    def _current_word_render_signature(self) -> str:
+        payload = {
+            "display_sequence": self._speech_display_sequence_for_chain(),
+            "ipa_sequence": self._speech_ipa_sequence_for_chain(),
+            "chain_items": [item.to_json_dict() for item in self.articulation_chain_items],
+            "render_mode": self._articulation_word_render_mode(),
+            "word_render_settings": dict(self.articulation_word_render_settings),
+        }
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+    def _current_word_audio_is_fresh(self) -> bool:
+        return bool(
+            self.articulation_word_render_audio.size
+            and self.articulation_word_render_signature == self._current_word_render_signature()
+        )
+
     def _render_word_audio_for_current_chain(self) -> np.ndarray:
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Create Word", "Add at least one phoneme to the Articulation Chain first.")
             return np.zeros((0, 2), dtype=np.float32)
         self.articulation_word_render_audio = self._render_articulation_word()
+        self.articulation_word_render_signature = self._current_word_render_signature() if self.articulation_word_render_audio.size else None
         self.articulation_last_word_render_created_at = time.time()
         self.articulation_last_word_render_path = None
         self._update_articulation_word_status()
@@ -8742,8 +8776,12 @@ class WaveToyWindow(QMainWindow):
         del checked
         if not self._can_start_playback():
             return
-            audio = self._render_word_audio_for_current_chain()
+        cached_reused = self._current_word_audio_is_fresh()
+        audio = self.articulation_word_render_audio if cached_reused else self._render_word_audio_for_current_chain()
+        fresh_render_created = not cached_reused and bool(audio.size)
+        self._log_play_word_render_path(self._articulation_word_render_mode(), audio, cached_reused, fresh_render_created)
         if audio.size == 0:
+            QMessageBox.information(self, "Play Word", "The current articulation chain did not render any audio.")
             return
         self._start_articulation_motion(loop=False, speed=1.0, audio=audio)
 
@@ -8835,14 +8873,18 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_created_at = data.get("last_word_render_created_at") if isinstance(data.get("last_word_render_created_at"), (int, float)) else None
         if isinstance(data.get("word_render_settings"), dict):
             self.articulation_word_render_settings.update(data["word_render_settings"])
+        loaded_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
+        if loaded_mode not in ARTICULATION_WORD_RENDER_MODES:
+            loaded_mode = ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
+        self.articulation_word_render_settings["word_render_mode"] = loaded_mode
         self.articulation_syllable_markers = list(data.get("syllable_markers", [])) if isinstance(data.get("syllable_markers", []), list) else []
         self.articulation_phrase_markers = list(data.get("phrase_markers", [])) if isinstance(data.get("phrase_markers", []), list) else []
         if self.articulation_smooth_transitions_checkbox is not None:
             self.articulation_smooth_transitions_checkbox.setChecked(bool(self.articulation_word_render_settings.get("smooth_mouth_transitions", True)))
         if self.articulation_word_render_mode_combo is not None:
-            mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CONTINUOUS))
-            self.articulation_word_render_mode_combo.setCurrentText(mode if mode in ARTICULATION_WORD_RENDER_MODES else ARTICULATION_WORD_RENDER_CONTINUOUS)
+            self.articulation_word_render_mode_combo.setCurrentText(loaded_mode)
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_word_render_signature = None
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
 
@@ -8923,6 +8965,16 @@ class WaveToyWindow(QMainWindow):
         self.current_phoneme = phoneme.clamped()
         self.phonemes_dir.mkdir(parents=True, exist_ok=True)
         path = self._phoneme_path(self.current_phoneme)
+        if path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Overwrite Phoneme",
+                f"A phoneme named '{self.current_phoneme.name}' already exists. Overwrite {path.name}?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
         path.write_text(json.dumps(self.current_phoneme.to_json_dict(), indent=2), encoding="utf-8")
         self._load_saved_phonemes()
         self._refresh_phoneme_cards()
@@ -9956,7 +10008,7 @@ class WaveToyWindow(QMainWindow):
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Speech Assets", "Add at least one phoneme to the Articulation Chain first.")
             return None
-        if self.articulation_word_render_audio.size == 0:
+        if not self._current_word_audio_is_fresh():
             audio = self._render_word_audio_for_current_chain()
             if audio.size == 0:
                 return None
@@ -9964,15 +10016,42 @@ class WaveToyWindow(QMainWindow):
         if not name:
             default = display.replace(" + ", "").lower() if item_type == "word" else display.replace(" + ", "")
             name = default or item_type.title()
+        metadata = self._speech_chain_metadata_snapshot()
+        metadata["render_signature"] = self.articulation_word_render_signature or self._current_word_render_signature()
+        metadata["render_mode"] = self._articulation_word_render_mode()
+        metadata["audio_duration_seconds"] = len(self.articulation_word_render_audio) / SAMPLE_RATE
         return self._add_speech_bin_item(
             name=name,
             item_type=item_type,
             audio=self.articulation_word_render_audio,
             ipa_sequence=self._speech_ipa_sequence_for_chain(),
             display_sequence=display,
-            articulation_metadata=self._speech_chain_metadata_snapshot(),
+            articulation_metadata=metadata,
             source_mode=f"articulation_{item_type}_render",
         )
+
+    def _word_item_matches_current_chain(self, item: SpeechBinItem) -> bool:
+        if item.item_type != "word" or item.audio_data.size == 0:
+            return False
+        metadata = dict(item.articulation_metadata or {})
+        current_signature = self._current_word_render_signature()
+        if metadata.get("render_signature") != current_signature:
+            return False
+        if item.display_sequence != self._speech_display_sequence_for_chain():
+            return False
+        if item.ipa_sequence != self._speech_ipa_sequence_for_chain():
+            return False
+        return True
+
+    def _ensure_current_word_speech_bin_item(self) -> SpeechBinItem | None:
+        for item in reversed(self.timeline_speech_bin):
+            if self._word_item_matches_current_chain(item):
+                return item
+        audio = self._current_gapless_word_audio()
+        if audio.size == 0:
+            return None
+        default_name = self._speech_display_sequence_for_chain().replace(" + ", "").lower() or "word"
+        return self._create_rendered_speech_bin_item("word", name=default_name)
 
     def _send_current_phoneme_to_timeline(self, checked: bool = False) -> None:
         del checked
@@ -9999,11 +10078,7 @@ class WaveToyWindow(QMainWindow):
 
     def _send_articulation_word_to_timeline(self, checked: bool = False) -> None:
         del checked
-        word_item = next((item for item in reversed(self.timeline_speech_bin) if item.item_type == "word"), None)
-        if self.articulation_word_render_audio.size == 0 or word_item is None:
-            if self._create_articulation_word(checked=False).size == 0:
-                return
-            word_item = next((item for item in reversed(self.timeline_speech_bin) if item.item_type == "word"), None)
+        word_item = self._ensure_current_word_speech_bin_item()
         if word_item is not None:
             self._timeline_add_speech_item_to_playhead(word_item.id)
 
@@ -11983,23 +12058,29 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QLabel#phonemeCardIpa {
-                background: rgba(25, 55, 5, 0.82);
-                border: 1px solid rgba(230, 180, 110, 0.12);
+                background: rgba(255, 255, 255, 0.88);
+                border: 1px solid rgba(15, 23, 42, 0.18);
                 border-radius: 18px;
                 font-size: 14px;
                 font-weight: 900;
-                color: #f8ff8f;
+                color: #111827;
                 padding: 8px;
             }
             QLabel#phonemeCardTitle {
                 font-size: 15px;
                 font-weight: 900;
-                color: #f8fff2;
+                color: #111827;
+                background: rgba(255, 255, 255, 0.76);
+                border-radius: 8px;
+                padding: 2px 6px;
             }
             QLabel#phonemeCardSummary {
                 font-size: 13px;
                 font-weight: 900;
-                color: #f8fff2;
+                color: #1f2937;
+                background: rgba(255, 255, 255, 0.72);
+                border-radius: 8px;
+                padding: 2px 6px;
             }
             QPushButton#phonemeCardPrimaryAction, QPushButton#phonemeCardDangerAction, QPushButton#phonemeCardSecondaryAction {
                 border-radius: 10px;
@@ -12016,8 +12097,9 @@ class WaveToyWindow(QMainWindow):
                 border-left: 4px solid #5cdb95;
             }
             QPushButton#phonemeCardDangerAction {
-                background: rgba(180, 218, 142, 0.94);
-                border-left: 4px solid #ff6b6b;
+                background: #991b1b;
+                color: #ffffff;
+                border-left: 4px solid #fecaca;
             }
             QPushButton#phonemeCardSecondaryAction {
                 background: rgba(7, 19, 34, 0.90);
@@ -12033,6 +12115,7 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 18px;
                 border: 1px solid rgba(0, 0, 0, 0.16);
                 background: #fff7e6;
+                color: #263238;
                 font-size: 14px;
                 font-weight: 900;
                 min-height: 40px;
@@ -12042,11 +12125,18 @@ class WaveToyWindow(QMainWindow):
             }
             QPushButton#articulationPresetButton:hover {
                 background: #fff0bd;
+                color: #1f2937;
                 border-color: rgba(255, 79, 163, 0.62);
             }
             QPushButton#articulationPresetButton:pressed {
                 background: #ffd166;
+                color: #111827;
                 padding-top: 13px;
+            }
+            QPushButton#articulationPresetButton:checked {
+                background: #f59e0b;
+                color: #111827;
+                border-color: #b45309;
             }
             QWidget#articulationLabTab {
                 background: #0d1724;
@@ -12246,7 +12336,7 @@ class WaveToyWindow(QMainWindow):
             }
             QPushButton#phonemeRailButton {
                 background: #111827;
-                color: #884348;
+                color: #f8fafc;
                 border: 1px solid #64748b;
                 border-left: 4px solid #38bdf8;
                 border-radius: 6px;
@@ -12257,6 +12347,7 @@ class WaveToyWindow(QMainWindow):
 
             QPushButton#phonemeRailButton:hover {
                 background: #1e293b;
+                color: #fecdd3;
                 border-color: #7dd3fc;
             }
 
