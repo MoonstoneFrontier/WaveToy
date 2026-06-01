@@ -1,48 +1,66 @@
 # Continuous Mouth Motion Validation
 
-Continuous Mouth Motion is the primary development renderer for improving connected speech articulation. Clip Crossfade remains the stable user-facing default while Continuous is validated.
+## Current posture
 
-## Diagnostic panel
+Continuous Mouth Motion is still experimental and under quality validation. **Clip Crossfade remains the stable default** and should stay available as the reference mode until Continuous is consistently cleaner by ear.
 
-The Articulation Timeline contains a **Continuous Mouth Motion Diagnostics** panel. It updates after every Continuous render and stores the latest diagnostics in a UI-visible dictionary.
+## Required listen tests
 
-Displayed metrics:
+Render and compare these chains in all three modes:
 
-- `active_render_mode`
-- `output_duration`
-- `output_peak`
-- `voiced_rms`
-- `noise_rms`
-- `source_rms`
-- `transition_count`
-- `transition_duration_total`
-- `final_buffer_length`
-- `voiced_phoneme_count`
+- Continuous Mouth Motion with formants ON
+- Continuous Mouth Motion with formants bypassed
+- Clip Crossfade reference
 
-## Status thresholds
+### Single vowels
 
-- `EMPTY RENDER`: `final_buffer_length == 0`
-- `SILENT BUFFER`: `final_buffer_length > 0` and `output_peak <= 0.000001`
-- `VOICED PATH MISSING`: voiced phonemes exist and `voiced_rms <= 0.000001`
-- `PASS`: `output_peak > 0.001` and a non-empty final buffer exists
-- `LOW OUTPUT`: non-empty render below the PASS threshold
-- `EXCEPTION`: Continuous raised an exception
+- `AH`
+- `IY`
+- `OO`
+- `AA`
+- `AE`
 
-Normal diagnostic failures are reported in the panel and terminal debug output rather than modal warnings.
-
-## Validate Continuous
-
-The **Validate Continuous** button renders known built-in chains using Continuous Mouth Motion, then restores the user's previous chain and render mode:
+### Words / sequences
 
 - `M OO N`
 - `B AH D`
+- `D AE D`
+- `S T AA P`
 - `SH IY`
 - `TH IH S`
-- `S T AA P`
-- `D AE D`
 
-Each row reports chain label, duration, peak, voiced RMS, noise RMS, status, and notes. Validation does not create Speech Assets or WAV files.
+## Bypass-formants diagnostic workflow
 
-## Voice profile baseline behavior
+1. Render a chain in Continuous with formants ON.
+2. Toggle **Bypass formants** and render again.
+3. If bypassed pitch is stable but formants ON warbles or sounds phasey, tune formant intensity/shaping.
+4. If both modes warble, tune excitation pitch smoothing, source harshness, and voiced transitions.
 
-Voice profile changes are applied from a captured baseline chain. `Neutral` restores the baseline and clears it. Leaving `Whisper` for another profile restores voiced phonemes before applying the new profile, preventing Whisper from permanently muting the chain. Profile changes mark the word render cache dirty.
+Bypass formants is equivalent to `continuous_formant_intensity = 0.0`.
+
+## Diagnostic interpretation
+
+- `pitch_error_percent`: high values indicate unstable excitation, poor pitch estimation, or excessive noise in voiced windows.
+- `formant_gain_ratio`: should stay near unity. Large ratios suggest pumping or aggressive coloration.
+- `formant_input_rms` / `formant_output_rms`: compare dry and shaped frames; output should not jump sharply frame-to-frame.
+- `clipped_samples`: non-zero clipping after limiting is a failure unless it is trivially small and inaudible.
+- `distortion_status`: `clipping` or `distorted` requires follow-up even if audio is present.
+- `burst_peak` / `burst_rms`: confirms stop release audibility. Very low values make stops weak; excessive values make consonants spitty.
+- `stop_debug_events`: inspect stop name, closure duration, release start, burst duration, peak/RMS, and voiced overlap.
+- `transition_progress`: helps correlate pitch/formant changes to transitions.
+- `voiced_gain`: confirms vowels, nasals, liquids, glides, and voiced stops retain source identity.
+
+## Manual review note template
+
+```text
+[WaveToy Listen Test]
+chain=<symbols> mode=<continuous_on|continuous_bypass|clip_crossfade>
+observation=<pitch stable/warble/distortion/burst too weak/etc>
+next_action=<formant tuning/excitation tuning/stop tuning/no action>
+```
+
+## Future work
+
+- Continue ear-led tuning before making Continuous default.
+- Add CV/VC preview after renderer stability improves.
+- Export Continuous state for future animation only after timing and diagnostics are reliable.
