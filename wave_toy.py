@@ -42,6 +42,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from wavetoy.svg import svg_metadata_for_clip
+
 import numpy as np
 
 try:
@@ -366,20 +368,20 @@ TUNING_METHODS = {
         "divisions": 5,
     },
     "pentatonic_equal": {
-        "label": "Five-Step Playground",
-        "tooltip": "Five evenly spaced notes per octave, mapped to the nearest toy note step.",
+        "label": "Five-Step Scale",
+        "tooltip": "Five evenly spaced notes per octave, mapped to the nearest visual note step.",
         "kind": "subset_equal",
         "steps": [0, 2, 4, 7, 9],
         "divisions": 5,
     },
     "nineteen_equal": {
-        "label": "Tiny 19-Step Ladder",
+        "label": "19-Step Ladder",
         "tooltip": "19 equal steps per octave, with note names mapped to nearby steps.",
         "kind": "equal_mapped",
         "divisions": 19,
     },
     "twenty_four_equal": {
-        "label": "Quarter-Tone Sprinkle",
+        "label": "Quarter-Tone Grid",
         "tooltip": "24 equal steps per octave, with note names mapped to quarter-tone positions.",
         "kind": "equal_mapped",
         "divisions": 24,
@@ -502,6 +504,8 @@ class TimelineClip:
     stretch_mode: str = "preserve_pitch"
     stretch_algorithm: str = "numpy_phase_vocoder"
     stretched_audio_cache: np.ndarray | None = field(default=None, repr=False, compare=False)
+    expression_metadata: Dict[str, object] = field(default_factory=dict)
+    svg_visual_metadata: Dict[str, object] = field(default_factory=dict)
     _stretch_cache_key: tuple | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -514,6 +518,10 @@ class TimelineClip:
         self.stretch_mode = str(self.stretch_mode or "preserve_pitch")
         self.stretch_algorithm = str(self.stretch_algorithm or "numpy_phase_vocoder")
         self.rendered_duration_seconds = self.duration_seconds
+        if not self.expression_metadata or not self.svg_visual_metadata:
+            svg_metadata = svg_metadata_for_clip(self.clip_id, self.name, self.duration_seconds)
+            self.expression_metadata = dict(self.expression_metadata or svg_metadata["expression"])
+            self.svg_visual_metadata = dict(self.svg_visual_metadata or svg_metadata["visual_object"])
 
     @property
     def source_duration_seconds(self) -> float:
@@ -573,6 +581,8 @@ class TimelineClip:
             "sample_rate": self.sample_rate,
             "source_type": self.source_type,
             "recipe": self.recipe or {},
+            "expression_metadata": self.expression_metadata or {},
+            "svg_visual_metadata": self.svg_visual_metadata or {},
         }
         if self.source_path:
             data["source_path"] = self.source_path
@@ -587,7 +597,7 @@ class TimelineClip:
 
 @dataclass
 class ArticulationPhoneme:
-    """Reusable toy articulation definition for vowels and consonants."""
+    """Reusable articulation definition for vowels and consonants."""
 
     name: str
     ipa: str
@@ -1696,7 +1706,7 @@ def paulstretch_process(
 
     This is not a full clone of the standalone Paulstretch program. It is a
     lightweight spectral smear/stretch module intended for drones, pads, and
-    sci-fi ambience inside this toy synth.
+    sci-fi ambience inside this visual synthesizer.
     """
     stretch = max(1.0, float(stretch))
     if stretch <= 1.01:
@@ -2154,7 +2164,7 @@ class WaveCanvas(QWidget):
         self.audio = np.zeros((1, 2), dtype=np.float32)
         self.freq_env = np.zeros(1, dtype=np.float32)
         self.loud_env = np.zeros(1, dtype=np.float32)
-        self.mascot_message = "Move the sliders, then press Make Sound!"
+        self.mascot_message = "Adjust the signal, then render audio."
         self.visual_conditions = {}
         self.animation_phase = 0.0
         self.zoom_factor = 1.0
@@ -2294,15 +2304,23 @@ class WaveCanvas(QWidget):
         rect = self.rect().adjusted(12, 12, -12, -12)
 
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        gradient.setColorAt(0.0, QColor("#fff7c7"))
-        gradient.setColorAt(0.55, QColor("#d7f3ff"))
-        gradient.setColorAt(1.0, QColor("#ffd6e7"))
+        gradient.setColorAt(0.0, QColor(12, 22, 34, 238))
+        gradient.setColorAt(0.55, QColor(18, 35, 52, 224))
+        gradient.setColorAt(1.0, QColor(28, 42, 62, 232))
 
-        painter.setPen(Qt.NoPen)
+        painter.setPen(QPen(QColor(180, 220, 255, 72), 1))
         painter.setBrush(gradient)
-        painter.drawRoundedRect(rect, 28, 28)
+        painter.drawRoundedRect(rect, 18, 18)
 
-        inner = rect.adjusted(28, 62, -28, -42)
+        highlight = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        highlight.setColorAt(0.0, QColor(255, 255, 255, 56))
+        highlight.setColorAt(0.35, QColor(255, 255, 255, 12))
+        highlight.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(highlight)
+        painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 16, 16)
+
+        inner = rect.adjusted(28, 58, -28, -42)
 
         self._draw_grid(painter, inner)
         self._draw_wave(painter, inner)
@@ -2310,7 +2328,7 @@ class WaveCanvas(QWidget):
         self._draw_caption(painter, rect)
 
     def _draw_grid(self, painter: QPainter, area: QRectF) -> None:
-        painter.setPen(QPen(QColor(255, 255, 255, 125), 2))
+        painter.setPen(QPen(QColor(174, 213, 242, 54), 1))
 
         for i in range(1, 6):
             x = area.left() + area.width() * i / 6.0
@@ -2320,7 +2338,7 @@ class WaveCanvas(QWidget):
             y = area.top() + area.height() * i / 4.0
             painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y))
 
-        painter.setPen(QPen(QColor("#77c8ff"), 3, Qt.DashLine))
+        painter.setPen(QPen(QColor(123, 223, 242, 118), 1, Qt.DashLine))
         painter.drawLine(QPointF(area.left(), area.center().y()), QPointF(area.right(), area.center().y()))
 
     def _downsample(self, data: np.ndarray, points: int) -> np.ndarray:
@@ -2360,15 +2378,23 @@ class WaveCanvas(QWidget):
         data: np.ndarray,
         thick: int,
     ) -> None:
-        painter.setPen(QPen(QColor(0, 0, 0, 45), thick + 7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        width_scale = min(0.16, 0.09 + math.log2(max(1.0, self.zoom_factor)) * 0.012)
-        painter.drawPath(self._path_for_vertical_wave(data, area.adjusted(4, 4, 4, 4), center_x + 4, width_scale))
+        tube_width = max(34.0, area.width() * 0.18)
+        tube = QRectF(center_x - tube_width / 2.0, area.top() - 4, tube_width, area.height() + 8)
+        painter.setPen(QPen(QColor(196, 230, 255, 92), 1))
+        painter.setBrush(QColor(255, 255, 255, 24))
+        painter.drawRoundedRect(tube, 12, 12)
+        painter.setPen(QPen(QColor(255, 255, 255, 36), 1))
+        painter.drawLine(QPointF(tube.left() + 7, tube.top() + 8), QPointF(tube.left() + 7, tube.bottom() - 8))
 
-        painter.setPen(QPen(color, thick, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        width_scale = min(0.16, 0.09 + math.log2(max(1.0, self.zoom_factor)) * 0.012)
+        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 78), thick + 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(self._path_for_vertical_wave(data, area, center_x, width_scale))
 
-        painter.setPen(QColor("#263238"))
-        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        painter.setPen(QPen(color, max(3, thick - 1), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(self._path_for_vertical_wave(data, area, center_x, width_scale))
+
+        painter.setPen(QColor("#dcecff"))
+        painter.setFont(QFont("Arial", 10, QFont.Bold))
         label_rect = QRectF(center_x - area.width() * 0.13, area.bottom() + 4, area.width() * 0.26, 24)
         painter.drawText(label_rect, Qt.AlignCenter, label)
 
@@ -2387,18 +2413,18 @@ class WaveCanvas(QWidget):
         common_x = area.left() + area.width() * 0.50
         right_x = area.left() + area.width() * 0.78
 
-        painter.setPen(QPen(QColor(255, 255, 255, 150), 3, Qt.DashLine))
+        painter.setPen(QPen(QColor(255, 255, 255, 68), 1, Qt.DashLine))
         for x in [left_x, common_x, right_x]:
             painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
 
-        self._draw_wave_column(painter, area, left_x, "Left", QColor("#00a8ff"), left, 6)
-        self._draw_wave_column(painter, area, common_x, "Common", QColor("#fff176"), common, 5)
-        self._draw_wave_column(painter, area, right_x, "Right", QColor("#ff4fa3"), right, 6)
+        self._draw_wave_column(painter, area, left_x, "Left", QColor("#24d7ff"), left, 5)
+        self._draw_wave_column(painter, area, common_x, "Mid", QColor("#d6ff5f"), common, 4)
+        self._draw_wave_column(painter, area, right_x, "Right", QColor("#ff4fa3"), right, 5)
 
         self._draw_condition_overlay(painter, area, left_x, common_x, right_x)
         self._draw_playhead(painter, area)
 
-        painter.setPen(QColor("#263238"))
+        painter.setPen(QColor("#dcecff"))
         painter.setFont(QFont("Arial", 10, QFont.Bold))
         if self.zoom_factor <= 1.01:
             zoom_text = "Mouse wheel: zoom waveform    Double-click: reset"
@@ -2529,41 +2555,35 @@ class WaveCanvas(QWidget):
         cx = rect.left() + 54
         cy = rect.top() + 42 + math.sin(self.animation_phase) * 3.0
 
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#5cdb95"))
-        painter.drawEllipse(QPointF(cx, cy), 24, 24)
-
-        painter.setBrush(QColor("white"))
-        painter.drawEllipse(QPointF(cx - 8, cy - 5), 5, 5)
-        painter.drawEllipse(QPointF(cx + 8, cy - 5), 5, 5)
-
-        painter.setBrush(QColor("#222222"))
-        painter.drawEllipse(QPointF(cx - 8, cy - 5), 2, 2)
-        painter.drawEllipse(QPointF(cx + 8, cy - 5), 2, 2)
-
-        painter.setPen(QPen(QColor("#222222"), 3, Qt.SolidLine, Qt.RoundCap))
-        painter.drawArc(QRectF(cx - 10, cy - 2, 20, 14), 200 * 16, 140 * 16)
+        painter.setPen(QPen(QColor(123, 223, 242, 120), 1))
+        painter.setBrush(QColor(255, 255, 255, 28))
+        painter.drawRoundedRect(QRectF(cx - 28, cy - 22, 56, 44), 10, 10)
+        painter.setPen(QPen(QColor("#7bdff2"), 2, Qt.SolidLine, Qt.RoundCap))
+        for offset in (-14, 0, 14):
+            painter.drawLine(QPointF(cx + offset, cy + 16), QPointF(cx + offset, cy - 16))
+        painter.setPen(QPen(QColor("#d6ff5f"), 2, Qt.SolidLine, Qt.RoundCap))
+        painter.drawArc(QRectF(cx - 18, cy - 12, 36, 24), 200 * 16, 140 * 16)
 
     def _draw_caption(self, painter: QPainter, rect: QRectF) -> None:
-        painter.setPen(QColor("#263238"))
-        painter.setFont(QFont("Arial", 13, QFont.Bold))
+        painter.setPen(QColor("#e8f3ff"))
+        painter.setFont(QFont("Arial", 12, QFont.Bold))
 
-        text_rect = QRectF(rect.left() + 92, rect.top() + 18, rect.width() - 120, 52)
+        text_rect = QRectF(rect.left() + 92, rect.top() + 18, rect.width() - 120, 48)
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.TextWordWrap, self.mascot_message)
 
 
 
 class WaveToySizing:
-    """Central professional sizing tokens for WaveToy's educational interface."""
+    """Central professional sizing tokens for WaveToy's glass interface."""
 
     COMPACT_SPACING = 6
     NORMAL_SPACING = 10
     SECTION_SPACING = 16
-    MIN_TOUCH_TARGET = 36
-    BUTTON_HEIGHT = 40
-    LARGE_BUTTON_HEIGHT = 52
+    MIN_TOUCH_TARGET = 32
+    BUTTON_HEIGHT = 34
+    LARGE_BUTTON_HEIGHT = 38
     ICON_STANDARD = 24
-    ICON_LARGE = 32
+    ICON_LARGE = 28
     ICON_HERO = 48
     CARD_MIN_HEIGHT = 76
     SCROLLBAR_WIDTH = 14
@@ -2572,16 +2592,16 @@ class WaveToySizing:
 
 
 class WaveToyTheme:
-    """Shared color, spacing, and style helpers for the WaveToy interface."""
+    """Shared glass color, spacing, and style helpers for the WaveToy interface."""
 
-    BACKGROUND = "#eef3f8"
-    SURFACE = "#ffffff"
-    CARD = "#f7fafc"
-    INK = "#1f2933"
-    MUTED = "#5f6f7a"
-    ACCENT = "#2563eb"
-    ACCENT_DARK = "#1d4ed8"
-    BLUE = "#e6f0fb"
+    BACKGROUND = "#0d1724"
+    SURFACE = "rgba(255, 255, 255, 0.72)"
+    CARD = "rgba(255, 255, 255, 0.56)"
+    INK = "#dcecff"
+    MUTED = "#8fa8ba"
+    ACCENT = "#24d7ff"
+    ACCENT_DARK = "#14a8d4"
+    BLUE = "rgba(36, 215, 255, 0.12)"
 
     @classmethod
     def scroll_area_style(cls) -> str:
@@ -2643,10 +2663,10 @@ class WaveToyTheme:
         return f"""
             QPushButton {{
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
-                padding: 5px 10px;
+                padding: 4px 8px;
                 border-radius: 8px;
                 font-size: 13px;
-                font-weight: 700;
+                font-weight: 800;
             }}
             QComboBox, QSpinBox, QDoubleSpinBox {{
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
@@ -2834,24 +2854,25 @@ class ToyButton(QPushButton):
     def __init__(self, text: str, color: str) -> None:
         super().__init__(text)
 
-        self.setMinimumHeight(58)
+        self.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(
             f"""
             QPushButton {{
-                background: {color};
-                color: #1d1d1d;
-                border: 1px solid rgba(0, 0, 0, 0.18);
-                border-radius: 10px;
-                font-size: 15px;
-                font-weight: 800;
-                padding: 10px 18px;
+                background: rgba(255, 255, 255, 0.14);
+                color: #e8f3ff;
+                border: 1px solid rgba(180, 220, 255, 0.26);
+                border-left: 3px solid {color};
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 900;
+                padding: 4px 8px;
             }}
             QPushButton:hover {{
                 border: 1px solid rgba(0, 0, 0, 0.35);
             }}
             QPushButton:pressed {{
-                padding-top: 14px;
+                padding-top: 6px;
             }}
             """
         )
@@ -2860,7 +2881,7 @@ class ToyButton(QPushButton):
 
 
 class StoryboardClipWidget(QWidget):
-    """Large touch-friendly storyboard clip card for the Timeline tab."""
+    """Compact touch-friendly timeline clip card for the Timeline tab."""
 
     def __init__(self, icon: str, name: str, duration_text: str, wave_type: str, color: str) -> None:
         super().__init__()
@@ -2923,7 +2944,7 @@ class StoryboardClipWidget(QWidget):
 
 
 class AudioPaletteCard(QWidget):
-    """Large draggable toy card for an imported Timeline palette sound."""
+    """Draggable timeline card for an imported Timeline palette sound."""
 
     def __init__(self, owner: "WaveToyWindow", item: AudioPaletteItem) -> None:
         super().__init__()
@@ -3015,7 +3036,7 @@ class AudioPaletteCard(QWidget):
 
 
 class SpeechBinCard(QWidget):
-    """Large draggable toy card for created articulation speech units."""
+    """Draggable timeline card for created articulation speech units."""
 
     def __init__(self, owner: "WaveToyWindow", item: SpeechBinItem) -> None:
         super().__init__()
@@ -4408,7 +4429,7 @@ class StereoFieldPreview(QWidget):
 
 
 class CircleOfFifthsNotePicker(QWidget):
-    """Toy-like circular note selector arranged in circle-of-fifths order."""
+    """Visual circular note selector arranged in circle-of-fifths order."""
 
     noteSelected = Signal(str)
 
@@ -4485,7 +4506,7 @@ class CircleOfFifthsNotePicker(QWidget):
 
         painter.setPen(QColor("#263238"))
         painter.setFont(QFont("Arial", 16, QFont.Bold))
-        painter.drawText(rect.adjusted(0, 10, 0, 0), Qt.AlignTop | Qt.AlignHCenter, "🎡 Note Wheel")
+        painter.drawText(rect.adjusted(0, 10, 0, 0), Qt.AlignTop | Qt.AlignHCenter, "Note Wheel")
         painter.setFont(QFont("Arial", 9, QFont.Bold))
         painter.drawText(rect.adjusted(34, 0, -34, -16), Qt.AlignBottom | Qt.AlignHCenter, "Around the circle: C → G → D → A ...")
 
@@ -4635,7 +4656,7 @@ class VocalTractCanvas(QWidget):
         self._last_throat_rect = QRectF()
         self.setMinimumSize(QSize(560, 360))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setToolTip("Toy vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels.")
+        self.setToolTip("Vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels.")
 
     def set_editable(self, editable: bool) -> None:
         self.editable = bool(editable)
@@ -4643,7 +4664,7 @@ class VocalTractCanvas(QWidget):
         self.setToolTip(
             "Direct vocal editor: drag tongue, mouth, lips, airflow, nose, or voice to update Articulation Lab sliders."
             if self.editable
-            else "Toy vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels."
+            else "Vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels."
         )
 
     def set_phoneme(self, phoneme: ArticulationPhoneme) -> None:
@@ -5802,7 +5823,7 @@ class WaveToyWindow(QMainWindow):
             layout = QVBoxLayout(cell)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(2)
-            title = QLabel("Pitch Toy")
+            title = QLabel("Pitch Tools")
             title.setObjectName("controlCaption")
             label.setObjectName("controlValue")
             label.setMinimumWidth(92)
@@ -6074,12 +6095,12 @@ class WaveToyWindow(QMainWindow):
         for wave_type in list(self.wave_row_order):
             self._update_wave_pitch_label(wave_type)
 
-        self.add_wave_button = QPushButton("➕ Add Wave")
+        self.add_wave_button = QPushButton("＋ Wave")
         self.add_wave_button.setToolTip(f"Add another wave row. Soft limit: {MAX_WAVE_ROWS} waves.")
         self.add_wave_button.clicked.connect(self._add_user_wave_row)
         wave_layout.addWidget(self.add_wave_button, 0, Qt.AlignRight)
 
-        self.clear_solo_button = QPushButton("🌈 All Waves")
+        self.clear_solo_button = QPushButton("All")
         self.clear_solo_button.setToolTip("Clear solo so the full mix plays again.")
         self.clear_solo_button.clicked.connect(self._clear_solo)
         wave_layout.addWidget(self.clear_solo_button, 0, Qt.AlignRight)
@@ -6320,11 +6341,11 @@ class WaveToyWindow(QMainWindow):
         preset_layout.setSpacing(8)
 
         presets = [
-            ("Pure A4", self._preset_pure_a4),
-            ("Rocket Pitch 🚀", self._preset_rocket_pitch),
-            ("Robot Beep 🤖", self._preset_robot_beep),
-            ("Falling Star ⭐", self._preset_falling_star),
-            ("Fade-In Mountain 🏔️", self._preset_fade_in_triangle),
+            ("A4 Tone", self._preset_pure_a4),
+            ("Pitch Rise", self._preset_rocket_pitch),
+            ("Robot Beep", self._preset_robot_beep),
+            ("Pitch Fall", self._preset_falling_star),
+            ("Fade-In", self._preset_fade_in_triangle),
         ]
 
         for label, callback in presets:
@@ -6753,7 +6774,7 @@ class WaveToyWindow(QMainWindow):
             ("🐢", "Slow Motion Visual Only", "#ffd6a5", self._slow_articulation_motion),
         ):
             button = self._make_story_button(icon, label, color, callback)
-            button.setMinimumHeight(54)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             motion_buttons.addWidget(button)
         motion_layout.addLayout(motion_buttons)
         self.articulation_motion_status_label = QLabel("Motion idle • add chain phonemes, then use Play Word Motion or Play Word.")
@@ -6891,7 +6912,7 @@ class WaveToyWindow(QMainWindow):
 
         if title == "Saved Phonemes":
             save_button = self._make_story_button("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme)
-            save_button.setMinimumHeight(72)
+            save_button.setMinimumHeight(WaveToySizing.LARGE_BUTTON_HEIGHT)
             body_layout.addWidget(save_button)
             self.phoneme_cards_widget = QWidget()
             body_layout.addWidget(self.phoneme_cards_widget)
@@ -6936,8 +6957,8 @@ class WaveToyWindow(QMainWindow):
         ipa = str(data.get("ipa", name.lower()))
         button = QPushButton(f"{emoji}  {name}    /{ipa}/")
         button.setObjectName("articulationPresetButton")
-        button.setMinimumHeight(56)
-        button.setMaximumHeight(64)
+        button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+        button.setMaximumHeight(46)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button.setCursor(Qt.PointingHandCursor)
         button.setToolTip(f"Load {name} phoneme preset")
@@ -7274,7 +7295,7 @@ class WaveToyWindow(QMainWindow):
             ("📂 Load/Edit", lambda checked=False, i=index: self._select_articulation_chain_item(i), False),
             ("⬅ Move Earlier", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
             ("➡ Move Later", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
-            ("🗑 Remove", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
+            ("Remove", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
         ):
             button = QPushButton(text)
             button.setObjectName("phonemeCardDangerAction" if danger else "phonemeCardSecondaryAction")
@@ -8564,25 +8585,26 @@ class WaveToyWindow(QMainWindow):
         self._refresh_phoneme_cards()
 
     def _make_story_button(self, icon: str, label: str, color: str, callback) -> QPushButton:
-        button = QPushButton(f"{icon}\n{label}")
+        button = QPushButton(f"{icon} {label}")
         button.setObjectName("storyTransportButton")
-        button.setMinimumSize(QSize(150, 76))
+        button.setMinimumSize(QSize(108, WaveToySizing.BUTTON_HEIGHT))
         button.setCursor(Qt.PointingHandCursor)
         button.setToolTip(label)
         button.setStyleSheet(
             f"""
             QPushButton#storyTransportButton {{
-                background: {color};
-                color: #1d1d1d;
-                border: 1px solid rgba(0, 0, 0, 0.18);
-                border-radius: 10px;
-                font-size: 15px;
+                background: rgba(255, 255, 255, 0.14);
+                color: #e8f3ff;
+                border: 1px solid rgba(180, 220, 255, 0.26);
+                border-left: 3px solid {color};
+                border-radius: 8px;
+                font-size: 13px;
                 font-weight: 900;
-                min-height: 76px;
-                padding: 8px 14px;
+                min-height: 34px;
+                padding: 4px 8px;
             }}
             QPushButton#storyTransportButton:pressed {{
-                padding-top: 12px;
+                padding-top: 6px;
             }}
             """
         )
@@ -8723,12 +8745,12 @@ class WaveToyWindow(QMainWindow):
         toolbar = QWidget()
         toolbar.setObjectName("graphicalWaveToolbar")
         toolbar_layout = FlowLayout(toolbar, margin=0, spacing=8)
-        add_button = QPushButton("➕ Add Wave Layer")
-        duplicate_button = QPushButton("⧉ Duplicate Loudest Layer")
-        all_button = QPushButton("🌈 Clear Solo")
+        add_button = QPushButton("＋ Layer")
+        duplicate_button = QPushButton("⧉ Duplicate")
+        all_button = QPushButton("Clear Solo")
         for button in (add_button, duplicate_button, all_button):
             button.setObjectName("workspaceToolbarButton")
-            button.setMinimumHeight(52)
+            button.setMinimumHeight(WaveToySizing.LARGE_BUTTON_HEIGHT)
             button.setMinimumWidth(156)
             button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             toolbar_layout.addWidget(button)
@@ -8884,10 +8906,10 @@ class WaveToyWindow(QMainWindow):
             actions.setObjectName("graphicalWaveCardHeader")
             actions.waveSelected.connect(self._graphical_select_wave)
             actions_layout = FlowLayout(actions, margin=10, spacing=8)
-            mute = QPushButton("🎵 Mute")
-            solo = QPushButton("⭐ Solo")
-            duplicate = QPushButton("📄 Copy")
-            remove = QPushButton("🗑 Remove")
+            mute = QPushButton("Mute")
+            solo = QPushButton("Solo")
+            duplicate = QPushButton("Copy")
+            remove = QPushButton("Remove")
             for button in (mute, solo, duplicate, remove):
                 button.setObjectName("workspaceToolbarButton")
                 button.setMinimumSize(QSize(96, 48))
@@ -9125,9 +9147,9 @@ class WaveToyWindow(QMainWindow):
             page_layout.setSpacing(8)
             if item_filter == "word":
                 actions = QHBoxLayout()
-                add_word = QPushButton("Add Latest Word")
+                add_word = QPushButton("Add Word")
                 add_word.clicked.connect(lambda checked=False: self._timeline_add_first_speech_type_to_playhead("word"))
-                clear = QPushButton("Clear Assets")
+                clear = QPushButton("Clear")
                 clear.clicked.connect(self._timeline_clear_speech_bin)
                 actions.addWidget(add_word)
                 actions.addWidget(clear)
@@ -9212,7 +9234,7 @@ class WaveToyWindow(QMainWindow):
             self._make_story_button("-", "Zoom Out", "#ffc6ff", lambda checked=False: self._timeline_zoom(1.28)),
         ]
         for button in buttons:
-            button.setMinimumHeight(44)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             transport_layout.addWidget(button)
         layout.addWidget(transport)
 
@@ -9231,7 +9253,7 @@ class WaveToyWindow(QMainWindow):
             button = self._make_story_button(icon, f"{label} ({shortcut})", color, (self._timeline_split_selected if tool == "split" else self._timeline_delete_selected if tool == "delete" else lambda checked=False, name=tool: self._timeline_set_tool(name)))
             button.setCheckable(tool in {"select", "trim", "stretch"})
             button.setChecked(tool == self.timeline_edit_tool)
-            button.setMinimumHeight(40)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             edit_layout.addWidget(button)
             if tool in {"select", "trim", "stretch"}:
                 self.timeline_tool_buttons[tool] = button
@@ -9240,7 +9262,7 @@ class WaveToyWindow(QMainWindow):
             ("💾", "Export Last Mix", "#fdffb6", self._timeline_export_last_mix),
         ):
             button = self._make_story_button(icon, label, color, callback)
-            button.setMinimumHeight(40)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             edit_layout.addWidget(button)
         self.timeline_snap_checkbox = QCheckBox("Snap")
         self.timeline_snap_checkbox.setChecked(self.timeline_snap_enabled)
@@ -9284,7 +9306,7 @@ class WaveToyWindow(QMainWindow):
         palette_subtitle.setObjectName("timelineInspectorText")
         palette_subtitle.setWordWrap(True)
         import_button = self._make_story_button("Import", "Import Sounds", "#b8f2e6", self._timeline_import_sounds)
-        import_button.setMinimumHeight(42)
+        import_button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
         self.timeline_palette_count_label = QLabel("No imported sounds yet.")
         self.timeline_palette_count_label.setObjectName("timelineInspectorText")
         self.timeline_palette_count_label.setWordWrap(True)
@@ -10179,6 +10201,8 @@ class WaveToyWindow(QMainWindow):
             rendered_duration_seconds=source.rendered_duration_seconds,
             stretch_mode=source.stretch_mode,
             stretch_algorithm=source.stretch_algorithm,
+            expression_metadata=dict(source.expression_metadata or {}),
+            svg_visual_metadata=dict(source.svg_visual_metadata or {}),
         )
         self.timeline_clips.append(duplicate)
         self.timeline_selected_clip_id = duplicate.clip_id
@@ -10229,6 +10253,8 @@ class WaveToyWindow(QMainWindow):
             playback_rate=source.playback_rate,
             stretch_mode=source.stretch_mode,
             stretch_algorithm=source.stretch_algorithm,
+            expression_metadata=dict(source.expression_metadata or {}),
+            svg_visual_metadata=dict(source.svg_visual_metadata or {}),
         )
         self.timeline_clips.append(right)
         self.timeline_selected_clip_id = right.clip_id
@@ -10524,7 +10550,7 @@ class WaveToyWindow(QMainWindow):
             button.setProperty("accentColor", color)
             button.setCursor(Qt.PointingHandCursor)
             button.setCheckable(True)
-            button.setMinimumHeight(44)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             button.setMaximumHeight(52)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.clicked.connect(lambda checked=False, panel_key=key: self._open_toy_panel(panel_key))
@@ -10639,13 +10665,13 @@ class WaveToyWindow(QMainWindow):
 
     def _toy_panel_title(self, panel_key: str) -> str:
         return {
-            "shape": "🎚 Shape Mix Toy Panel",
+            "shape": "🎚 Shape Mix Panel",
             "pitch": "Pitch Tools Panel",
             "tuning": "🎼 Tuning Map Panel",
             "stereo": "👂 Stereo Space Panel",
             "effects": "Texture / Effects Panel",
             "presets": "🌈 Sound Experiments Panel",
-        }.get(panel_key, "🎛 Toy Panel")
+        }.get(panel_key, "🎛 Visual Panel")
 
     def _toy_panel_size(self, panel_key: str) -> QSize:
         return {
@@ -10674,7 +10700,7 @@ class WaveToyWindow(QMainWindow):
         return QPoint(top_left.x() + max(margin, x_offset), top_left.y() + max(margin, y_offset))
 
     def _build_visual_dashboard(self, outer: QVBoxLayout) -> None:
-        dashboard = self._toy_group("🐙 Wave Explorer Dashboard")
+        dashboard = self._toy_group("Wave Explorer Dashboard")
         dashboard.setObjectName("dashboardGroup")
         dashboard_layout = QGridLayout(dashboard)
         dashboard_layout.setContentsMargins(12, 18, 12, 12)
@@ -10716,7 +10742,7 @@ class WaveToyWindow(QMainWindow):
         self.dashboard_canvas = WaveCanvas()
         self.dashboard_canvas.setMinimumSize(QSize(640, 330))
         self.dashboard_canvas.setToolTip("Central Wave Explorer. Mouse wheel zooms only this waveform view.")
-        explorer_open = ToyButton("🔍 Big View", "#7bdff2")
+        explorer_open = ToyButton("Inspect", "#7bdff2")
         explorer_open.setMinimumHeight(44)
         explorer_open.setMaximumWidth(150)
         explorer_open.clicked.connect(self._open_wave_explorer)
@@ -10853,7 +10879,7 @@ class WaveToyWindow(QMainWindow):
     def _build_shape_workspace(self) -> None:
         if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
             return
-        self.dashboard_workspace_title.setText("🎚 Shape Mix — mute, solo, loudness, and envelope time without hiding the waveform.")
+        self.dashboard_workspace_title.setText("🎚 Shape Mix — mute, solo, loudness, and envelope time while preserving the waveform.")
         headers = ["Wave", "Mute", "Solo", "Start", "End", "Time"]
         for column, header in enumerate(headers):
             self.dashboard_workspace_layout.addWidget(QLabel(header), 0, column)
@@ -10876,7 +10902,7 @@ class WaveToyWindow(QMainWindow):
     def _build_pitch_workspace(self) -> None:
         if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
             return
-        self.dashboard_workspace_title.setText("🎯 Pitch Workspace — Note Wheel ideas without hiding the waveform.")
+        self.dashboard_workspace_title.setText("🎯 Pitch Tools — note-wheel ideas while preserving the waveform.")
         self.dashboard_workspace_layout.addWidget(QLabel("🎵 Main Note"), 0, 0)
         self.dashboard_workspace_layout.addWidget(self._make_synced_combo(self.note_combo), 0, 1)
         self._add_workspace_slider_row(1, "🧸 Size", self.octave_slider)
@@ -10891,7 +10917,7 @@ class WaveToyWindow(QMainWindow):
             note = self._make_synced_combo(self.wave_note_combos[wave_type])
             octave = self._make_synced_spin(self.wave_octave_spins[wave_type])
             cents = self._make_synced_slider(self.wave_cents_sliders[wave_type])
-            wheel = QPushButton("🎡 Note Wheel")
+            wheel = QPushButton("Note Wheel")
             wheel.clicked.connect(lambda checked=False, wt=wave_type: self._open_note_wheel(wt))
             self.dashboard_workspace_layout.addWidget(QLabel(f"{self._wave_icon(wave_type)}"), index, 0)
             self.dashboard_workspace_layout.addWidget(follow, index, 1)
@@ -10903,7 +10929,7 @@ class WaveToyWindow(QMainWindow):
     def _build_tuning_workspace(self) -> None:
         if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
             return
-        self.dashboard_workspace_title.setText("🎼 Tuning Workspace — map notes while the waveform remains in view.")
+        self.dashboard_workspace_title.setText("🎼 Tuning Workspace — map notes while the waveform remains visible.")
         self.dashboard_workspace_layout.addWidget(QLabel("🎼 Tuning Map"), 0, 0)
         self.dashboard_workspace_layout.addWidget(self._make_synced_combo(self.tuning_method_combo), 0, 1, 1, 2)
         self.dashboard_workspace_layout.addWidget(QLabel("Home Note"), 1, 0)
@@ -10945,21 +10971,21 @@ class WaveToyWindow(QMainWindow):
     def _build_presets_workspace(self) -> None:
         if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
             return
-        self.dashboard_workspace_title.setText("🌈 Experiments Workspace — jump between sounds without leaving the Explorer.")
+        self.dashboard_workspace_title.setText("Experiments Workspace — switch sound designs without leaving the Explorer.")
         presets = [
-            ("Pure A4", self._preset_pure_a4),
-            ("Rocket Pitch 🚀", self._preset_rocket_pitch),
-            ("Robot Beep 🤖", self._preset_robot_beep),
-            ("Falling Star ⭐", self._preset_falling_star),
-            ("Fade-In Mountain 🏔️", self._preset_fade_in_triangle),
+            ("A4 Tone", self._preset_pure_a4),
+            ("Pitch Rise", self._preset_rocket_pitch),
+            ("Robot Beep", self._preset_robot_beep),
+            ("Pitch Fall", self._preset_falling_star),
+            ("Fade-In", self._preset_fade_in_triangle),
         ]
         for index, (label, callback) in enumerate(presets):
             button = QPushButton(label)
             button.clicked.connect(callback)
             self.dashboard_workspace_layout.addWidget(button, index // 2, index % 2)
-        save = QPushButton("💾 Save")
+        save = QPushButton("Save")
         save.clicked.connect(self._save)
-        load = QPushButton("📂 Load")
+        load = QPushButton("Load")
         load.clicked.connect(self._load_sound)
         self.dashboard_workspace_layout.addWidget(save, 3, 0)
         self.dashboard_workspace_layout.addWidget(load, 3, 1)
@@ -11107,36 +11133,37 @@ class WaveToyWindow(QMainWindow):
     def _apply_style(self) -> None:
         base_style = """
             QMainWindow {
-                background: #eef3f8;
+                background: #0d1724;
             }
             QScrollArea {
-                background: #eef3f8;
+                background: #0d1724;
             }
             QTabWidget#mainTabs::pane {
                 border: 0;
-                background: #eef3f8;
+                background: #0d1724;
             }
             QTabBar::tab {
-                background: #e9fbff;
-                border: 1px solid rgba(0, 0, 0, 0.12);
+                background: rgba(255, 255, 255, 0.10);
+                border: 1px solid rgba(180, 220, 255, 0.22);
                 border-bottom: 0;
                 border-top-left-radius: 14px;
                 border-top-right-radius: 14px;
-                color: #263238;
-                font-size: 14px;
+                color: #dcecff;
+                font-size: 13px;
                 font-weight: 900;
-                min-height: 42px;
-                padding: 8px 22px;
+                min-height: 34px;
+                padding: 5px 16px;
             }
             QTabBar::tab:selected {
-                background: #ffffff;
+                background: rgba(255, 255, 255, 0.22);
+                border-color: rgba(36, 215, 255, 0.62);
             }
             QWidget#waveExplorerTab, QWidget#playTab, QWidget#timelineStoryboardTab, QWidget#libraryTab, QScrollArea#graphicalEditorTab, QWidget#graphicalEditorPage {
-                background: #eef3f8;
+                background: #0d1724;
             }
             QWidget#graphicalWorkflowCard {
-                background: rgba(255, 255, 255, 0.86);
-                border: 1px solid rgba(255, 153, 200, 0.72);
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(180, 220, 255, 0.24);
                 border-radius: 12px;
             }
             QWidget#graphicalLayerList {
@@ -11166,38 +11193,38 @@ class WaveToyWindow(QMainWindow):
                 padding: 8px;
             }
             QLabel#timelineStoryboardTitle {
-                font-size: 28px;
+                font-size: 26px;
                 font-weight: 900;
-                color: #263238;
+                color: #dcecff;
             }
             QLabel#timelineStoryboardSubtitle {
-                font-size: 15px;
-                font-weight: 900;
-                color: #37474f;
+                font-size: 14px;
+                font-weight: 800;
+                color: #a8c3d6;
             }
             QWidget#storyTransportBar {
-                background: rgba(255, 255, 255, 0.72);
-                border: 1px solid rgba(255, 153, 200, 0.58);
+                background: rgba(255, 255, 255, 0.10);
+                border: 1px solid rgba(180, 220, 255, 0.24);
                 border-radius: 12px;
             }
             QPushButton#storyTransportButton {
-                min-height: 44px;
-                font-size: 15px;
+                min-height: 34px;
+                font-size: 13px;
                 font-weight: 900;
-                border-radius: 10px;
-                padding: 8px 14px;
+                border-radius: 8px;
+                padding: 4px 8px;
             }
             QScrollArea#storyboardScroll, QWidget#storyboardLaneRoot {
                 background: transparent;
             }
             QWidget#timelineCanvas {
-                background: #e6f0fb;
-                border: 1px solid rgba(0, 0, 0, 0.12);
+                background: rgba(255, 255, 255, 0.10);
+                border: 1px solid rgba(180, 220, 255, 0.24);
                 border-radius: 10px;
             }
             QWidget#timelineInspector, QWidget#timelineAudioPalette, QWidget#speechAssetsPanel {
-                background: #f7fafc;
-                border: 1px solid rgba(255, 153, 200, 0.72);
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(180, 220, 255, 0.24);
                 border-radius: 10px;
             }
             QWidget#timelinePaletteList {
@@ -11206,12 +11233,12 @@ class WaveToyWindow(QMainWindow):
             QLabel#timelineInspectorTitle {
                 font-size: 14px;
                 font-weight: 900;
-                color: #263238;
+                color: #dcecff;
             }
             QLabel#timelineInspectorText {
                 font-size: 13px;
                 font-weight: 800;
-                color: #37474f;
+                color: #a8c3d6;
             }
             QWidget#storyboardLane {
                 background: #eefbff;
@@ -11266,23 +11293,23 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 10px;
             }
             QWidget#appShell {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7bdff2, stop:0.55 #fff1d6, stop:1 #ff99c8);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0d1724, stop:0.55 #13283a, stop:1 #182033);
             }
             QWidget#toyTitleBanner {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:0.48 #fff8d9, stop:1 #ffd6e8);
-                border: 1px solid rgba(255, 79, 163, 0.72);
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(180, 220, 255, 0.24);
                 border-radius: 12px;
             }
             QLabel#toyTitleText {
                 font-size: 26px;
                 font-weight: 900;
-                color: #263238;
+                color: #e8f3ff;
                 letter-spacing: 1px;
             }
             QLabel#toyTitleSubtitle {
-                font-size: 15px;
-                font-weight: 900;
-                color: #4361ee;
+                font-size: 14px;
+                font-weight: 800;
+                color: #a8c3d6;
             }
             QLabel#toyTitleIconRail {
                 background: rgba(255, 255, 255, 0.76);
@@ -11293,59 +11320,59 @@ class WaveToyWindow(QMainWindow):
                 padding: 4px;
             }
             QLabel#title {
-                font-size: 28px;
+                font-size: 26px;
                 font-weight: 900;
-                color: #263238;
+                color: #e8f3ff;
             }
             QLabel#subtitle {
                 font-size: 14px;
                 font-weight: 700;
-                color: #37474f;
+                color: #a8c3d6;
             }
             QGroupBox#toyGroup {
-                background: #ffffff;
-                border: 1px solid rgba(0, 0, 0, 0.16);
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(180, 220, 255, 0.24);
                 border-radius: 8px;
                 margin-top: 16px;
                 padding: 10px;
                 font-size: 14px;
                 font-weight: 900;
-                color: #263238;
+                color: #dcecff;
             }
             QGroupBox#toyGroup::title {
                 subcontrol-origin: margin;
                 left: 16px;
                 padding: 1px 8px;
-                background: #ffffff;
+                background: rgba(13, 23, 36, 0.92);
                 border-radius: 8px;
             }
             QGroupBox#dashboardGroup {
-                background: #ffffff;
-                border: 1px solid rgba(0, 0, 0, 0.18);
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(180, 220, 255, 0.24);
                 border-radius: 10px;
                 margin-top: 16px;
                 padding: 10px;
                 font-size: 14px;
                 font-weight: 900;
-                color: #263238;
+                color: #dcecff;
             }
             QGroupBox#dashboardGroup::title {
                 subcontrol-origin: margin;
                 left: 16px;
                 padding: 1px 8px;
-                background: #ffffff;
+                background: rgba(13, 23, 36, 0.92);
                 border-radius: 8px;
             }
             QWidget#explorerDashboardPanel {
-                background: #eefbff;
-                border: 1px solid rgba(123, 223, 242, 0.78);
+                background: rgba(255, 255, 255, 0.10);
+                border: 1px solid rgba(123, 223, 242, 0.35);
                 border-radius: 12px;
                 padding: 8px;
             }
             QLabel#dashboardExplorerTitle {
-                font-size: 26px;
+                font-size: 24px;
                 font-weight: 900;
-                color: #263238;
+                color: #e8f3ff;
             }
             QLabel#dashboardSummary {
                 background: rgba(255, 255, 255, 0.82);
@@ -11387,8 +11414,8 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QWidget#waveCard {
-                background: #f9fbff;
-                border: 1px solid rgba(0, 0, 0, 0.10);
+                background: rgba(255, 255, 255, 0.13);
+                border: 1px solid rgba(180, 220, 255, 0.20);
                 border-radius: 16px;
             }
             QWidget#waveCardMuted {
@@ -11402,8 +11429,8 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 16px;
             }
             QWidget#waveCardSelected {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f0fff7, stop:1 #fff7d6);
-                border: 1px solid #5cdb95;
+                background: rgba(36, 215, 255, 0.16);
+                border: 1px solid rgba(36, 215, 255, 0.72);
                 border-radius: 18px;
             }
             QWidget#sliderCell, QWidget#earPreviewCell, QWidget#signalStage {
@@ -11516,10 +11543,10 @@ class WaveToyWindow(QMainWindow):
                 padding-top: 13px;
             }
             QWidget#articulationLabTab {
-                background: #fff1d6;
+                background: #0d1724;
             }
             QWidget#articulationLabHeader {
-                background: rgba(255, 255, 255, 0.72);
+                background: rgba(255, 255, 255, 0.12);
                 border: 1px solid rgba(0, 0, 0, 0.10);
                 border-radius: 18px;
             }
@@ -11663,24 +11690,26 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QComboBox, QSpinBox, QDoubleSpinBox {
-                min-height: 38px;
-                border: 1px solid rgba(0, 0, 0, 0.18);
-                border-radius: 12px;
+                min-height: 34px;
+                border: 1px solid rgba(180, 220, 255, 0.24);
+                border-radius: 8px;
                 padding: 4px 8px;
-                font-size: 14px;
-                background: #f9fbff;
+                font-size: 13px;
+                background: rgba(255, 255, 255, 0.72);
             }
             QPushButton {
-                min-height: 34px;
-                border-radius: 14px;
-                border: 1px solid rgba(0, 0, 0, 0.12);
-                background: #f1f7ff;
-                font-size: 14px;
+                min-height: 32px;
+                border-radius: 8px;
+                border: 1px solid rgba(180, 220, 255, 0.24);
+                background: rgba(255, 255, 255, 0.16);
+                color: #dcecff;
+                font-size: 13px;
                 font-weight: 800;
-                padding: 6px 10px;
+                padding: 4px 8px;
             }
             QPushButton:hover {
-                background: #e2f2ff;
+                background: rgba(36, 215, 255, 0.18);
+                border-color: rgba(36, 215, 255, 0.55);
             }
             QWidget#collapsibleSection {
                 background: transparent;
