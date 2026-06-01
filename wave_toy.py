@@ -6114,6 +6114,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_canvas: VocalTractCanvas | None = None
         self.articulation_motion_status_label: QLabel | None = None
         self.articulation_smooth_transitions_checkbox: QCheckBox | None = None
+        self.continuous_debug_bypass_formants_checkbox: QCheckBox | None = None
         self.articulation_word_render_mode_combo: QComboBox | None = None
         self.continuous_diagnostics_latest: Dict[str, object] = {}
         self.continuous_diagnostics_status_label: QLabel | None = None
@@ -6147,6 +6148,7 @@ class WaveToyWindow(QMainWindow):
             "word_fade_in_ms": 5,
             "word_fade_out_ms": 8,
             "voice_profile": "Neutral",
+            "continuous_debug_bypass_formants": False,
             "pitch_envelopes": [],
             "note_events": [],
         }
@@ -7554,11 +7556,16 @@ class WaveToyWindow(QMainWindow):
         validate_button = QPushButton("Validate Continuous")
         validate_button.setObjectName("phonemeCardPrimaryAction")
         validate_button.setCursor(Qt.PointingHandCursor)
-        validate_button.setToolTip("Render known test chains with Continuous Mouth Motion and report whether audio, voicing, noise, and duration are present.")
+        validate_button.setToolTip("Render known test chains with Continuous Mouth Motion and report whether audio, pitch stability, clipping, and distortion pass quality checks.")
         validate_button.clicked.connect(self._validate_continuous_render_chains)
+        self.continuous_debug_bypass_formants_checkbox = QCheckBox("Bypass formants")
+        self.continuous_debug_bypass_formants_checkbox.setChecked(bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)))
+        self.continuous_debug_bypass_formants_checkbox.setToolTip("Diagnostic only: render Continuous Mouth Motion without formant coloration to isolate excitation pitch stability.")
+        self.continuous_debug_bypass_formants_checkbox.toggled.connect(self._toggle_continuous_debug_bypass_formants)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.articulation_word_render_mode_combo, 1)
         mode_row.addWidget(validate_button)
+        mode_row.addWidget(self.continuous_debug_bypass_formants_checkbox)
         chain_layout.addLayout(mode_row)
 
         diagnostics_card = self._toy_group("Continuous Mouth Motion Diagnostics")
@@ -8525,6 +8532,10 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_settings["smooth_mouth_transitions"] = bool(checked)
         self._mark_articulation_word_dirty()
 
+    def _toggle_continuous_debug_bypass_formants(self, checked: bool) -> None:
+        self.articulation_word_render_settings["continuous_debug_bypass_formants"] = bool(checked)
+        self._mark_articulation_word_dirty()
+
     def _articulation_smooth_transitions_enabled(self) -> bool:
         if self.articulation_smooth_transitions_checkbox is not None:
             return bool(self.articulation_smooth_transitions_checkbox.isChecked())
@@ -9072,21 +9083,59 @@ class WaveToyWindow(QMainWindow):
         return phoneme, float(np.clip(voiced_gain, 0.0, 1.0)), float(np.clip(noise_gain, 0.0, 1.8)), closure, active
 
     def _shape_continuous_frame(self, mono: np.ndarray, phoneme: ArticulationPhoneme) -> np.ndarray:
-        if mono.size <= 4:
+        """Apply conservative tract coloration without moving the excitation pitch."""
+        if mono.size <= 4 or bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)):
             return mono
         spectrum = np.fft.rfft(mono)
         freqs = np.fft.rfftfreq(mono.size, 1.0 / SAMPLE_RATE)
         f1, f2, f3 = formants_from_articulation(phoneme)
-        envelope = np.full_like(freqs, 0.30, dtype=np.float64)
-        for center, width, gain in ((f1, 135.0, 1.25), (f2, 240.0, 0.88), (f3, 380.0, 0.55)):
+        envelope = np.full_like(freqs, 0.78, dtype=np.float64)
+        for center, width, gain in ((f1, 180.0, 0.28), (f2, 320.0, 0.20), (f3, 520.0, 0.12)):
             envelope += gain * np.exp(-0.5 * ((freqs - center) / width) ** 2)
         if phoneme.nasal_open > 0.0:
             nasal = float(np.clip(phoneme.nasal_open, 0.0, 1.0))
             nasal_center = 260.0 + (1.0 - phoneme.tongue_frontness) * 180.0
-            envelope += nasal * 1.20 * np.exp(-0.5 * ((freqs - nasal_center) / 120.0) ** 2)
-            envelope *= 1.0 / (1.0 + nasal * (freqs / 2400.0) ** 2)
-        envelope *= 1.0 - 0.22 * phoneme.lip_rounding * np.clip((freqs - 1800.0) / 5000.0, 0.0, 1.0)
-        return np.fft.irfft(spectrum * envelope, n=mono.size)
+            envelope += nasal * 0.16 * np.exp(-0.5 * ((freqs - nasal_center) / 180.0) ** 2)
+            envelope *= 1.0 / (1.0 + nasal * 0.28 * (freqs / 2600.0) ** 2)
+        envelope *= 1.0 - 0.10 * phoneme.lip_rounding * np.clip((freqs - 1800.0) / 5000.0, 0.0, 1.0)
+        envelope = np.clip(envelope, 0.42, 1.16)
+        shaped = np.fft.irfft(spectrum * envelope, n=mono.size)
+        input_rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
+        shaped_rms = float(np.sqrt(np.mean(np.square(shaped)))) if shaped.size else 0.0
+        if input_rms > 1.0e-8 and shaped_rms > 1.0e-8:
+            shaped *= min(1.12, input_rms / shaped_rms)
+        return shaped
+
+    def _estimate_continuous_pitch_hz(self, mono: np.ndarray, intended_pitch_hz: float) -> float:
+        if mono.size < int(0.035 * SAMPLE_RATE) or intended_pitch_hz <= 0.0:
+            return 0.0
+        centered = mono.astype(np.float64) - float(np.mean(mono))
+        rms = float(np.sqrt(np.mean(np.square(centered))))
+        if rms <= 1.0e-5:
+            return 0.0
+        min_lag = max(1, int(SAMPLE_RATE / min(880.0, max(120.0, intended_pitch_hz * 1.65))))
+        max_lag = min(len(centered) - 1, int(SAMPLE_RATE / max(60.0, intended_pitch_hz * 0.55)))
+        if max_lag <= min_lag:
+            return 0.0
+        window = centered * np.hanning(len(centered))
+        correlations = np.array([float(np.dot(window[:-lag], window[lag:])) for lag in range(min_lag, max_lag + 1)], dtype=np.float64)
+        if correlations.size == 0 or float(np.max(correlations)) <= 1.0e-9:
+            return 0.0
+        lag = min_lag + int(np.argmax(correlations))
+        return float(SAMPLE_RATE / lag)
+
+    def _continuous_soft_limit(self, mono: np.ndarray, target_peak: float = 0.86) -> np.ndarray:
+        if mono.size == 0:
+            return mono
+        peak = float(np.max(np.abs(mono)))
+        if peak <= target_peak or peak <= 1.0e-8:
+            return mono
+        drive = peak / target_peak
+        limited = np.tanh(mono * drive) / np.tanh(drive)
+        limited_peak = float(np.max(np.abs(limited)))
+        if limited_peak > target_peak and limited_peak > 1.0e-8:
+            limited = limited / limited_peak * target_peak
+        return limited
 
     def _continuous_voiced_gain(self, phoneme: ArticulationPhoneme) -> float:
         voiced_gain = _articulation_voiced_gain(phoneme)
@@ -9109,15 +9158,27 @@ class WaveToyWindow(QMainWindow):
         final_buffer_length = int(metrics.get("final_buffer_length", 0) or 0)
         voiced_rms = float(metrics.get("voiced_rms", 0.0) or 0.0)
         voiced_phoneme_count = int(metrics.get("voiced_phoneme_count", 0) or 0)
+        clipped_count = int(metrics.get("clipped_sample_count", metrics.get("clipped_samples", 0)) or 0)
+        pitch_error = abs(float(metrics.get("pitch_error_percent", metrics.get("pitch_error", 0.0)) or 0.0))
+        crest_factor = float(metrics.get("crest_factor", 0.0) or 0.0)
+        dc_offset = abs(float(metrics.get("dc_offset", 0.0) or 0.0))
         if final_buffer_length == 0:
-            return "EMPTY RENDER", "#b00020"
-        if final_buffer_length > 0 and output_peak <= 0.000001:
-            return "SILENT BUFFER", "#b00020"
+            return "SILENT", "#b00020"
+        if output_peak <= 0.000001:
+            return "SILENT", "#b00020"
+        if output_peak <= 0.001:
+            return "LOW_OUTPUT", "#b36b00"
+        if clipped_count > max(4, int(final_buffer_length * 0.0002)):
+            return "CLIPPING", "#b00020"
         if voiced_phoneme_count > 0 and voiced_rms <= 0.000001:
-            return "VOICED PATH MISSING", "#b00020"
-        if output_peak > 0.001 and final_buffer_length > 0:
-            return "PASS", "#0b7a2a"
-        return "LOW OUTPUT", "#b36b00"
+            return "LOW_OUTPUT", "#b36b00"
+        if int(metrics.get("burst_event_count", 0) or 0) > 0 and float(metrics.get("burst_peak", 0.0) or 0.0) <= 0.003:
+            return "LOW_OUTPUT", "#b36b00"
+        if pitch_error > 8.0:
+            return "PITCH_UNSTABLE", "#b00020"
+        if dc_offset > 0.035 or (crest_factor > 0.0 and crest_factor < 2.2 and output_peak > 0.35):
+            return "DISTORTED", "#b00020"
+        return "PASS_AUDIO_PRESENT", "#0b7a2a"
 
     def _update_continuous_diagnostics_panel(self) -> None:
         metrics = dict(self.continuous_diagnostics_latest or {})
@@ -9132,9 +9193,22 @@ class WaveToyWindow(QMainWindow):
             "active_render_mode",
             "output_duration",
             "output_peak",
+            "pre_peak",
+            "post_peak",
+            "clipped_samples",
+            "rms",
+            "crest_factor",
+            "dc_offset",
+            "pitch_estimate",
+            "pitch_error",
+            "distortion_status",
             "voiced_rms",
             "noise_rms",
             "source_rms",
+            "burst_peak",
+            "burst_rms",
+            "stop_burst_status",
+            "final_mix_rms",
             "transition_count",
             "transition_duration_total",
             "final_buffer_length",
@@ -9157,9 +9231,23 @@ class WaveToyWindow(QMainWindow):
             "phoneme_count",
             "output_duration",
             "output_peak",
+            "pre_peak",
+            "post_peak",
+            "clipped_sample_count",
+            "rms",
+            "crest_factor",
+            "dc_offset",
+            "intended_pitch_hz",
+            "measured_pitch_estimate_hz",
+            "pitch_error_percent",
+            "active_phoneme",
             "voiced_rms",
             "noise_rms",
             "source_rms",
+            "burst_peak",
+            "burst_rms",
+            "stop_burst_status",
+            "final_mix_rms",
             "transition_count",
             "transition_duration_total",
             "final_buffer_length",
@@ -9215,12 +9303,15 @@ class WaveToyWindow(QMainWindow):
                     notes.append("noise low")
                 if float(metrics.get("output_duration", 0.0) or 0.0) <= 0.0:
                     notes.append("duration absent")
+                if int(metrics.get("burst_event_count", 0) or 0) > 0 and float(metrics.get("burst_peak", 0.0) or 0.0) <= 0.003:
+                    notes.append("stop burst low")
                 row = {
                     "chain_label": label,
                     "rendered_duration": round(len(audio) / SAMPLE_RATE, 4) if audio.size else 0.0,
                     "output_peak": metrics.get("output_peak", 0.0),
                     "voiced_rms": metrics.get("voiced_rms", 0.0),
                     "noise_rms": metrics.get("noise_rms", 0.0),
+                    "burst_peak": metrics.get("burst_peak", 0.0),
                     "result": status,
                     "notes": ", ".join(notes) if notes else "ok",
                 }
@@ -9237,6 +9328,10 @@ class WaveToyWindow(QMainWindow):
                 "voiced_rms": 0.0,
                 "noise_rms": 0.0,
                 "source_rms": 0.0,
+                "burst_peak": 0.0,
+                "burst_rms": 0.0,
+                "burst_event_count": 0,
+                "stop_burst_status": "none",
                 "transition_count": 0,
                 "transition_duration_total": 0,
                 "final_buffer_length": 0,
@@ -9252,6 +9347,10 @@ class WaveToyWindow(QMainWindow):
                 self.articulation_word_render_mode_combo.blockSignals(True)
                 self.articulation_word_render_mode_combo.setCurrentText(saved_mode)
                 self.articulation_word_render_mode_combo.blockSignals(False)
+            if self.continuous_debug_bypass_formants_checkbox is not None:
+                self.continuous_debug_bypass_formants_checkbox.blockSignals(True)
+                self.continuous_debug_bypass_formants_checkbox.setChecked(bool(saved_settings.get("continuous_debug_bypass_formants", False)))
+                self.continuous_debug_bypass_formants_checkbox.blockSignals(False)
             self.articulation_word_render_audio = saved_audio
             self.articulation_word_render_signature = saved_signature
             self.articulation_last_word_render_path = saved_path
@@ -9259,9 +9358,9 @@ class WaveToyWindow(QMainWindow):
             self._refresh_articulation_chain_cards()
             self._refresh_articulation_motion_timeline()
             self._update_articulation_word_status()
-        lines = ["chain | duration | peak | voiced | noise | result | notes"]
+        lines = ["chain | duration | peak | voiced | noise | burst | result | notes"]
         for row in rows:
-            lines.append(f"{row['chain_label']} | {row['rendered_duration']}s | {row['output_peak']} | {row['voiced_rms']} | {row['noise_rms']} | {row['result']} | {row['notes']}")
+            lines.append(f"{row['chain_label']} | {row['rendered_duration']}s | {row['output_peak']} | {row['voiced_rms']} | {row['noise_rms']} | {row.get('burst_peak', 0.0)} | {row['result']} | {row['notes']}")
         if self.continuous_validation_results_label is not None:
             self.continuous_validation_results_label.setText("Validation results:\n" + "\n".join(lines))
 
@@ -9274,6 +9373,8 @@ class WaveToyWindow(QMainWindow):
         transition_count = sum(1 for segment in segments if segment["kind"] == "transition")
         transition_duration_total = sum(int(segment["end"]) - int(segment["start"]) for segment in segments if segment["kind"] == "transition")
         voiced_phoneme_count = sum(1 for item in self.articulation_chain_items if self._continuous_voiced_gain(item.phoneme_for_render().clamped()) > 0.0)
+        initial_voiced = [item.phoneme_for_render().clamped() for item in self.articulation_chain_items if self._continuous_voiced_gain(item.phoneme_for_render().clamped()) > 0.0]
+        last_voiced_pitch = float(np.clip(initial_voiced[0].voice_pitch if initial_voiced else 220.0, 60.0, 880.0))
         print(f"[WaveToy Envelope] render mode={ARTICULATION_WORD_RENDER_CONTINUOUS} phoneme_count={len(self.articulation_chain_items)} total_envelope_ms={total_ms} frame_count={frame_count}")
         for segment in segments:
             if segment["kind"] == "transition":
@@ -9295,6 +9396,9 @@ class WaveToyWindow(QMainWindow):
         voiced_bus = np.zeros(total_samples, dtype=np.float64)
         noise_bus = np.zeros(total_samples, dtype=np.float64)
         source_bus = np.zeros(total_samples, dtype=np.float64)
+        burst_bus = np.zeros(total_samples, dtype=np.float64)
+        final_mix_bus = np.zeros(total_samples, dtype=np.float64)
+        frame_debug: List[Dict[str, object]] = []
         source_cache: Dict[int, np.ndarray | None] = {}
         for index, item in enumerate(self.articulation_chain_items):
             phoneme = item.phoneme_for_render().clamped()
@@ -9317,6 +9421,23 @@ class WaveToyWindow(QMainWindow):
             center_ms = ((start_sample + end_sample) * 0.5) * 1000.0 / SAMPLE_RATE
             phoneme, voiced_gain, noise_gain, closure, active = self._envelope_state_at_ms(center_ms, segments)
             voiced_gain = self._continuous_voiced_gain(phoneme)
+            if voiced_gain > 0.0:
+                if active.get("kind") == "transition":
+                    left = active.get("from")
+                    right = active.get("to")
+                    start_ms = float(active.get("start", 0.0))
+                    end_ms = float(active.get("end", start_ms + 1.0))
+                    local = float(np.clip((center_ms - start_ms) / max(1.0, end_ms - start_ms), 0.0, 1.0))
+                    curve = str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE))
+                    pitch_t = articulation_curve_progress(local, curve)
+                    left_voiced = isinstance(left, ArticulationPhoneme) and self._continuous_voiced_gain(left.clamped()) > 0.0
+                    right_voiced = isinstance(right, ArticulationPhoneme) and self._continuous_voiced_gain(right.clamped()) > 0.0
+                    left_pitch = float(np.clip(left.voice_pitch, 60.0, 880.0)) if left_voiced else last_voiced_pitch
+                    right_pitch = float(np.clip(right.voice_pitch, 60.0, 880.0)) if right_voiced else left_pitch
+                    last_voiced_pitch = float(left_pitch + (right_pitch - left_pitch) * pitch_t)
+                else:
+                    last_voiced_pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
+            intended_pitch_hz = last_voiced_pitch
             source_excitation = np.zeros(count, dtype=np.float64)
             source_audio = source_cache.get(int(active.get("index", 0)))
             if source_audio is not None and source_audio.size:
@@ -9330,40 +9451,71 @@ class WaveToyWindow(QMainWindow):
                 if source_peak > 1.0e-8:
                     source_excitation = source_excitation / source_peak
                 source_bus[start_sample:end_sample] = source_excitation[:count]
-            pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
-            phase_step = 2.0 * math.pi * pitch / SAMPLE_RATE
+            phase_step = 2.0 * math.pi * intended_pitch_hz / SAMPLE_RATE
             phases = phase + phase_step * np.arange(count, dtype=np.float64)
             phase = float((phases[-1] + phase_step) % (2.0 * math.pi))
             voice_strength = float(np.clip(phoneme.voice_strength, 0.0, 1.0))
-            tone = (np.sin(phases) + 0.28 * np.sin(phases * 2.0) + 0.12 * np.sin(phases * 3.0)) * voiced_gain
-            source_tone = source_excitation * voiced_gain * (0.42 + 0.58 * voice_strength)
+            harmonic = np.sin(phases) + 0.18 * np.sin(phases * 2.0) + 0.07 * np.sin(phases * 3.0)
+            tone = harmonic * voiced_gain * 0.46
+            source_tone = source_excitation * voiced_gain * (0.16 + 0.24 * voice_strength)
             raw_noise = rng.normal(0.0, 1.0, count)
             brightness = float(np.clip((phoneme.noise_color + phoneme.tongue_frontness + (1.0 - phoneme.lip_rounding)) / 3.0, 0.0, 1.0))
             diff_noise = np.concatenate([[previous_tail], raw_noise[:-1]])
             previous_tail = float(raw_noise[-1])
-            noise = raw_noise * (0.55 - 0.35 * brightness) + (raw_noise - diff_noise) * (0.25 + 0.45 * brightness)
+            noise = raw_noise * (0.50 - 0.30 * brightness) + (raw_noise - diff_noise) * (0.18 + 0.34 * brightness)
             if phoneme.phoneme_family == "stop":
                 stop_params = _stop_burst_parameters(phoneme)
-                noise *= noise_gain * (0.04 + 0.18 * stop_params["air_pressure"]) * (0.25 + 0.75 * (1.0 - stop_params["teeth_gap"]))
+                noise *= noise_gain * (0.025 + 0.12 * stop_params["air_pressure"]) * (0.25 + 0.75 * (1.0 - stop_params["teeth_gap"]))
                 closure_gate = float(np.clip(1.0 - closure * 0.97, 0.02, 1.0))
-                voice_gate = float(np.clip(1.0 - closure * 0.70, 0.10, 1.0)) if voiced_gain > 0.0 else closure_gate
-                voiced_component = (tone * 0.78 + source_tone * 0.48) * voice_gate
-                noise_component = noise * 0.12 * closure_gate
-                frame = self._shape_continuous_frame(voiced_component + noise_component, phoneme)
+                voice_gate = float(np.clip(1.0 - closure * 0.78, 0.08, 1.0)) if voiced_gain > 0.0 else closure_gate
+                voiced_component = (tone + source_tone * 0.50) * voice_gate
+                noise_component = noise * 0.075 * closure_gate
             else:
-                noise *= noise_gain * (0.18 + 0.82 * phoneme.air_pressure) * (0.35 + 0.65 * phoneme.teeth_gap)
+                noise *= noise_gain * (0.12 + 0.64 * phoneme.air_pressure) * (0.24 + 0.56 * phoneme.teeth_gap)
                 closure_gate = float(np.clip(1.0 - closure * 0.94, 0.04, 1.0))
-                voiced_noise_duck = float(np.clip(1.0 - voiced_gain * 0.62, 0.28, 1.0))
-                voice_frame = tone * (0.88 + 0.34 * voice_strength) + source_tone * 0.72
-                voiced_component = voice_frame * closure_gate
-                noise_component = noise * 0.24 * voiced_noise_duck * closure_gate
-                frame = self._shape_continuous_frame(voiced_component + noise_component, phoneme)
+                voiced_noise_duck = float(np.clip(1.0 - voiced_gain * 0.72, 0.22, 1.0))
+                voiced_component = (tone * (0.92 + 0.20 * voice_strength) + source_tone) * closure_gate
+                noise_component = noise * 0.16 * voiced_noise_duck * closure_gate
+            dry_frame = voiced_component + noise_component
+            frame = self._shape_continuous_frame(dry_frame, phoneme)
             voiced_bus[start_sample:end_sample] += voiced_component
             noise_bus[start_sample:end_sample] += noise_component
             mono[start_sample:end_sample] += frame
             voiced_trace[start_sample:end_sample] = voiced_gain
             noise_trace[start_sample:end_sample] = noise_gain
             closure_trace[start_sample:end_sample] = closure
+            frame_debug.append({
+                "frame_index": frame_index,
+                "active_phoneme": phoneme.name,
+                "intended_pitch_hz": round(intended_pitch_hz, 3),
+                "measured_pitch_estimate_hz": 0.0,
+                "pitch_error_percent": 0.0,
+            })
+
+        smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
+        if smooth_samples % 2 == 0:
+            smooth_samples += 1
+        smoothing_region_count = 0
+        if len(mono) > smooth_samples:
+            transition_mask = np.zeros(len(mono), dtype=np.float64)
+            edge_margin = max(1, smooth_samples // 2)
+            for segment in segments:
+                if segment.get("kind") != "transition":
+                    continue
+                start_sample = max(0, int(round(float(segment["start"]) * SAMPLE_RATE / 1000.0)) - edge_margin)
+                end_sample = min(len(mono), int(round(float(segment["end"]) * SAMPLE_RATE / 1000.0)) + edge_margin)
+                if end_sample > start_sample:
+                    transition_mask[start_sample:end_sample] = 1.0
+                    smoothing_region_count += 1
+            if np.any(transition_mask > 0.0):
+                kernel = np.hanning(smooth_samples)
+                kernel = kernel / max(1.0e-9, float(np.sum(kernel)))
+                smoothed_mono = np.convolve(mono, kernel, mode="same")
+                mask_kernel = np.hanning(max(3, smooth_samples * 2 + 1))
+                mask_kernel = mask_kernel / max(1.0e-9, float(np.max(mask_kernel)))
+                transition_mask = np.convolve(transition_mask, mask_kernel, mode="same")
+                transition_mask = np.clip(transition_mask, 0.0, 1.0) * 0.12
+                mono = mono * (1.0 - transition_mask) + smoothed_mono * transition_mask
 
         for event in burst_events:
             start_sample = int(round(float(event["start"]) * SAMPLE_RATE / 1000.0))
@@ -9378,33 +9530,97 @@ class WaveToyWindow(QMainWindow):
             env *= np.linspace(1.0, 0.18, count, dtype=np.float64)
             gain = float(event.get("gain", params["burst_gain"]))
             _log_stop_render(phoneme, {**params, "burst_samples": float(count), "burst_gain": gain}, count)
-            burst_component = burst * env * gain * 0.82
+            burst_component = burst * env * gain * 0.55
+            burst_bus[start_sample:end_sample] += burst_component
             noise_bus[start_sample:end_sample] += burst_component
             mono[start_sample:end_sample] += burst_component
 
-        smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
-        if smooth_samples % 2 == 0:
-            smooth_samples += 1
-        if len(mono) > smooth_samples and not burst_events:
-            kernel = np.hanning(smooth_samples)
-            kernel = kernel / max(1.0e-9, float(np.sum(kernel)))
-            smoothed_mono = np.convolve(mono, kernel, mode="same")
-            mono = mono * 0.82 + smoothed_mono * 0.18
-        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
-        if peak > 1.0e-8:
-            mono = mono / peak * 0.82
+        pre_normalize_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        clipped_before_limiter = int(np.count_nonzero(np.abs(mono) >= 1.0)) if mono.size else 0
+        if pre_normalize_peak > 1.0e-8 and pre_normalize_peak < 0.32:
+            mono *= min(1.75, 0.48 / pre_normalize_peak)
+        mono = self._continuous_soft_limit(mono, 0.86)
+        mono -= float(np.mean(mono)) if mono.size else 0.0
+        mono = self._continuous_soft_limit(mono, 0.86)
+        post_normalize_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        final_mix_bus[:] = mono
         audio = np.column_stack([mono, mono]).astype(np.float32) if mono.size else np.zeros((0, 2), dtype=np.float32)
         audio = self._fade_word_edges(audio)
         final_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        final_mono = audio.mean(axis=1).astype(np.float64) if audio.size else np.zeros(0, dtype=np.float64)
+        final_rms = float(np.sqrt(np.mean(np.square(final_mono)))) if final_mono.size else 0.0
+        crest_factor = float(final_peak / final_rms) if final_rms > 1.0e-9 else 0.0
+        dc_offset = float(np.mean(final_mono)) if final_mono.size else 0.0
+        clipped_sample_count = int(np.count_nonzero(np.abs(final_mono) >= 0.999)) + clipped_before_limiter
+        voiced_indices = np.flatnonzero(voiced_trace > 0.35)
+        measured_pitch = 0.0
+        pitch_error = 0.0
+        active_phoneme = ""
+        diagnostic_frames: List[Dict[str, object]] = []
+        if voiced_indices.size and final_mono.size:
+            first = int(voiced_indices[0])
+            last = int(voiced_indices[-1])
+            intended_samples = [float(item["intended_pitch_hz"]) for item in frame_debug if float(item.get("intended_pitch_hz", 0.0) or 0.0) > 0.0]
+            intended_pitch = float(np.median(intended_samples)) if intended_samples else last_voiced_pitch
+            window_radius = int(0.055 * SAMPLE_RATE)
+            pitch_estimates: List[float] = []
+            for item in frame_debug:
+                idx = int(item["frame_index"])
+                frame_start = idx * frame_samples
+                if frame_start < first or frame_start > last or len(diagnostic_frames) >= 24:
+                    continue
+                lo = max(0, frame_start - window_radius)
+                hi = min(len(final_mono), frame_start + frame_samples + window_radius)
+                estimate = self._estimate_continuous_pitch_hz(final_mono[lo:hi], float(item["intended_pitch_hz"]))
+                if estimate > 0.0:
+                    err = abs(estimate - float(item["intended_pitch_hz"])) / max(1.0, float(item["intended_pitch_hz"])) * 100.0
+                    item["measured_pitch_estimate_hz"] = round(estimate, 3)
+                    item["pitch_error_percent"] = round(err, 3)
+                    pitch_estimates.append(estimate)
+                    diagnostic_frames.append(dict(item))
+            if pitch_estimates:
+                measured_pitch = float(np.median(pitch_estimates))
+                pitch_error = abs(measured_pitch - intended_pitch) / max(1.0, intended_pitch) * 100.0
+            active_phoneme = str(diagnostic_frames[0]["active_phoneme"] if diagnostic_frames else frame_debug[0]["active_phoneme"] if frame_debug else "")
+        distortion_status = "ok"
+        if clipped_sample_count > max(4, int(len(final_mono) * 0.0002)):
+            distortion_status = "clipping"
+        elif abs(dc_offset) > 0.035 or (crest_factor > 0.0 and crest_factor < 2.2 and final_peak > 0.35):
+            distortion_status = "distorted"
         metrics = {
             "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
             "chain_length": len(self.articulation_chain_items),
             "phoneme_count": len(self.articulation_chain_items),
             "output_duration": round(len(audio) / SAMPLE_RATE, 6) if audio.size else 0.0,
             "output_peak": round(final_peak, 9),
+            "pre_normalize_peak": round(pre_normalize_peak, 9),
+            "post_normalize_peak": round(post_normalize_peak, 9),
+            "pre_peak": round(pre_normalize_peak, 9),
+            "post_peak": round(post_normalize_peak, 9),
+            "clipped_sample_count": clipped_sample_count,
+            "clipped_samples": clipped_sample_count,
+            "rms": round(final_rms, 9),
+            "crest_factor": round(crest_factor, 6),
+            "dc_offset": round(dc_offset, 9),
+            "intended_pitch_hz": round(last_voiced_pitch, 3),
+            "measured_pitch_estimate_hz": round(measured_pitch, 3),
+            "pitch_estimate": round(measured_pitch, 3),
+            "pitch_error_percent": round(pitch_error, 3),
+            "pitch_error": round(pitch_error, 3),
+            "frame_index": int(diagnostic_frames[0]["frame_index"]) if diagnostic_frames else 0,
+            "active_phoneme": active_phoneme,
+            "pitch_debug_frames": diagnostic_frames,
+            "distortion_status": distortion_status,
+            "continuous_debug_bypass_formants": bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)),
             "voiced_rms": round(float(np.sqrt(np.mean(np.square(voiced_bus)))) if voiced_bus.size else 0.0, 9),
             "noise_rms": round(float(np.sqrt(np.mean(np.square(noise_bus)))) if noise_bus.size else 0.0, 9),
             "source_rms": round(float(np.sqrt(np.mean(np.square(source_bus)))) if source_bus.size else 0.0, 9),
+            "burst_peak": round(float(np.max(np.abs(burst_bus))) if burst_bus.size else 0.0, 9),
+            "burst_rms": round(float(np.sqrt(np.mean(np.square(burst_bus)))) if burst_bus.size else 0.0, 9),
+            "burst_event_count": len(burst_events),
+            "stop_burst_status": "none" if len(burst_events) == 0 else "present" if (float(np.max(np.abs(burst_bus))) if burst_bus.size else 0.0) > 0.003 else "low",
+            "smoothing_region_count": smoothing_region_count,
+            "final_mix_rms": round(float(np.sqrt(np.mean(np.square(final_mix_bus)))) if final_mix_bus.size else 0.0, 9),
             "transition_count": transition_count,
             "transition_duration_total": transition_duration_total,
             "final_buffer_length": int(len(audio)),
@@ -9414,7 +9630,8 @@ class WaveToyWindow(QMainWindow):
         print(
             f"[WaveToy Envelope] max_voiced_gain={float(np.max(voiced_trace)):.3f} "
             f"max_noise_gain={float(np.max(noise_trace)):.3f} max_closure={float(np.max(closure_trace)):.3f} "
-            f"final_peak={final_peak:.3f} "
+            f"pre_peak={pre_normalize_peak:.3f} final_peak={final_peak:.3f} pitch_estimate={measured_pitch:.2f}Hz "
+            f"pitch_error={pitch_error:.2f}% clipped_samples={clipped_sample_count} "
             f"final_rendered_duration={len(audio) / SAMPLE_RATE:.3f}s"
         )
         self._log_word_render_debug(ARTICULATION_WORD_RENDER_CONTINUOUS, audio)
@@ -9666,6 +9883,8 @@ class WaveToyWindow(QMainWindow):
         self.articulation_phrase_markers = list(data.get("phrase_markers", [])) if isinstance(data.get("phrase_markers", []), list) else []
         if self.articulation_smooth_transitions_checkbox is not None:
             self.articulation_smooth_transitions_checkbox.setChecked(bool(self.articulation_word_render_settings.get("smooth_mouth_transitions", True)))
+        if self.continuous_debug_bypass_formants_checkbox is not None:
+            self.continuous_debug_bypass_formants_checkbox.setChecked(bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)))
         if self.articulation_word_render_mode_combo is not None:
             self.articulation_word_render_mode_combo.setCurrentText(loaded_mode)
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
