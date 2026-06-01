@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -1029,6 +1030,11 @@ EXTRA_FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
 }
 
 CONTINUOUS_RENDER_TEST_CHAINS: Tuple[Tuple[str, ...], ...] = (
+    ("AH",),
+    ("IY",),
+    ("OO",),
+    ("AA",),
+    ("AE",),
     ("M", "OO", "N"),
     ("B", "AH", "D"),
     ("SH", "IY"),
@@ -1379,8 +1385,8 @@ def _log_stop_render(phoneme: ArticulationPhoneme, params: Dict[str, float], sam
         f"phoneme={phoneme.name} voiced={bool(phoneme.voiced)} "
         f"air_pressure={params['air_pressure']:.2f} teeth_gap={params['teeth_gap']:.2f} "
         f"closure={params['closure']:.2f} burst_strength={params['burst_strength']:.2f} "
-        f"closure_samples={int(params['closure_samples'])} burst_samples={int(params['burst_samples'])} "
-        f"burst_gain={params['burst_gain']:.3f} burst_brightness={params['burst_brightness']:.3f} "
+        f"closure_duration_ms={params['closure_samples'] / SAMPLE_RATE * 1000.0:.1f} release_start_ms={params['closure_samples'] / SAMPLE_RATE * 1000.0:.1f} "
+        f"burst_duration_ms={int(params['burst_samples']) / SAMPLE_RATE * 1000.0:.1f} burst_gain={params['burst_gain']:.3f} burst_brightness={params['burst_brightness']:.3f} "
         f"voiced_onset_gain={params['voiced_onset_gain']:.3f} total_samples={int(sample_count)}"
     )
 
@@ -6120,6 +6126,12 @@ class WaveToyWindow(QMainWindow):
         self.continuous_diagnostics_status_label: QLabel | None = None
         self.continuous_diagnostics_metrics_label: QLabel | None = None
         self.continuous_validation_results_label: QLabel | None = None
+        self.continuous_formant_intensity_spin: QDoubleSpinBox | None = None
+        self.continuous_pitch_smoothing_spin: QSpinBox | None = None
+        self.cv_vc_search_edit: QLineEdit | None = None
+        self.cv_vc_starts_with_combo: QComboBox | None = None
+        self.cv_vc_contains_combo: QComboBox | None = None
+        self.cv_vc_filter_status_label: QLabel | None = None
         self.articulation_motion_timer = QTimer(self)
         self.articulation_motion_timer.timeout.connect(self._articulation_motion_tick)
         self.articulation_motion_started_at: float | None = None
@@ -6149,6 +6161,8 @@ class WaveToyWindow(QMainWindow):
             "word_fade_out_ms": 8,
             "voice_profile": "Neutral",
             "continuous_debug_bypass_formants": False,
+            "continuous_formant_intensity": 0.45,
+            "continuous_pitch_smoothing_ms": 20,
             "pitch_envelopes": [],
             "note_events": [],
         }
@@ -7568,6 +7582,32 @@ class WaveToyWindow(QMainWindow):
         mode_row.addWidget(self.continuous_debug_bypass_formants_checkbox)
         chain_layout.addLayout(mode_row)
 
+        continuous_tuning_row = QHBoxLayout()
+        continuous_tuning_row.setSpacing(8)
+        formant_label = QLabel("Formant Intensity")
+        formant_label.setObjectName("timelineInspectorText")
+        self.continuous_formant_intensity_spin = QDoubleSpinBox()
+        self.continuous_formant_intensity_spin.setRange(0.0, 1.0)
+        self.continuous_formant_intensity_spin.setSingleStep(0.05)
+        self.continuous_formant_intensity_spin.setDecimals(2)
+        self.continuous_formant_intensity_spin.setValue(float(self.articulation_word_render_settings.get("continuous_formant_intensity", 0.45)))
+        self.continuous_formant_intensity_spin.setToolTip("Subtle Continuous Mouth Motion tract coloration. 0.00 is equivalent to Bypass formants.")
+        self.continuous_formant_intensity_spin.valueChanged.connect(self._set_continuous_formant_intensity)
+        pitch_smoothing_label = QLabel("Pitch Glide ms")
+        pitch_smoothing_label.setObjectName("timelineInspectorText")
+        self.continuous_pitch_smoothing_spin = QSpinBox()
+        self.continuous_pitch_smoothing_spin.setRange(0, 120)
+        self.continuous_pitch_smoothing_spin.setSingleStep(5)
+        self.continuous_pitch_smoothing_spin.setValue(int(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", 20)))
+        self.continuous_pitch_smoothing_spin.setToolTip("Smooth voiced pitch changes without resetting oscillator phase.")
+        self.continuous_pitch_smoothing_spin.valueChanged.connect(self._set_continuous_pitch_smoothing_ms)
+        continuous_tuning_row.addWidget(formant_label)
+        continuous_tuning_row.addWidget(self.continuous_formant_intensity_spin)
+        continuous_tuning_row.addWidget(pitch_smoothing_label)
+        continuous_tuning_row.addWidget(self.continuous_pitch_smoothing_spin)
+        continuous_tuning_row.addStretch(1)
+        chain_layout.addLayout(continuous_tuning_row)
+
         diagnostics_card = self._toy_group("Continuous Mouth Motion Diagnostics")
         diagnostics_layout = QVBoxLayout(diagnostics_card)
         diagnostics_layout.setContentsMargins(10, 16, 10, 10)
@@ -7611,13 +7651,32 @@ class WaveToyWindow(QMainWindow):
         cv_vc_hint.setObjectName("symbolHint")
         cv_vc_hint.setWordWrap(True)
         cv_vc_layout.addWidget(cv_vc_hint)
+        filter_row = QHBoxLayout()
+        self.cv_vc_search_edit = QLineEdit()
+        self.cv_vc_search_edit.setPlaceholderText("Search CV/VC (example: D AH, SH, stop)")
+        self.cv_vc_search_edit.textChanged.connect(self._update_cv_vc_filter_status)
+        self.cv_vc_starts_with_combo = QComboBox()
+        self.cv_vc_starts_with_combo.addItems(["Any start"] + list(CV_VC_CONSONANTS) + list(CV_VC_VOWELS))
+        self.cv_vc_starts_with_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
+        self.cv_vc_contains_combo = QComboBox()
+        self.cv_vc_contains_combo.addItems(["Any contains"] + list(CV_VC_CONSONANTS) + list(CV_VC_VOWELS))
+        self.cv_vc_contains_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
+        filter_row.addWidget(self.cv_vc_search_edit, 2)
+        filter_row.addWidget(self.cv_vc_starts_with_combo, 1)
+        filter_row.addWidget(self.cv_vc_contains_combo, 1)
+        cv_vc_layout.addLayout(filter_row)
+        self.cv_vc_filter_status_label = QLabel("Filter: all generated CV/VC combinations available.")
+        self.cv_vc_filter_status_label.setObjectName("symbolHint")
+        self.cv_vc_filter_status_label.setWordWrap(True)
+        cv_vc_layout.addWidget(self.cv_vc_filter_status_label)
         picker_row = QHBoxLayout()
         self.cv_vc_consonant_combo = QComboBox()
         self.cv_vc_consonant_combo.addItems(list(CV_VC_CONSONANTS))
         self.cv_vc_vowel_combo = QComboBox()
         self.cv_vc_vowel_combo.addItems(list(CV_VC_VOWELS))
         self.cv_vc_pattern_combo = QComboBox()
-        self.cv_vc_pattern_combo.addItems(["CV", "VC"])
+        self.cv_vc_pattern_combo.addItems(["CV", "VC", "All"])
+        self.cv_vc_pattern_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
         for label_text, combo in (("Consonant", self.cv_vc_consonant_combo), ("Vowel", self.cv_vc_vowel_combo), ("Pattern", self.cv_vc_pattern_combo)):
             label = QLabel(label_text)
             label.setObjectName("timelineInspectorText")
@@ -7628,7 +7687,7 @@ class WaveToyWindow(QMainWindow):
         action_row.setSpacing(8)
         for icon, label_text, color, callback in (
             ("▶", "Preview Combination", "#b8f2e6", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Preview Combination is planned as a future CV/VC-library workflow.")),
-            ("➕", "Add to Chain", "#caffbf", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Add to Chain is planned as a future CV/VC-library workflow.")),
+            ("➕", "Load Combination to Chain", "#caffbf", self._load_cv_vc_combination_to_chain),
             ("➕", "Add to Speech Assets", "#ffc6ff", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Add to Speech Assets is planned as a future CV/VC-library workflow.")),
             ("💾", "Export Library JSON", "#fdffb6", self._export_cv_vc_library_json),
         ):
@@ -7636,6 +7695,7 @@ class WaveToyWindow(QMainWindow):
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             action_row.addWidget(button)
         cv_vc_layout.addLayout(action_row)
+        self._update_cv_vc_filter_status()
         chain_layout.addWidget(cv_vc_card)
 
         timeline_header = QHBoxLayout()
@@ -8536,6 +8596,56 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_settings["continuous_debug_bypass_formants"] = bool(checked)
         self._mark_articulation_word_dirty()
 
+    def _set_continuous_formant_intensity(self, value: float) -> None:
+        self.articulation_word_render_settings["continuous_formant_intensity"] = float(np.clip(value, 0.0, 1.0))
+        self._mark_articulation_word_dirty()
+
+    def _set_continuous_pitch_smoothing_ms(self, value: int) -> None:
+        self.articulation_word_render_settings["continuous_pitch_smoothing_ms"] = int(np.clip(value, 0, 120))
+        self._mark_articulation_word_dirty()
+
+    def _selected_cv_vc_symbols(self) -> Tuple[str, str]:
+        consonant = self.cv_vc_consonant_combo.currentText() if self.cv_vc_consonant_combo is not None else CV_VC_CONSONANTS[0]
+        vowel = self.cv_vc_vowel_combo.currentText() if self.cv_vc_vowel_combo is not None else CV_VC_VOWELS[0]
+        pattern = self.cv_vc_pattern_combo.currentText() if self.cv_vc_pattern_combo is not None else "CV"
+        return (vowel, consonant) if pattern == "VC" else (consonant, vowel)
+
+    def _update_cv_vc_filter_status(self, *_args: object) -> None:
+        if self.cv_vc_filter_status_label is None:
+            return
+        query = (self.cv_vc_search_edit.text() if self.cv_vc_search_edit is not None else "").strip().upper()
+        starts = self.cv_vc_starts_with_combo.currentText() if self.cv_vc_starts_with_combo is not None else "Any start"
+        contains = self.cv_vc_contains_combo.currentText() if self.cv_vc_contains_combo is not None else "Any contains"
+        pattern = self.cv_vc_pattern_combo.currentText() if self.cv_vc_pattern_combo is not None else "All"
+        matches = []
+        for preset in CV_VC_COMBINATION_LIBRARY:
+            symbols = [preset.first_phoneme, preset.second_phoneme]
+            haystack = f"{preset.pattern_type} {' '.join(symbols)} {preset.label} {preset.notes}".upper()
+            if pattern in {"CV", "VC"} and preset.pattern_type != pattern:
+                continue
+            if query and query not in haystack:
+                continue
+            if starts != "Any start" and symbols[0] != starts:
+                continue
+            if contains != "Any contains" and contains not in symbols:
+                continue
+            matches.append(preset)
+        examples = ", ".join(p.label for p in matches[:5]) if matches else "none"
+        self.cv_vc_filter_status_label.setText(f"Filter: {len(matches)} matches • examples: {examples}")
+
+    def _load_cv_vc_combination_to_chain(self, checked: bool = False) -> None:
+        del checked
+        symbols = self._selected_cv_vc_symbols()
+        self.articulation_chain_items = [
+            ArticulationChainItem(phoneme=_phoneme_from_preset_symbol(symbol), duration_ms=_phoneme_from_preset_symbol(symbol).duration_ms)
+            for symbol in symbols
+        ]
+        self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+        self._refresh_articulation_motion_timeline()
+        self._update_articulation_word_status()
+
     def _articulation_smooth_transitions_enabled(self) -> bool:
         if self.articulation_smooth_transitions_checkbox is not None:
             return bool(self.articulation_smooth_transitions_checkbox.isChecked())
@@ -9082,28 +9192,34 @@ class WaveToyWindow(QMainWindow):
         closure = float(np.clip(phoneme.closure, 0.0, 1.0))
         return phoneme, float(np.clip(voiced_gain, 0.0, 1.0)), float(np.clip(noise_gain, 0.0, 1.8)), closure, active
 
+    def _continuous_formant_intensity(self) -> float:
+        if bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)):
+            return 0.0
+        return float(np.clip(float(self.articulation_word_render_settings.get("continuous_formant_intensity", 0.45)), 0.0, 1.0))
+
     def _shape_continuous_frame(self, mono: np.ndarray, phoneme: ArticulationPhoneme) -> np.ndarray:
-        """Apply conservative tract coloration without moving the excitation pitch."""
-        if mono.size <= 4 or bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)):
+        """Apply subtle tract coloration without moving the excitation pitch."""
+        intensity = self._continuous_formant_intensity()
+        if mono.size <= 4 or intensity <= 0.0:
             return mono
         spectrum = np.fft.rfft(mono)
         freqs = np.fft.rfftfreq(mono.size, 1.0 / SAMPLE_RATE)
         f1, f2, f3 = formants_from_articulation(phoneme)
-        envelope = np.full_like(freqs, 0.78, dtype=np.float64)
-        for center, width, gain in ((f1, 180.0, 0.28), (f2, 320.0, 0.20), (f3, 520.0, 0.12)):
-            envelope += gain * np.exp(-0.5 * ((freqs - center) / width) ** 2)
+        target = np.ones_like(freqs, dtype=np.float64)
+        for center, width, gain in ((f1, 220.0, 0.16), (f2, 420.0, 0.11), (f3, 680.0, 0.06)):
+            target += gain * np.exp(-0.5 * ((freqs - center) / width) ** 2)
         if phoneme.nasal_open > 0.0:
             nasal = float(np.clip(phoneme.nasal_open, 0.0, 1.0))
             nasal_center = 260.0 + (1.0 - phoneme.tongue_frontness) * 180.0
-            envelope += nasal * 0.16 * np.exp(-0.5 * ((freqs - nasal_center) / 180.0) ** 2)
-            envelope *= 1.0 / (1.0 + nasal * 0.28 * (freqs / 2600.0) ** 2)
-        envelope *= 1.0 - 0.10 * phoneme.lip_rounding * np.clip((freqs - 1800.0) / 5000.0, 0.0, 1.0)
-        envelope = np.clip(envelope, 0.42, 1.16)
+            target += nasal * 0.08 * np.exp(-0.5 * ((freqs - nasal_center) / 220.0) ** 2)
+            target *= 1.0 / (1.0 + nasal * 0.12 * (freqs / 3200.0) ** 2)
+        target *= 1.0 - 0.05 * phoneme.lip_rounding * np.clip((freqs - 2000.0) / 5600.0, 0.0, 1.0)
+        envelope = 1.0 + (np.clip(target, 0.74, 1.08) - 1.0) * intensity
         shaped = np.fft.irfft(spectrum * envelope, n=mono.size)
         input_rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
         shaped_rms = float(np.sqrt(np.mean(np.square(shaped)))) if shaped.size else 0.0
         if input_rms > 1.0e-8 and shaped_rms > 1.0e-8:
-            shaped *= min(1.12, input_rms / shaped_rms)
+            shaped *= float(np.clip(input_rms / shaped_rms, 0.92, 1.04))
         return shaped
 
     def _estimate_continuous_pitch_hz(self, mono: np.ndarray, intended_pitch_hz: float) -> float:
@@ -9201,6 +9317,11 @@ class WaveToyWindow(QMainWindow):
             "dc_offset",
             "pitch_estimate",
             "pitch_error",
+            "formant_intensity",
+            "formant_gain_ratio",
+            "continuous_pitch_smoothing_ms",
+            "transition_progress",
+            "voiced_gain",
             "distortion_status",
             "voiced_rms",
             "noise_rms",
@@ -9241,6 +9362,13 @@ class WaveToyWindow(QMainWindow):
             "measured_pitch_estimate_hz",
             "pitch_error_percent",
             "active_phoneme",
+            "transition_progress",
+            "voiced_gain",
+            "continuous_pitch_smoothing_ms",
+            "formant_intensity",
+            "formant_input_rms",
+            "formant_output_rms",
+            "formant_gain_ratio",
             "voiced_rms",
             "noise_rms",
             "source_rms",
@@ -9312,13 +9440,15 @@ class WaveToyWindow(QMainWindow):
                     "voiced_rms": metrics.get("voiced_rms", 0.0),
                     "noise_rms": metrics.get("noise_rms", 0.0),
                     "burst_peak": metrics.get("burst_peak", 0.0),
+                    "pitch_error": metrics.get("pitch_error", 0.0),
+                    "clipped_samples": metrics.get("clipped_samples", 0),
                     "result": status,
                     "notes": ", ".join(notes) if notes else "ok",
                 }
                 rows.append(row)
                 print(f"[WaveToy Continuous Validation] result {row}")
         except Exception as exc:
-            rows.append({"chain_label": "validation", "rendered_duration": 0.0, "output_peak": 0.0, "voiced_rms": 0.0, "noise_rms": 0.0, "result": "EXCEPTION", "notes": str(exc)})
+            rows.append({"chain_label": "validation", "rendered_duration": 0.0, "output_peak": 0.0, "pitch_error": 0.0, "clipped_samples": 0, "burst_peak": 0.0, "voiced_rms": 0.0, "noise_rms": 0.0, "result": "EXCEPTION", "notes": str(exc)})
             self._report_continuous_render_debug({
                 "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
                 "chain_length": len(self.articulation_chain_items),
@@ -9351,6 +9481,14 @@ class WaveToyWindow(QMainWindow):
                 self.continuous_debug_bypass_formants_checkbox.blockSignals(True)
                 self.continuous_debug_bypass_formants_checkbox.setChecked(bool(saved_settings.get("continuous_debug_bypass_formants", False)))
                 self.continuous_debug_bypass_formants_checkbox.blockSignals(False)
+            if self.continuous_formant_intensity_spin is not None:
+                self.continuous_formant_intensity_spin.blockSignals(True)
+                self.continuous_formant_intensity_spin.setValue(float(saved_settings.get("continuous_formant_intensity", 0.45)))
+                self.continuous_formant_intensity_spin.blockSignals(False)
+            if self.continuous_pitch_smoothing_spin is not None:
+                self.continuous_pitch_smoothing_spin.blockSignals(True)
+                self.continuous_pitch_smoothing_spin.setValue(int(saved_settings.get("continuous_pitch_smoothing_ms", 20)))
+                self.continuous_pitch_smoothing_spin.blockSignals(False)
             self.articulation_word_render_audio = saved_audio
             self.articulation_word_render_signature = saved_signature
             self.articulation_last_word_render_path = saved_path
@@ -9358,9 +9496,13 @@ class WaveToyWindow(QMainWindow):
             self._refresh_articulation_chain_cards()
             self._refresh_articulation_motion_timeline()
             self._update_articulation_word_status()
-        lines = ["chain | duration | peak | voiced | noise | burst | result | notes"]
+        lines = ["chain        duration  peak     pitch err  clipped  burst    voiced   noise    status              notes"]
         for row in rows:
-            lines.append(f"{row['chain_label']} | {row['rendered_duration']}s | {row['output_peak']} | {row['voiced_rms']} | {row['noise_rms']} | {row.get('burst_peak', 0.0)} | {row['result']} | {row['notes']}")
+            lines.append(
+                f"{str(row['chain_label']):<12} {row['rendered_duration']!s:<8} {row['output_peak']!s:<8} "
+                f"{row.get('pitch_error', 0.0)!s:<10} {row.get('clipped_samples', 0)!s:<8} {row.get('burst_peak', 0.0)!s:<8} "
+                f"{row['voiced_rms']!s:<8} {row['noise_rms']!s:<8} {row['result']:<19} {row['notes']}"
+            )
         if self.continuous_validation_results_label is not None:
             self.continuous_validation_results_label.setText("Validation results:\n" + "\n".join(lines))
 
@@ -9412,6 +9554,14 @@ class WaveToyWindow(QMainWindow):
             source_cache[index] = prepare_articulation_source_audio(source_audio, phoneme, max(0.08, item.duration_ms / 1000.0))
         phase = 0.0
         previous_tail = 0.0
+        smoothed_pitch_hz = last_voiced_pitch
+        pitch_smoothing_ms = float(np.clip(float(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", 20)), 0.0, 120.0))
+        pitch_alpha = 1.0 if pitch_smoothing_ms <= 0.0 else float(np.clip(frame_ms / max(frame_ms, pitch_smoothing_ms), 0.02, 1.0))
+        formant_input_energy = 0.0
+        formant_output_energy = 0.0
+        formant_sample_count = 0
+        transition_progress = 0.0
+        stop_debug_events: List[Dict[str, object]] = []
         for frame_index in range(frame_count):
             start_sample = frame_index * frame_samples
             end_sample = min(total_samples, start_sample + frame_samples)
@@ -9430,6 +9580,7 @@ class WaveToyWindow(QMainWindow):
                     local = float(np.clip((center_ms - start_ms) / max(1.0, end_ms - start_ms), 0.0, 1.0))
                     curve = str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE))
                     pitch_t = articulation_curve_progress(local, curve)
+                    transition_progress = pitch_t
                     left_voiced = isinstance(left, ArticulationPhoneme) and self._continuous_voiced_gain(left.clamped()) > 0.0
                     right_voiced = isinstance(right, ArticulationPhoneme) and self._continuous_voiced_gain(right.clamped()) > 0.0
                     left_pitch = float(np.clip(left.voice_pitch, 60.0, 880.0)) if left_voiced else last_voiced_pitch
@@ -9437,7 +9588,9 @@ class WaveToyWindow(QMainWindow):
                     last_voiced_pitch = float(left_pitch + (right_pitch - left_pitch) * pitch_t)
                 else:
                     last_voiced_pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
-            intended_pitch_hz = last_voiced_pitch
+                    transition_progress = 0.0
+            smoothed_pitch_hz += (last_voiced_pitch - smoothed_pitch_hz) * pitch_alpha
+            intended_pitch_hz = smoothed_pitch_hz
             source_excitation = np.zeros(count, dtype=np.float64)
             source_audio = source_cache.get(int(active.get("index", 0)))
             if source_audio is not None and source_audio.size:
@@ -9478,6 +9631,9 @@ class WaveToyWindow(QMainWindow):
                 noise_component = noise * 0.16 * voiced_noise_duck * closure_gate
             dry_frame = voiced_component + noise_component
             frame = self._shape_continuous_frame(dry_frame, phoneme)
+            formant_input_energy += float(np.sum(np.square(dry_frame)))
+            formant_output_energy += float(np.sum(np.square(frame)))
+            formant_sample_count += int(dry_frame.size)
             voiced_bus[start_sample:end_sample] += voiced_component
             noise_bus[start_sample:end_sample] += noise_component
             mono[start_sample:end_sample] += frame
@@ -9490,6 +9646,8 @@ class WaveToyWindow(QMainWindow):
                 "intended_pitch_hz": round(intended_pitch_hz, 3),
                 "measured_pitch_estimate_hz": 0.0,
                 "pitch_error_percent": 0.0,
+                "transition_progress": round(transition_progress, 3),
+                "voiced_gain": round(voiced_gain, 3),
             })
 
         smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
@@ -9531,6 +9689,15 @@ class WaveToyWindow(QMainWindow):
             gain = float(event.get("gain", params["burst_gain"]))
             _log_stop_render(phoneme, {**params, "burst_samples": float(count), "burst_gain": gain}, count)
             burst_component = burst * env * gain * 0.55
+            stop_debug_events.append({
+                "stop_name": phoneme.name,
+                "closure_duration_ms": round(float(params["closure_samples"]) / SAMPLE_RATE * 1000.0, 3),
+                "release_start_ms": round(float(event["start"]), 3),
+                "burst_duration_ms": round(count / SAMPLE_RATE * 1000.0, 3),
+                "burst_peak": round(float(np.max(np.abs(burst_component))) if burst_component.size else 0.0, 9),
+                "burst_rms": round(float(np.sqrt(np.mean(np.square(burst_component)))) if burst_component.size else 0.0, 9),
+                "voicing_overlap_ms": round(float(params.get("voiced_onset_gain", 0.0)) * float(params["closure_samples"]) / SAMPLE_RATE * 1000.0, 3),
+            })
             burst_bus[start_sample:end_sample] += burst_component
             noise_bus[start_sample:end_sample] += burst_component
             mono[start_sample:end_sample] += burst_component
@@ -9587,6 +9754,8 @@ class WaveToyWindow(QMainWindow):
             distortion_status = "clipping"
         elif abs(dc_offset) > 0.035 or (crest_factor > 0.0 and crest_factor < 2.2 and final_peak > 0.35):
             distortion_status = "distorted"
+        formant_input_rms = math.sqrt(formant_input_energy / formant_sample_count) if formant_sample_count > 0 else 0.0
+        formant_output_rms = math.sqrt(formant_output_energy / formant_sample_count) if formant_sample_count > 0 else 0.0
         metrics = {
             "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
             "chain_length": len(self.articulation_chain_items),
@@ -9607,6 +9776,13 @@ class WaveToyWindow(QMainWindow):
             "pitch_estimate": round(measured_pitch, 3),
             "pitch_error_percent": round(pitch_error, 3),
             "pitch_error": round(pitch_error, 3),
+            "transition_progress": round(float(diagnostic_frames[0].get("transition_progress", 0.0)) if diagnostic_frames else transition_progress, 3),
+            "voiced_gain": round(float(np.max(voiced_trace)) if voiced_trace.size else 0.0, 3),
+            "continuous_pitch_smoothing_ms": round(pitch_smoothing_ms, 3),
+            "formant_intensity": round(self._continuous_formant_intensity(), 3),
+            "formant_input_rms": round(formant_input_rms, 9),
+            "formant_output_rms": round(formant_output_rms, 9),
+            "formant_gain_ratio": round(formant_output_rms / max(1.0e-9, formant_input_rms), 6),
             "frame_index": int(diagnostic_frames[0]["frame_index"]) if diagnostic_frames else 0,
             "active_phoneme": active_phoneme,
             "pitch_debug_frames": diagnostic_frames,
@@ -9618,6 +9794,8 @@ class WaveToyWindow(QMainWindow):
             "burst_peak": round(float(np.max(np.abs(burst_bus))) if burst_bus.size else 0.0, 9),
             "burst_rms": round(float(np.sqrt(np.mean(np.square(burst_bus)))) if burst_bus.size else 0.0, 9),
             "burst_event_count": len(burst_events),
+            "stop_debug_events": stop_debug_events,
+            "stop_debug_summary": "; ".join(f"{e['stop_name']} peak={e['burst_peak']} rms={e['burst_rms']}" for e in stop_debug_events[:4]),
             "stop_burst_status": "none" if len(burst_events) == 0 else "present" if (float(np.max(np.abs(burst_bus))) if burst_bus.size else 0.0) > 0.003 else "low",
             "smoothing_region_count": smoothing_region_count,
             "final_mix_rms": round(float(np.sqrt(np.mean(np.square(final_mix_bus)))) if final_mix_bus.size else 0.0, 9),
@@ -9885,6 +10063,10 @@ class WaveToyWindow(QMainWindow):
             self.articulation_smooth_transitions_checkbox.setChecked(bool(self.articulation_word_render_settings.get("smooth_mouth_transitions", True)))
         if self.continuous_debug_bypass_formants_checkbox is not None:
             self.continuous_debug_bypass_formants_checkbox.setChecked(bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)))
+        if self.continuous_formant_intensity_spin is not None:
+            self.continuous_formant_intensity_spin.setValue(float(self.articulation_word_render_settings.get("continuous_formant_intensity", 0.45)))
+        if self.continuous_pitch_smoothing_spin is not None:
+            self.continuous_pitch_smoothing_spin.setValue(int(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", 20)))
         if self.articulation_word_render_mode_combo is not None:
             self.articulation_word_render_mode_combo.setCurrentText(loaded_mode)
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
