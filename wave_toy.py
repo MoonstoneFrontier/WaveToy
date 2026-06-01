@@ -4152,6 +4152,7 @@ class ArticulationTimelineCanvas(QWidget):
         self.playhead_ms = 0.0
         self.drag_mode: str | None = None
         self.drag_index: int | None = None
+        self.selected_index: int | None = None
         self.setMinimumHeight(190)
         self.setMinimumWidth(900)
         self.setMouseTracking(True)
@@ -4161,6 +4162,23 @@ class ArticulationTimelineCanvas(QWidget):
         self.items = list(items)
         self.total_ms = max(1, int(total_ms))
         self.playhead_ms = float(np.clip(playhead_ms, 0.0, self.total_ms))
+        self.setMinimumWidth(max(900, int(self.total_ms * self.zoom * 1.15)))
+        self.updateGeometry()
+        self.update()
+
+    def set_items(self, items: List[ArticulationChainItem], selected_index: int | None = None) -> None:
+        self.items = list(items)
+        if isinstance(selected_index, int) and 0 <= selected_index < len(self.items):
+            self.selected_index = selected_index
+        else:
+            self.selected_index = None
+        total_ms = 0
+        for index, item in enumerate(self.items):
+            total_ms += int(item.duration_ms or item.phoneme.duration_ms)
+            if index < len(self.items) - 1:
+                total_ms += max(0, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS))
+        self.total_ms = max(1, total_ms)
+        self.playhead_ms = float(np.clip(self.playhead_ms, 0.0, self.total_ms))
         self.setMinimumWidth(max(900, int(self.total_ms * self.zoom * 1.15)))
         self.updateGeometry()
         self.update()
@@ -4261,6 +4279,16 @@ class ArticulationTimelineCanvas(QWidget):
         painter.drawRoundedRect(lane.adjusted(0, -10, 0, 36), 18, 18)
         painter.setFont(QFont("Arial", 10, QFont.Bold))
         painter.drawText(QRectF(lane.left(), 12, lane.width(), 24), Qt.AlignLeft, f"Visual Articulation Timeline • {self.total_ms} ms • zoom {self.zoom:.2f}x")
+        if not self.items:
+            painter.setPen(QPen(QColor("#457b9d"), 1))
+            painter.setFont(QFont("Arial", 13, QFont.Bold))
+            painter.drawText(
+                lane.adjusted(18, -2, -18, 24),
+                Qt.AlignCenter | Qt.TextWordWrap,
+                "No articulation chain yet. Add phonemes from Articulation Lab, then return here to arrange them visually.",
+            )
+            painter.end()
+            return
         for mark in range(0, self.total_ms + 1, 250):
             x = lane.left() + mark * self._px_per_ms()
             painter.setPen(QPen(QColor(29, 53, 87, 70), 1))
@@ -4278,7 +4306,8 @@ class ArticulationTimelineCanvas(QWidget):
                 painter.drawText(rect, Qt.AlignCenter, f"↔\n{curve.split()[0]}")
                 continue
             painter.setBrush(QColor(phoneme.preview_color))
-            painter.setPen(QPen(QColor("#1d3557"), 3))
+            selected = index == self.selected_index
+            painter.setPen(QPen(QColor("#ff4fa3" if selected else "#1d3557"), 5 if selected else 3))
             painter.drawRoundedRect(rect, 16, 16)
             family_icon = {"vowel": "●", "fricative": "≋", "affricate": "≋!", "stop": "■", "nasal": "∩", "glide": "~", "liquid": "ℓ"}.get(phoneme.phoneme_family, "●")
             badge = articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)
@@ -8061,12 +8090,16 @@ class WaveToyWindow(QMainWindow):
             layout.addWidget(row)
 
     def _refresh_graphical_chain_editor(self) -> None:
+        selected_index = self.articulation_selected_chain_index
+        if isinstance(selected_index, int) and 0 <= selected_index < len(self.articulation_chain_items):
+            selected = selected_index
+        else:
+            selected = None
         if self.graphical_chain_canvas is not None:
-            selected = self.articulation_selected_chain_index if 0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items) else None
             self.graphical_chain_canvas.set_items(self.articulation_chain_items, selected)
         if self.graphical_chain_mouth_canvas is not None:
-            if 0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items):
-                p = self.articulation_chain_items[self.articulation_selected_chain_index].phoneme_for_render()
+            if selected is not None:
+                p = self.articulation_chain_items[selected].phoneme_for_render()
                 name = p.name
             else:
                 p = self.current_phoneme
@@ -8176,8 +8209,9 @@ class WaveToyWindow(QMainWindow):
     def _graphical_set_selected_chain_curve(self, curve: str) -> None:
         if curve not in ARTICULATION_TRANSITION_CURVES:
             return
-        if 0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items):
-            self.articulation_chain_items[self.articulation_selected_chain_index].transition_curve = curve
+        selected_index = self.articulation_selected_chain_index
+        if isinstance(selected_index, int) and 0 <= selected_index < len(self.articulation_chain_items):
+            self.articulation_chain_items[selected_index].transition_curve = curve
             self._refresh_articulation_chain_cards()
             self._refresh_graphical_editor()
 
