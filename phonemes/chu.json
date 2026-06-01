@@ -1,0 +1,288 @@
+{
+  "name": "chu",
+  "ipa": "d",
+  "mouth_open": 0.18,
+  "tongue_height": 0.7,
+  "tongue_frontness": 0.9,
+  "lip_rounding": 0.1,
+  "voice_pitch": 258.0,
+  "voice_strength": 0.62,
+  "duration_ms": 200,
+  "preview_color": "#ffc6ff",
+  "phoneme_family": "stop",
+  "air_pressure": 0.45,
+  "teeth_gap": 0.5,
+  "closure": 1.0,
+  "burst_strength": 0.5,
+  "nasal_open": 0.0,
+  "voiced": true,
+  "noise_color": 0.78,
+  "attack_ms": 18,
+  "release_ms": 28,
+  "source_mode": "selected_mix_wave",
+  "source_wave_id": "sine",
+  "source_recipe_snapshot": {
+    "name": "Timeline Clip",
+    "version": 2,
+    "sample_rate": 44100,
+    "settings": {
+      "wave_start_db": {
+        "sine": -18.0,
+        "triangle": -20.0,
+        "sawtooth": -18.0,
+        "square": -2.4
+      },
+      "wave_end_db": {
+        "sine": -3.0,
+        "triangle": -20.0,
+        "sawtooth": 0.0,
+        "square": -3.6
+      },
+      "wave_delta_time": {
+        "sine": 0.165,
+        "triangle": 0.165,
+        "sawtooth": 0.09075,
+        "square": 0.132
+      },
+      "note": "A",
+      "octave": 2,
+      "cents": 0.0,
+      "pitch_start_hz": 220.0,
+      "pitch_end_hz": 880.0,
+      "loudness_start": 0.3,
+      "loudness_end": 0.45,
+      "duration_seconds": 0.165,
+      "curve_type": "exponential",
+      "pan_start": -0.4,
+      "pan_end": 0.4,
+      "stereo_width": 0.7,
+      "auto_pan_depth": 0.15,
+      "auto_pan_rate": 0.1,
+      "wave_pan": {
+        "sine": 0.005,
+        "triangle": -0.035,
+        "sawtooth": 0.03,
+        "square": 0.1
+      },
+      "wave_width": {
+        "sine": 0.1,
+        "triangle": 0.065,
+        "sawtooth": 0.075,
+        "square": 0.0
+      },
+      "wave_dance": {
+        "sine": 0.0,
+        "triangle": 0.03,
+        "sawtooth": 0.02,
+        "square": 0.08
+      },
+      "wave_muted": {
+        "sine": false,
+        "triangle": false,
+        "sawtooth": false,
+        "square": false
+      },
+      "solo_wave": null,
+      "muted_modules": {
+        "paulstretch": false
+      },
+      "tuning_method": "equal_temperament_12",
+      "tuning_root_note": "A",
+      "tuning_reference_hz": 440.0,
+      "wave_note": {
+        "sine": "A",
+        "triangle": "A",
+        "sawtooth": "A",
+        "square": "A"
+      },
+      "wave_octave": {
+        "sine": 4,
+        "triangle": 4,
+        "sawtooth": 4,
+        "square": 4
+      },
+      "wave_cents": {
+        "sine": 0.0,
+        "triangle": 0.0,
+        "sawtooth": 0.0,
+        "square": 0.0
+      },
+      "wave_follow_main_pitch": {
+        "sine": true,
+        "triangle": true,
+        "sawtooth": true,
+        "square": true
+      },
+      "wave_shapes": {
+        "sine": "sine",
+        "triangle": "triangle",
+        "sawtooth": "sawtooth",
+        "square": "square"
+      },
+      "wave_order": [
+        "sine",
+        "triangle",
+        "sawtooth",
+        "square"
+      ],
+      "paulstretch_enabled": true,
+      "paulstretch_amount": 1.0,
+      "paulstretch_evolution": 0.15,
+      "enabled_modules": {
+        "paulstretch": true
+      }
+    },
+    "ui": {
+      "note": "A",
+      "octave": 200,
+      "cents": 0,
+      "pitch_start_slider": 5700,
+      "pitch_end_slider": 8100,
+      "loudness_start_slider": 300,
+      "loudness_end_slider": 450,
+      "duration_slider": 33,
+      "pan_start_slider": -400,
+      "pan_end_slider": 400,
+      "width_slider": 700,
+      "auto_pan_depth_slider": 150,
+      "auto_pan_rate": 10,
+      "curve_type": "exponential",
+      "tuning_method": "equal_temperament_12",
+      "tuning_root_note": "A",
+      "tuning_reference_hz": 440.0,
+      "muted_modules": {
+        "paulstretch": false
+      },
+      "paulstretch_enabled": true,
+      "paulstretch_amount": 100,
+      "paulstretch_evolution": 150,
+      "solo_wave": null,
+      "waves": {
+        "sine": {
+          "start_db": -1800,
+          "end_db": -300,
+          "change_time_percent": 1000,
+          "pan": 5,
+          "spread": 100,
+          "dance": 0,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        },
+        "triangle": {
+          "start_db": -2000,
+          "end_db": -2000,
+          "change_time_percent": 1000,
+          "pan": -35,
+          "spread": 65,
+          "dance": 30,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        },
+        "sawtooth": {
+          "start_db": -1800,
+          "end_db": 0,
+          "change_time_percent": 550,
+          "pan": 30,
+          "spread": 75,
+          "dance": 20,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        },
+        "square": {
+          "start_db": -240,
+          "end_db": -360,
+          "change_time_percent": 800,
+          "pan": 100,
+          "spread": 0,
+          "dance": 80,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        }
+      },
+      "dynamic_wave_entries": [
+        {
+          "id": "sine",
+          "shape": "sine",
+          "user_added": false,
+          "start_db": -1800,
+          "end_db": -300,
+          "change_time_percent": 1000,
+          "pan": 5,
+          "spread": 100,
+          "dance": 0,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        },
+        {
+          "id": "triangle",
+          "shape": "triangle",
+          "user_added": false,
+          "start_db": -2000,
+          "end_db": -2000,
+          "change_time_percent": 1000,
+          "pan": -35,
+          "spread": 65,
+          "dance": 30,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        },
+        {
+          "id": "sawtooth",
+          "shape": "sawtooth",
+          "user_added": false,
+          "start_db": -1800,
+          "end_db": 0,
+          "change_time_percent": 550,
+          "pan": 30,
+          "spread": 75,
+          "dance": 20,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        },
+        {
+          "id": "square",
+          "shape": "square",
+          "user_added": false,
+          "start_db": -240,
+          "end_db": -360,
+          "change_time_percent": 800,
+          "pan": 100,
+          "spread": 0,
+          "dance": 80,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 4,
+          "cents": 0.0
+        }
+      ]
+    }
+  },
+  "source_audio_path": null,
+  "source_start_seconds": 0.0,
+  "source_duration_seconds": 0.0,
+  "source_pitch_follow": true,
+  "source_loop_to_fit": true,
+  "source_gain": 1.0
+}

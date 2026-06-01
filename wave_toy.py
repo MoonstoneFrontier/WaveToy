@@ -193,14 +193,14 @@ ARTICULATION_TRANSITION_RULE_MS = {
     ("affricate", "vowel"): 35,
     ("vowel", "fricative"): 35,
     ("vowel", "affricate"): 35,
-    ("stop", "vowel"): 12,
+    ("stop", "vowel"): 35,
     ("vowel", "stop"): 18,
     ("stop", "stop"): 8,
 }
 ARTICULATION_DEFAULT_TRANSITION_MS = 35
 ARTICULATION_MOTION_FRAME_MS = 5
 ARTICULATION_MIN_WORD_CROSSFADE_MS = 12
-ARTICULATION_DEFAULT_WORD_CROSSFADE_MS = 24
+ARTICULATION_DEFAULT_WORD_CROSSFADE_MS = 69
 ARTICULATION_WORD_RENDER_PLAIN = "Plain"
 ARTICULATION_WORD_RENDER_CLIP_CROSSFADE = "Clip Crossfade"
 ARTICULATION_WORD_RENDER_CONTINUOUS = "Continuous Mouth Motion"
@@ -252,8 +252,8 @@ PAULSTRETCH_SCALE = 1000       # 1000..30000 => 1.000x..30.000x
 SLIDER_MIN_HEIGHT = 32
 SLIDER_GROOVE_HEIGHT = 8
 SLIDER_GROOVE_RADIUS = 4
-SLIDER_HANDLE_SIZE = 20
-SLIDER_HANDLE_RADIUS = 10
+SLIDER_HANDLE_SIZE = 40
+SLIDER_HANDLE_RADIUS = 0
 SLIDER_HANDLE_MARGIN = -6
 GENERATION_DEBOUNCE_MS = 90
 
@@ -2701,11 +2701,11 @@ class WaveToyTheme:
                 border-radius: 12px;
             }}
             QPushButton#globalActionButton {{
-                min-height: 36px;
-                font-size: 14px;
+                min-height: 22px;
+                font-size: 12px;
                 padding: 5px 10px;
                 text-align: left;
-                border-left: 4px solid #24d7ff;
+                border-left: 2px solid #24d7ff;
             }}
             QComboBox, QSpinBox, QDoubleSpinBox {{
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
@@ -2904,7 +2904,7 @@ class ToyButton(QPushButton):
                 border: 1px solid rgba(190, 232, 255, 0.62);
                 border-left: 4px solid {color};
                 border-radius: 8px;
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: 900;
                 padding: 5px 10px;
                 text-align: left;
@@ -7094,7 +7094,7 @@ class WaveToyWindow(QMainWindow):
         mode_label.setObjectName("timelineInspectorText")
         self.articulation_word_render_mode_combo = QComboBox()
         self.articulation_word_render_mode_combo.addItems(list(ARTICULATION_WORD_RENDER_MODES))
-        current_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CONTINUOUS))
+        current_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
         if current_mode not in ARTICULATION_WORD_RENDER_MODES:
             current_mode = ARTICULATION_WORD_RENDER_CONTINUOUS
         self.articulation_word_render_mode_combo.setCurrentText(current_mode)
@@ -8742,11 +8742,10 @@ class WaveToyWindow(QMainWindow):
         del checked
         if not self._can_start_playback():
             return
-        if self.articulation_word_render_audio.size == 0:
             audio = self._render_word_audio_for_current_chain()
-            if audio.size == 0:
-                return
-        self._start_articulation_motion(loop=False, speed=1.0, audio=self.articulation_word_render_audio)
+        if audio.size == 0:
+            return
+        self._start_articulation_motion(loop=False, speed=1.0, audio=audio)
 
     def _export_articulation_word(self, checked: bool = False) -> None:
         del checked
@@ -9068,7 +9067,7 @@ class WaveToyWindow(QMainWindow):
                 border: 1px solid rgba(190, 232, 255, 0.62);
                 border-left: 4px solid {color};
                 border-radius: 8px;
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: 900;
                 min-height: 36px;
                 padding: 5px 10px;
@@ -11613,7 +11612,7 @@ class WaveToyWindow(QMainWindow):
                 border-radius: {SLIDER_GROOVE_RADIUS}px;
             }}
             QSlider::handle:horizontal {{
-                background: #ff4fa3;
+                background: #26016c;
                 border: 1px solid white;
                 width: {SLIDER_HANDLE_SIZE}px;
                 height: {SLIDER_HANDLE_SIZE}px;
@@ -11644,7 +11643,7 @@ class WaveToyWindow(QMainWindow):
                 border-top-left-radius: 14px;
                 border-top-right-radius: 14px;
                 color: #dcecff;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 900;
                 min-height: 34px;
                 padding: 5px 16px;
@@ -11683,17 +11682,17 @@ class WaveToyWindow(QMainWindow):
                 border: 4px dashed rgba(123, 44, 191, 0.72);
                 border-radius: 10px;
                 color: #263238;
-                font-size: 13px;
+                font-size: 18px;
                 font-weight: 900;
                 padding: 8px;
             }
             QLabel#timelineStoryboardTitle {
-                font-size: 26px;
+                font-size: 16px;
                 font-weight: 900;
                 color: #dcecff;
             }
             QLabel#timelineStoryboardSubtitle {
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: 800;
                 color: #a8c3d6;
             }
@@ -11704,7 +11703,7 @@ class WaveToyWindow(QMainWindow):
             }
             QPushButton#storyTransportButton {
                 min-height: 34px;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 900;
                 border-radius: 8px;
                 padding: 4px 8px;
@@ -11731,7 +11730,7 @@ class WaveToyWindow(QMainWindow):
                 color: #dcecff;
             }
             QLabel#timelineInspectorText {
-                font-size: 13px;
+                font-size: 16px;
                 font-weight: 800;
                 color: #a8c3d6;
             }
@@ -11760,7 +11759,7 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 10px;
             }
             QLabel#storyboardClipIcon {
-                font-size: 28px;
+                font-size: 14px;
                 background: #ffffff;
                 border: 1px solid rgba(0, 0, 0, 0.10);
                 border-radius: 18px;
@@ -11796,7 +11795,7 @@ class WaveToyWindow(QMainWindow):
                 border-radius: 12px;
             }
             QLabel#toyTitleText {
-                font-size: 26px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #e8f3ff;
                 letter-spacing: 1px;
@@ -11865,7 +11864,7 @@ class WaveToyWindow(QMainWindow):
                 padding: 8px;
             }
             QLabel#dashboardExplorerTitle {
-                font-size: 24px;
+                font-size: 18px;
                 font-weight: 900;
                 color: #e8f3ff;
             }
@@ -11966,7 +11965,7 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QLabel#articulationPhonemeTitle {
-                font-size: 26px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -11984,23 +11983,23 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QLabel#phonemeCardIpa {
-                background: rgba(255, 255, 255, 0.82);
-                border: 1px solid rgba(0, 0, 0, 0.12);
+                background: rgba(25, 55, 5, 0.82);
+                border: 1px solid rgba(230, 180, 110, 0.12);
                 border-radius: 18px;
                 font-size: 14px;
                 font-weight: 900;
-                color: #1d1d1d;
+                color: #f8ff8f;
                 padding: 8px;
             }
             QLabel#phonemeCardTitle {
                 font-size: 15px;
                 font-weight: 900;
-                color: #1d1d1d;
+                color: #f8fff2;
             }
             QLabel#phonemeCardSummary {
                 font-size: 13px;
                 font-weight: 900;
-                color: #263238;
+                color: #f8fff2;
             }
             QPushButton#phonemeCardPrimaryAction, QPushButton#phonemeCardDangerAction, QPushButton#phonemeCardSecondaryAction {
                 border-radius: 10px;
@@ -12013,11 +12012,11 @@ class WaveToyWindow(QMainWindow):
                 text-align: left;
             }
             QPushButton#phonemeCardPrimaryAction {
-                background: rgba(9, 96, 68, 0.94);
+                background: rgba(9, 96, 218, 0.94);
                 border-left: 4px solid #5cdb95;
             }
             QPushButton#phonemeCardDangerAction {
-                background: rgba(104, 28, 36, 0.94);
+                background: rgba(180, 218, 142, 0.94);
                 border-left: 4px solid #ff6b6b;
             }
             QPushButton#phonemeCardSecondaryAction {
@@ -12244,6 +12243,32 @@ class WaveToyWindow(QMainWindow):
             }
             QToolButton#collapsibleHeader:hover {
                 background: #f7fafc;
+            }
+            QPushButton#phonemeRailButton {
+                background: #111827;
+                color: #884348;
+                border: 1px solid #64748b;
+                border-left: 4px solid #38bdf8;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 900;
+                padding: 4px 6px;
+            }
+
+            QPushButton#phonemeRailButton:hover {
+                background: #1e293b;
+                border-color: #7dd3fc;
+            }
+
+            QPushButton#phonemeRailButton:checked {
+                background: #0f4c81;
+                color: #ffffff;
+                border: 2px solid #7dd3fc;
+                border-left: 5px solid #22d3ee;
+            }
+
+            QPushButton#phonemeRailButton:pressed {
+                background: #082f49;
             }
             """
         self.setStyleSheet(base_style + self._slider_style_sheet() + WaveToyTheme.global_control_style() + WaveToyTheme.scroll_area_style())

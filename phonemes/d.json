@@ -1,0 +1,288 @@
+{
+  "name": "d",
+  "ipa": "d",
+  "mouth_open": 0.19,
+  "tongue_height": 0.48,
+  "tongue_frontness": 0.47,
+  "lip_rounding": 0.07,
+  "voice_pitch": 278.0,
+  "voice_strength": 0.61,
+  "duration_ms": 200,
+  "preview_color": "#ffc6ff",
+  "phoneme_family": "stop",
+  "air_pressure": 0.0,
+  "teeth_gap": 0.11,
+  "closure": 0.45,
+  "burst_strength": 0.0,
+  "nasal_open": 0.6,
+  "voiced": true,
+  "noise_color": 0.78,
+  "attack_ms": 18,
+  "release_ms": 28,
+  "source_mode": "current_wavetoy_sound",
+  "source_wave_id": null,
+  "source_recipe_snapshot": {
+    "name": "Timeline Clip",
+    "version": 2,
+    "sample_rate": 44100,
+    "settings": {
+      "wave_start_db": {
+        "sine": 0.0,
+        "triangle": -14.47,
+        "sawtooth": 0.0,
+        "square": -13.19
+      },
+      "wave_end_db": {
+        "sine": 0.0,
+        "triangle": -3.91,
+        "sawtooth": -12.17,
+        "square": -11.3
+      },
+      "wave_delta_time": {
+        "sine": 1.1175,
+        "triangle": 0.7035,
+        "sawtooth": 0.798,
+        "square": 0.543
+      },
+      "note": "A",
+      "octave": 4,
+      "cents": 0.0,
+      "pitch_start_hz": 440.0,
+      "pitch_end_hz": 440.0,
+      "loudness_start": 0.4,
+      "loudness_end": 0.4,
+      "duration_seconds": 1.5,
+      "curve_type": "linear",
+      "pan_start": 1.0,
+      "pan_end": -0.411,
+      "stereo_width": 1.0,
+      "auto_pan_depth": 1.0,
+      "auto_pan_rate": 1.05,
+      "wave_pan": {
+        "sine": 0.165,
+        "triangle": -0.297,
+        "sawtooth": 0.341,
+        "square": -0.077
+      },
+      "wave_width": {
+        "sine": 0.457,
+        "triangle": 0.728,
+        "sawtooth": 0.478,
+        "square": 0.793
+      },
+      "wave_dance": {
+        "sine": 0.286,
+        "triangle": 0.56,
+        "sawtooth": 0.198,
+        "square": 0.648
+      },
+      "wave_muted": {
+        "sine": false,
+        "triangle": false,
+        "sawtooth": false,
+        "square": false
+      },
+      "solo_wave": null,
+      "muted_modules": {
+        "paulstretch": false
+      },
+      "tuning_method": "nineteen_equal",
+      "tuning_root_note": "A",
+      "tuning_reference_hz": 440.0,
+      "wave_note": {
+        "sine": "C",
+        "triangle": "E",
+        "sawtooth": "A",
+        "square": "G"
+      },
+      "wave_octave": {
+        "sine": 4,
+        "triangle": 5,
+        "sawtooth": 3,
+        "square": 6
+      },
+      "wave_cents": {
+        "sine": 15.71,
+        "triangle": 40.38,
+        "sawtooth": 8.97,
+        "square": 33.01
+      },
+      "wave_follow_main_pitch": {
+        "sine": false,
+        "triangle": false,
+        "sawtooth": true,
+        "square": false
+      },
+      "wave_shapes": {
+        "sine": "sine",
+        "triangle": "triangle",
+        "sawtooth": "sawtooth",
+        "square": "square"
+      },
+      "wave_order": [
+        "sine",
+        "triangle",
+        "sawtooth",
+        "square"
+      ],
+      "paulstretch_enabled": true,
+      "paulstretch_amount": 1.66,
+      "paulstretch_evolution": 0.15,
+      "enabled_modules": {
+        "paulstretch": true
+      }
+    },
+    "ui": {
+      "note": "A",
+      "octave": 400,
+      "cents": 0,
+      "pitch_start_slider": 6900,
+      "pitch_end_slider": 6900,
+      "loudness_start_slider": 400,
+      "loudness_end_slider": 400,
+      "duration_slider": 300,
+      "pan_start_slider": 1000,
+      "pan_end_slider": -411,
+      "width_slider": 1000,
+      "auto_pan_depth_slider": 1000,
+      "auto_pan_rate": 105,
+      "curve_type": "linear",
+      "tuning_method": "nineteen_equal",
+      "tuning_root_note": "A",
+      "tuning_reference_hz": 440.0,
+      "muted_modules": {
+        "paulstretch": false
+      },
+      "paulstretch_enabled": true,
+      "paulstretch_amount": 166,
+      "paulstretch_evolution": 150,
+      "solo_wave": null,
+      "waves": {
+        "sine": {
+          "start_db": 0,
+          "end_db": 0,
+          "change_time_percent": 745,
+          "pan": 165,
+          "spread": 457,
+          "dance": 286,
+          "muted": false,
+          "follow_main_pitch": false,
+          "note": "C",
+          "octave": 4,
+          "cents": 15.71
+        },
+        "triangle": {
+          "start_db": -1447,
+          "end_db": -391,
+          "change_time_percent": 469,
+          "pan": -297,
+          "spread": 728,
+          "dance": 560,
+          "muted": false,
+          "follow_main_pitch": false,
+          "note": "E",
+          "octave": 5,
+          "cents": 40.38
+        },
+        "sawtooth": {
+          "start_db": 0,
+          "end_db": -1217,
+          "change_time_percent": 532,
+          "pan": 341,
+          "spread": 478,
+          "dance": 198,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 3,
+          "cents": 8.97
+        },
+        "square": {
+          "start_db": -1319,
+          "end_db": -1130,
+          "change_time_percent": 362,
+          "pan": -77,
+          "spread": 793,
+          "dance": 648,
+          "muted": false,
+          "follow_main_pitch": false,
+          "note": "G",
+          "octave": 6,
+          "cents": 33.01
+        }
+      },
+      "dynamic_wave_entries": [
+        {
+          "id": "sine",
+          "shape": "sine",
+          "user_added": false,
+          "start_db": 0,
+          "end_db": 0,
+          "change_time_percent": 745,
+          "pan": 165,
+          "spread": 457,
+          "dance": 286,
+          "muted": false,
+          "follow_main_pitch": false,
+          "note": "C",
+          "octave": 4,
+          "cents": 15.71
+        },
+        {
+          "id": "triangle",
+          "shape": "triangle",
+          "user_added": false,
+          "start_db": -1447,
+          "end_db": -391,
+          "change_time_percent": 469,
+          "pan": -297,
+          "spread": 728,
+          "dance": 560,
+          "muted": false,
+          "follow_main_pitch": false,
+          "note": "E",
+          "octave": 5,
+          "cents": 40.38
+        },
+        {
+          "id": "sawtooth",
+          "shape": "sawtooth",
+          "user_added": false,
+          "start_db": 0,
+          "end_db": -1217,
+          "change_time_percent": 532,
+          "pan": 341,
+          "spread": 478,
+          "dance": 198,
+          "muted": false,
+          "follow_main_pitch": true,
+          "note": "A",
+          "octave": 3,
+          "cents": 8.97
+        },
+        {
+          "id": "square",
+          "shape": "square",
+          "user_added": false,
+          "start_db": -1319,
+          "end_db": -1130,
+          "change_time_percent": 362,
+          "pan": -77,
+          "spread": 793,
+          "dance": 648,
+          "muted": false,
+          "follow_main_pitch": false,
+          "note": "G",
+          "octave": 6,
+          "cents": 33.01
+        }
+      ]
+    }
+  },
+  "source_audio_path": null,
+  "source_start_seconds": 0.0,
+  "source_duration_seconds": 0.0,
+  "source_pitch_follow": true,
+  "source_loop_to_fit": true,
+  "source_gain": 1.0
+}

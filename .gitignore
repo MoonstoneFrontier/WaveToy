@@ -42,3 +42,6 @@ logs/
 Thumbs.db
 audio_files/
 deprecated/
+*.bak
+*.wave-toy-word.json
+articulation_chain.json
