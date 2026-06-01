@@ -959,6 +959,7 @@ VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
     "EE": {"emoji": "😀", "ipa": "i", "tongue_height": 0.95, "tongue_frontness": 0.95, "mouth_open": 0.20, "lip_rounding": 0.05, "preview_color": "#b8f2e6"},
     "EH": {"emoji": "🙂", "ipa": "e", "tongue_height": 0.70, "tongue_frontness": 0.85, "mouth_open": 0.40, "lip_rounding": 0.05, "preview_color": "#caffbf"},
     "AH": {"emoji": "😮", "ipa": "a", "tongue_height": 0.20, "tongue_frontness": 0.40, "mouth_open": 0.95, "lip_rounding": 0.00, "preview_color": "#ffadad"},
+    "AA": {"emoji": "😲", "ipa": "ɑ", "tongue_height": 0.18, "tongue_frontness": 0.22, "mouth_open": 0.94, "lip_rounding": 0.08, "preview_color": "#ffb4a2"},
     "OH": {"emoji": "😯", "ipa": "o", "tongue_height": 0.50, "tongue_frontness": 0.20, "mouth_open": 0.55, "lip_rounding": 0.60, "preview_color": "#ffd6a5"},
     "OO": {"emoji": "😗", "ipa": "u", "tongue_height": 0.90, "tongue_frontness": 0.10, "mouth_open": 0.15, "lip_rounding": 1.00, "preview_color": "#a0c4ff"},
     "UH": {"emoji": "😐", "ipa": "ʌ", "tongue_height": 0.38, "tongue_frontness": 0.42, "mouth_open": 0.55, "lip_rounding": 0.12, "preview_color": "#d7b9ff"},
@@ -1012,6 +1013,15 @@ EXTRA_FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
     "DH": {"emoji": "🦷", "ipa": "ð", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.68, "teeth_gap": 0.34, "tongue_frontness": 0.95, "mouth_open": 0.24, "tongue_height": 0.52, "lip_rounding": 0.02, "duration_ms": 390, "noise_color": 0.68, "preview_color": "#caffbf"},
     "ZH": {"emoji": "🤫", "ipa": "ʒ", "phoneme_family": "fricative", "voiced": True, "air_pressure": 0.70, "teeth_gap": 0.28, "tongue_frontness": 0.42, "mouth_open": 0.30, "tongue_height": 0.62, "lip_rounding": 0.48, "duration_ms": 440, "noise_color": 0.58, "preview_color": "#bde0fe"},
 }
+
+CONTINUOUS_RENDER_TEST_CHAINS: Tuple[Tuple[str, ...], ...] = (
+    ("M", "OO", "N"),
+    ("B", "AH", "D"),
+    ("SH", "IY"),
+    ("TH", "IH", "S"),
+    ("S", "T", "AA", "P"),
+    ("D", "AE", "D"),
+)
 
 CONSONANT_PRESET_SECTIONS: Tuple[Tuple[str, Dict[str, Dict[str, object]]], ...] = (
     ("🌬 Friction Sounds", FRICATIVE_PRESETS),
@@ -5236,10 +5246,12 @@ class VocalTractCanvas(QWidget):
 
         painter.setPen(QPen(QColor("#1d3557"), 2))
         painter.setFont(QFont("Arial", 13, QFont.Bold))
-        painter.drawText(rect.left() + 8, rect.top() + 20, f"Current: {self.motion_current_name}   Next: {self.motion_next_name}")
-        transition_prefix = "Active" if self.motion_in_transition else "Next"
+        painter.drawText(rect.left() + 8, rect.top() + 20, f"Active phoneme: {self.motion_current_name}   Target: {self.motion_next_name}")
+        transition_prefix = "Transition" if self.motion_in_transition else "Next transition"
         progress_label = f"{transition_prefix}: {self.motion_transition_ms} ms • {int(self.motion_transition_progress * 100):02d}%"
-        painter.drawText(rect.right() - 260, rect.top() + 20, progress_label)
+        painter.drawText(rect.right() - 310, rect.top() + 20, progress_label)
+        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        painter.drawText(rect.left() + 8, rect.top() + 42, f"Voiced level {voice_strength:.2f} • Airflow level {air_pressure:.2f}")
 
         timeline_rect = QRectF(rect.left() + 16, rect.bottom() - 34, rect.width() - 32, 22)
         painter.setPen(QPen(QColor("#1d3557"), 2))
@@ -7506,6 +7518,11 @@ class WaveToyWindow(QMainWindow):
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.articulation_word_render_mode_combo, 1)
         chain_layout.addLayout(mode_row)
+        continuous_tests = ", ".join(" ".join(chain) for chain in CONTINUOUS_RENDER_TEST_CHAINS)
+        continuous_test_label = QLabel(f"Continuous validation chains: {continuous_tests}")
+        continuous_test_label.setObjectName("symbolHint")
+        continuous_test_label.setWordWrap(True)
+        chain_layout.addWidget(continuous_test_label)
 
         profile_row = QHBoxLayout()
         profile_label = QLabel("Voice Profile")
@@ -8369,10 +8386,33 @@ class WaveToyWindow(QMainWindow):
             mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
         return mode if mode in ARTICULATION_WORD_RENDER_MODES else ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
 
+    def _voice_profile_baseline_key(self) -> str:
+        return "voice_profile_baseline_chain"
+
+    def _restore_voice_profile_baseline(self) -> bool:
+        baseline = self.articulation_word_render_settings.get(self._voice_profile_baseline_key())
+        if not isinstance(baseline, list) or len(baseline) != len(self.articulation_chain_items):
+            return False
+        try:
+            for item, data in zip(self.articulation_chain_items, baseline):
+                if isinstance(data, dict):
+                    item.phoneme = ArticulationPhoneme.from_json_dict(data)
+        except Exception as exc:
+            print(f"[WaveToy Envelope] voice profile baseline restore failed: {exc}")
+            return False
+        return True
+
     def _apply_voice_profile_to_chain(self, profile: str) -> None:
+        baseline_restored = self._restore_voice_profile_baseline()
         if profile == "Neutral" or not self.articulation_chain_items:
+            self.articulation_word_render_settings.pop(self._voice_profile_baseline_key(), None)
             self.articulation_word_render_settings["voice_profile"] = profile
+            self._mark_articulation_word_dirty()
+            self._refresh_articulation_chain_cards()
             return
+        baseline_key = self._voice_profile_baseline_key()
+        if baseline_key not in self.articulation_word_render_settings or not baseline_restored:
+            self.articulation_word_render_settings[baseline_key] = [item.phoneme.to_json_dict() for item in self.articulation_chain_items]
         multipliers = {
             "Child": {"pitch": 1.45, "formant": 1.12, "voice": 0.92, "noise": 0.95},
             "Female": {"pitch": 1.22, "formant": 1.06, "voice": 1.00, "noise": 0.95},
@@ -8485,9 +8525,12 @@ class WaveToyWindow(QMainWindow):
         self._refresh_articulation_motion_timeline()
         f1, f2, f3 = formants_from_articulation(phoneme)
         values = ", ".join(f"{name} {getattr(phoneme, name):.2f}" for name in ("mouth_open", "tongue_height", "tongue_frontness", "lip_rounding"))
+        voiced_level = self._continuous_voiced_gain(phoneme)
+        airflow_level = float(np.clip(phoneme.air_pressure, 0.0, 1.0))
         status = (
-            f"Motion {current_name} → {next_name} • transition {transition_ms} ms • {'active' if in_transition else 'holding'} • "
-            f"{int(transition_progress * 100)}% • playhead {int(playhead * 100)}% • {values} • F1/F2/F3 {f1:.0f}/{f2:.0f}/{f3:.0f} Hz"
+            f"Active phoneme {current_name} → target {next_name} • transition {transition_ms} ms • {'active' if in_transition else 'holding'} • "
+            f"progress {int(transition_progress * 100)}% • voiced level {voiced_level:.2f} • airflow level {airflow_level:.2f} • "
+            f"playhead {int(playhead * 100)}% • {values} • F1/F2/F3 {f1:.0f}/{f2:.0f}/{f3:.0f} Hz"
         )
         if self.articulation_motion_status_label is not None:
             self.articulation_motion_status_label.setText(status)
@@ -8960,12 +9003,57 @@ class WaveToyWindow(QMainWindow):
         envelope *= 1.0 - 0.22 * phoneme.lip_rounding * np.clip((freqs - 1800.0) / 5000.0, 0.0, 1.0)
         return np.fft.irfft(spectrum * envelope, n=mono.size)
 
+    def _continuous_voiced_gain(self, phoneme: ArticulationPhoneme) -> float:
+        voiced_gain = _articulation_voiced_gain(phoneme)
+        if voiced_gain > 0.0:
+            return voiced_gain
+        profile = str(self.articulation_word_render_settings.get("voice_profile", "Neutral"))
+        naturally_voiced = phoneme.phoneme_family in {"vowel", "nasal", "liquid", "glide"} or phoneme.name.upper() in {"B", "D", "G", "JH", "V", "Z", "ZH", "DH"}
+        if profile == "Whisper":
+            if naturally_voiced and phoneme.voice_strength > 0.0:
+                return float(np.clip(phoneme.voice_strength * 0.22, 0.025, 0.16))
+            return 0.0
+        if naturally_voiced and phoneme.voice_strength > 0.0:
+            return float(np.clip(phoneme.voice_strength, 0.0, 1.0))
+        return 0.0
+
+    def _report_continuous_render_debug(self, metrics: Dict[str, object]) -> None:
+        ordered_keys = (
+            "active_render_mode",
+            "chain_length",
+            "phoneme_count",
+            "output_duration",
+            "output_peak",
+            "voiced_rms",
+            "noise_rms",
+            "source_rms",
+            "transition_count",
+            "transition_duration_total",
+            "final_buffer_length",
+        )
+        payload = " ".join(f"{key}={metrics.get(key)}" for key in ordered_keys)
+        print(f"[WaveToy Continuous Debug] {payload}")
+        output_duration = float(metrics.get("output_duration", 0.0) or 0.0)
+        output_peak = float(metrics.get("output_peak", 0.0) or 0.0)
+        final_buffer_length = int(metrics.get("final_buffer_length", 0) or 0)
+        voiced_rms = float(metrics.get("voiced_rms", 0.0) or 0.0)
+        voiced_phoneme_count = int(metrics.get("voiced_phoneme_count", 0) or 0)
+        if final_buffer_length > 0 and output_peak == 0.0:
+            print('[WaveToy Continuous Validation] silent buffer')
+        if output_duration > 0.0 and final_buffer_length == 0:
+            print('[WaveToy Continuous Validation] empty render')
+        if voiced_phoneme_count > 0 and voiced_rms == 0.0:
+            print('[WaveToy Continuous Validation] voiced path missing')
+
     def _render_articulation_word_continuous(self) -> np.ndarray:
         segments, total_ms, stop_events, burst_events = self._build_articulation_envelope_timeline()
         frame_ms = ARTICULATION_MOTION_FRAME_MS
         frame_samples = max(1, int(round(frame_ms * SAMPLE_RATE / 1000.0)))
         total_samples = max(1, int(round(total_ms * SAMPLE_RATE / 1000.0)))
         frame_count = max(1, int(math.ceil(total_samples / frame_samples)))
+        transition_count = sum(1 for segment in segments if segment["kind"] == "transition")
+        transition_duration_total = sum(int(segment["end"]) - int(segment["start"]) for segment in segments if segment["kind"] == "transition")
+        voiced_phoneme_count = sum(1 for item in self.articulation_chain_items if self._continuous_voiced_gain(item.phoneme_for_render().clamped()) > 0.0)
         print(f"[WaveToy Envelope] render mode={ARTICULATION_WORD_RENDER_CONTINUOUS} phoneme_count={len(self.articulation_chain_items)} total_envelope_ms={total_ms} frame_count={frame_count}")
         for segment in segments:
             if segment["kind"] == "transition":
@@ -8984,6 +9072,9 @@ class WaveToyWindow(QMainWindow):
         voiced_trace = np.zeros(total_samples, dtype=np.float32)
         noise_trace = np.zeros(total_samples, dtype=np.float32)
         closure_trace = np.zeros(total_samples, dtype=np.float32)
+        voiced_bus = np.zeros(total_samples, dtype=np.float64)
+        noise_bus = np.zeros(total_samples, dtype=np.float64)
+        source_bus = np.zeros(total_samples, dtype=np.float64)
         source_cache: Dict[int, np.ndarray | None] = {}
         for index, item in enumerate(self.articulation_chain_items):
             phoneme = item.phoneme_for_render().clamped()
@@ -9005,7 +9096,7 @@ class WaveToyWindow(QMainWindow):
                 continue
             center_ms = ((start_sample + end_sample) * 0.5) * 1000.0 / SAMPLE_RATE
             phoneme, voiced_gain, noise_gain, closure, active = self._envelope_state_at_ms(center_ms, segments)
-            t = np.arange(count, dtype=np.float64) / SAMPLE_RATE
+            voiced_gain = self._continuous_voiced_gain(phoneme)
             source_excitation = np.zeros(count, dtype=np.float64)
             source_audio = source_cache.get(int(active.get("index", 0)))
             if source_audio is not None and source_audio.size:
@@ -9016,6 +9107,7 @@ class WaveToyWindow(QMainWindow):
                 source_peak = float(np.max(np.abs(source_excitation))) if source_excitation.size else 0.0
                 if source_peak > 1.0e-8:
                     source_excitation = source_excitation / source_peak
+                source_bus[start_sample:end_sample] = source_excitation[:count]
             pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
             phase_step = 2.0 * math.pi * pitch / SAMPLE_RATE
             phases = phase + phase_step * np.arange(count, dtype=np.float64)
@@ -9032,14 +9124,20 @@ class WaveToyWindow(QMainWindow):
                 stop_params = _stop_burst_parameters(phoneme)
                 noise *= noise_gain * (0.04 + 0.18 * stop_params["air_pressure"]) * (0.25 + 0.75 * (1.0 - stop_params["teeth_gap"]))
                 closure_gate = float(np.clip(1.0 - closure * 0.97, 0.02, 1.0))
-                voice_gate = float(np.clip(1.0 - closure * 0.70, 0.10, 1.0)) if phoneme.voiced else closure_gate
-                frame = self._shape_continuous_frame((tone * 0.78 + source_tone * 0.48) * voice_gate + noise * 0.12 * closure_gate, phoneme)
+                voice_gate = float(np.clip(1.0 - closure * 0.70, 0.10, 1.0)) if voiced_gain > 0.0 else closure_gate
+                voiced_component = (tone * 0.78 + source_tone * 0.48) * voice_gate
+                noise_component = noise * 0.12 * closure_gate
+                frame = self._shape_continuous_frame(voiced_component + noise_component, phoneme)
             else:
                 noise *= noise_gain * (0.18 + 0.82 * phoneme.air_pressure) * (0.35 + 0.65 * phoneme.teeth_gap)
                 closure_gate = float(np.clip(1.0 - closure * 0.94, 0.04, 1.0))
                 voiced_noise_duck = float(np.clip(1.0 - voiced_gain * 0.62, 0.28, 1.0))
                 voice_frame = tone * (0.88 + 0.34 * voice_strength) + source_tone * 0.72
-                frame = self._shape_continuous_frame((voice_frame + noise * 0.16 * voiced_noise_duck) * closure_gate, phoneme)
+                voiced_component = voice_frame * closure_gate
+                noise_component = noise * 0.24 * voiced_noise_duck * closure_gate
+                frame = self._shape_continuous_frame(voiced_component + noise_component, phoneme)
+            voiced_bus[start_sample:end_sample] += voiced_component
+            noise_bus[start_sample:end_sample] += noise_component
             mono[start_sample:end_sample] += frame
             voiced_trace[start_sample:end_sample] = voiced_gain
             noise_trace[start_sample:end_sample] = noise_gain
@@ -9058,7 +9156,9 @@ class WaveToyWindow(QMainWindow):
             env *= np.linspace(1.0, 0.18, count, dtype=np.float64)
             gain = float(event.get("gain", params["burst_gain"]))
             _log_stop_render(phoneme, {**params, "burst_samples": float(count), "burst_gain": gain}, count)
-            mono[start_sample:end_sample] += burst * env * gain * 0.82
+            burst_component = burst * env * gain * 0.82
+            noise_bus[start_sample:end_sample] += burst_component
+            mono[start_sample:end_sample] += burst_component
 
         smooth_samples = max(3, int(0.004 * SAMPLE_RATE))
         if smooth_samples % 2 == 0:
@@ -9068,16 +9168,30 @@ class WaveToyWindow(QMainWindow):
             kernel = kernel / max(1.0e-9, float(np.sum(kernel)))
             mono = np.convolve(mono, kernel, mode="same")
         peak = float(np.max(np.abs(mono))) if mono.size else 0.0
-        if peak <= 1.0e-8:
-            print("[WaveToy Envelope] warning continuous renderer produced empty audio; falling back to clip crossfade")
-            return np.zeros((0, 2), dtype=np.float32)
-        mono = mono / peak * 0.82
-        audio = np.column_stack([mono, mono]).astype(np.float32)
+        if peak > 1.0e-8:
+            mono = mono / peak * 0.82
+        audio = np.column_stack([mono, mono]).astype(np.float32) if mono.size else np.zeros((0, 2), dtype=np.float32)
         audio = self._fade_word_edges(audio)
+        final_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        metrics = {
+            "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
+            "chain_length": len(self.articulation_chain_items),
+            "phoneme_count": len(self.articulation_chain_items),
+            "output_duration": round(len(audio) / SAMPLE_RATE, 6) if audio.size else 0.0,
+            "output_peak": round(final_peak, 9),
+            "voiced_rms": round(float(np.sqrt(np.mean(np.square(voiced_bus)))) if voiced_bus.size else 0.0, 9),
+            "noise_rms": round(float(np.sqrt(np.mean(np.square(noise_bus)))) if noise_bus.size else 0.0, 9),
+            "source_rms": round(float(np.sqrt(np.mean(np.square(source_bus)))) if source_bus.size else 0.0, 9),
+            "transition_count": transition_count,
+            "transition_duration_total": transition_duration_total,
+            "final_buffer_length": int(len(audio)),
+            "voiced_phoneme_count": voiced_phoneme_count,
+        }
+        self._report_continuous_render_debug(metrics)
         print(
             f"[WaveToy Envelope] max_voiced_gain={float(np.max(voiced_trace)):.3f} "
             f"max_noise_gain={float(np.max(noise_trace)):.3f} max_closure={float(np.max(closure_trace)):.3f} "
-            f"final_peak={float(np.max(np.abs(audio))) if audio.size else 0.0:.3f} "
+            f"final_peak={final_peak:.3f} "
             f"final_rendered_duration={len(audio) / SAMPLE_RATE:.3f}s"
         )
         self._log_word_render_debug(ARTICULATION_WORD_RENDER_CONTINUOUS, audio)
@@ -9153,13 +9267,11 @@ class WaveToyWindow(QMainWindow):
             return self._render_articulation_word_clip_crossfade()
         if mode == ARTICULATION_WORD_RENDER_CONTINUOUS:
             try:
-                audio = self._render_articulation_word_continuous()
-                if audio.size > 0:
-                    return audio
+                return self._render_articulation_word_continuous()
             except Exception as exc:
-                print(f"[WaveToy Envelope] warning continuous renderer failed: {exc}; falling back to {ARTICULATION_WORD_RENDER_CLIP_CROSSFADE}")
-            QMessageBox.warning(self, "Create Word", "Continuous Mouth Motion could not render audio, so WaveToy used Clip Crossfade instead.")
-            return self._render_articulation_word_clip_crossfade()
+                print(f"[WaveToy Envelope] error continuous renderer failed without Clip Crossfade fallback: {exc}")
+                QMessageBox.warning(self, "Create Word", "Continuous Mouth Motion failed to render. Clip Crossfade was not used automatically; inspect the Continuous debug log.")
+                return np.zeros((0, 2), dtype=np.float32)
         return self._render_articulation_word_clip_crossfade()
 
     def _current_word_render_signature(self) -> str:
