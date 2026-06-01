@@ -57,6 +57,7 @@ from PySide6.QtGui import QAction, QColor, QDrag, QFont, QKeySequence, QLinearGr
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -74,6 +75,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QStyle,
     QStackedWidget,
     QTabWidget,
     QToolButton,
@@ -238,20 +240,20 @@ TIMELINE_TIME_STEP_SECONDS = 0.005
 DB_SLIDER_SCALE = 100          # -2000..0 => -20.00 dB..0.00 dB
 MIDI_SLIDER_SCALE = 100        # 3600..8400 => MIDI 36.00..84.00
 OCTAVE_SLIDER_SCALE = 100      # 200..600 => octave 2.00..6.00
-SECONDS_SLIDER_SCALE = 200     # 2..1600 => 0.01s..8.00s in 0.005s steps
-PERCENT_SLIDER_SCALE = 10      # 0..1000 => 0.0%..100.0%
-RATE_SLIDER_SCALE = 100        # 5..800 => 0.05Hz..8.00Hz
-PAULSTRETCH_SCALE = 100        # 100..3000 => 1.00x..30.00x
+SECONDS_SLIDER_SCALE = 1000    # 10..8000 => 0.01s..8.00s in 0.001s steps
+PERCENT_SLIDER_SCALE = 100     # 0..10000 => 0.00%..100.00%
+RATE_SLIDER_SCALE = 1000       # 50..8000 => 0.05Hz..8.00Hz
+PAULSTRETCH_SCALE = 1000       # 1000..30000 => 1.000x..30.000x
 
 # Centralized touch-friendly slider metrics. These affect only Qt styling and
 # widget hit area; they do not change synthesis ranges, saved recipe values, or
 # audio generation behavior.
-SLIDER_MIN_HEIGHT = 44
-SLIDER_GROOVE_HEIGHT = 18
-SLIDER_GROOVE_RADIUS = 9
-SLIDER_HANDLE_SIZE = 34
-SLIDER_HANDLE_RADIUS = 17
-SLIDER_HANDLE_MARGIN = -8
+SLIDER_MIN_HEIGHT = 32
+SLIDER_GROOVE_HEIGHT = 8
+SLIDER_GROOVE_RADIUS = 4
+SLIDER_HANDLE_SIZE = 20
+SLIDER_HANDLE_RADIUS = 10
+SLIDER_HANDLE_MARGIN = -6
 GENERATION_DEBOUNCE_MS = 90
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -2664,11 +2666,45 @@ class WaveToyTheme:
     def global_control_style(cls) -> str:
         return f"""
             QPushButton {{
-                min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
-                padding: 4px 8px;
+                min-height: 36px;
+                padding: 5px 10px;
                 border-radius: 8px;
-                font-size: 13px;
-                font-weight: 800;
+                font-size: 14px;
+                font-weight: 900;
+                color: #f7fbff;
+                background: rgba(7, 19, 34, 0.88);
+                border: 1px solid rgba(190, 232, 255, 0.58);
+            }}
+            QPushButton:hover {{
+                background: rgba(13, 37, 58, 0.98);
+                border-color: rgba(36, 215, 255, 0.92);
+            }}
+            QPushButton:pressed {{
+                background: rgba(5, 12, 23, 1.0);
+                border-color: #24d7ff;
+                padding-top: 7px;
+            }}
+            QPushButton:checked, QPushButton[active="true"] {{
+                background: rgba(20, 168, 212, 0.34);
+                border-color: #24d7ff;
+                color: #ffffff;
+            }}
+            QPushButton:disabled {{
+                background: rgba(62, 74, 88, 0.72);
+                color: #b7c9d8;
+                border-color: rgba(185, 199, 212, 0.42);
+            }}
+            QWidget#globalControlPanel {{
+                background: rgba(255, 255, 255, 0.13);
+                border: 1px solid rgba(180, 220, 255, 0.30);
+                border-radius: 12px;
+            }}
+            QPushButton#globalActionButton {{
+                min-height: 36px;
+                font-size: 14px;
+                padding: 5px 10px;
+                text-align: left;
+                border-left: 4px solid #24d7ff;
             }}
             QComboBox, QSpinBox, QDoubleSpinBox {{
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
@@ -2679,7 +2715,8 @@ class WaveToyTheme:
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
                 spacing: 6px;
                 font-size: 13px;
-                font-weight: 700;
+                font-weight: 800;
+                color: #e8f3ff;
             }}
             QGroupBox#toyGroup, QWidget#timelineInspector, QWidget#timelineAudioPalette, QWidget#explorerDashboardPanel {{
                 margin-top: 8px;
@@ -2861,20 +2898,33 @@ class ToyButton(QPushButton):
         self.setStyleSheet(
             f"""
             QPushButton {{
-                background: rgba(255, 255, 255, 0.14);
-                color: #e8f3ff;
-                border: 1px solid rgba(180, 220, 255, 0.26);
-                border-left: 3px solid {color};
+                background: rgba(7, 19, 34, 0.90);
+                color: #f7fbff;
+                border: 1px solid rgba(190, 232, 255, 0.62);
+                border-left: 4px solid {color};
                 border-radius: 8px;
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 900;
-                padding: 4px 8px;
+                padding: 5px 10px;
+                text-align: left;
             }}
             QPushButton:hover {{
-                border: 1px solid rgba(0, 0, 0, 0.35);
+                background: rgba(13, 37, 58, 0.98);
+                border-color: rgba(36, 215, 255, 0.92);
             }}
             QPushButton:pressed {{
-                padding-top: 6px;
+                background: rgba(5, 12, 23, 1.0);
+                padding-top: 7px;
+            }}
+            QPushButton:checked, QPushButton[active="true"] {{
+                background: rgba(20, 168, 212, 0.34);
+                border-color: #24d7ff;
+            }}
+            QPushButton:disabled {{
+                background: rgba(62, 74, 88, 0.72);
+                color: #b7c9d8;
+                border-color: rgba(185, 199, 212, 0.42);
+                border-left-color: #7d8b98;
             }}
             """
         )
@@ -3709,10 +3759,51 @@ class TimelineCanvas(QWidget):
 
 
 class NoWheelSlider(QSlider):
-    """Slider that leaves mouse-wheel scrolling to parent scroll areas."""
+    """High-resolution slider with click/touch-to-set and disabled wheel edits."""
+
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self.setAttribute(Qt.WA_AcceptTouchEvents, True)
+        self.setMouseTracking(True)
 
     def wheelEvent(self, event) -> None:
         event.ignore()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._set_value_from_position(event.position()):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.LeftButton and self._set_value_from_position(event.position()):
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def event(self, event) -> bool:
+        if event.type() in (QEvent.TouchBegin, QEvent.TouchUpdate):
+            points = event.points() if hasattr(event, "points") else []
+            if points:
+                position = points[0].position()
+                if self._set_value_from_position(position):
+                    event.accept()
+                    return True
+        return super().event(event)
+
+    def _set_value_from_position(self, position: QPointF) -> bool:
+        if self.orientation() != Qt.Horizontal or self.width() <= 0:
+            return False
+        groove_left = SLIDER_HANDLE_SIZE / 2.0
+        groove_width = max(1.0, self.width() - SLIDER_HANDLE_SIZE)
+        pixel = int(round(float(position.x()) - groove_left))
+        upside_down = self.invertedAppearance()
+        if self.layoutDirection() == Qt.RightToLeft:
+            upside_down = not upside_down
+        value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), pixel, int(round(groove_width)), upside_down)
+        self.setSliderDown(True)
+        self.setValue(int(np.clip(value, self.minimum(), self.maximum())))
+        return True
 
 
 class NoWheelComboBox(QComboBox):
@@ -5542,6 +5633,9 @@ class WaveToyWindow(QMainWindow):
         self.floating_toy_panels: Dict[str, QWidget] = {}
         self.note_wheel_dialogs: Dict[str, QDialog] = {}
         self.tabs: QTabWidget | None = None
+        self.global_action_buttons: Dict[str, QPushButton] = {}
+        self.loop_button: QPushButton | None = None
+        self.global_loop_button: QPushButton | None = None
         self.wave_explorer_tab: QWidget | None = None
         self.dashboard_canvas: WaveCanvas | None = None
         self.dashboard_workspace_panel: QWidget | None = None
@@ -5691,6 +5785,7 @@ class WaveToyWindow(QMainWindow):
         self._build_ui()
         self._build_shortcuts()
         self._apply_style()
+        self._sync_loop_buttons()
         self._sync_note_to_pitch()
         self._generate_now(reason="startup", update_message=True, force=True)
 
@@ -5747,13 +5842,199 @@ class WaveToyWindow(QMainWindow):
         layout.addWidget(right_icons)
         return banner
 
+    def _build_global_control_panel(self) -> QWidget:
+        """Stable compact command bar shared by all tabs."""
+        panel = QWidget()
+        panel.setObjectName("globalControlPanel")
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(8)
+        actions = (
+            ("play", "▶", "Play", "#5cdb95", self._global_play),
+            ("stop", "■", "Stop", "#ff6b6b", self._global_stop),
+            ("loop", "🔁", "Loop", "#24d7ff", self._global_loop),
+            ("save", "💾", "Save / Export", "#ffd166", self._global_save_export),
+            ("timeline", "➕", "Add to Timeline", "#caffbf", self._global_add_to_timeline),
+            ("render", "⚙", "Render / Create", "#b8f2e6", self._global_render_create),
+            ("reset", "♻", "Reset", "#ffadad", self._global_reset_context),
+            ("help", "?", "Help / Info", "#d7b9ff", self._show_about),
+        )
+        self.global_action_buttons = {}
+        for key, icon, label, color, callback in actions:
+            button = QPushButton(f"{icon}  {label}")
+            button.setObjectName("globalActionButton")
+            button.setStyleSheet(f"QPushButton#globalActionButton {{ border-left: 4px solid {color}; }}")
+            button.setMinimumHeight(36)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setToolTip(label)
+            if key == "loop":
+                button.setCheckable(True)
+                self.global_loop_button = button
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+            self.global_action_buttons[key] = button
+        layout.addStretch(1)
+        return panel
+
+    def _global_play(self, checked: bool = False) -> None:
+        del checked
+        self._handle_spacebar_playback()
+
+    def _global_stop(self, checked: bool = False) -> None:
+        del checked
+        tab_identity = self._active_tab_identity()
+        if tab_identity == "timeline":
+            self._timeline_stop_story()
+        elif tab_identity == "articulation_lab":
+            self._stop_phoneme_preview()
+            self._stop_articulation_motion()
+        else:
+            self._stop()
+
+    def _global_loop(self, checked: bool = False) -> None:
+        del checked
+        tab_identity = self._active_tab_identity()
+        if tab_identity == "articulation_lab":
+            self._toggle_phoneme_loop()
+        else:
+            self._toggle_live_loop()
+
+    def _global_save_export(self, checked: bool = False) -> None:
+        del checked
+        if self._active_tab_identity() == "timeline":
+            self._timeline_export_last_mix()
+        elif self._active_tab_identity() == "articulation_lab":
+            self._export_articulation_word()
+        else:
+            self._save()
+
+    def _global_add_to_timeline(self, checked: bool = False) -> None:
+        del checked
+        if self._active_tab_identity() == "articulation_lab":
+            self._send_current_phoneme_to_timeline()
+        else:
+            self._drop_story_sound()
+            self._show_named_tab("Timeline")
+
+    def _global_render_create(self, checked: bool = False) -> None:
+        del checked
+        if self._active_tab_identity() == "timeline":
+            self._timeline_render_mix()
+        elif self._active_tab_identity() == "articulation_lab":
+            self._create_articulation_word()
+        else:
+            self._generate(update_message=True)
+
+    def _global_reset_context(self, checked: bool = False) -> None:
+        del checked
+        if self._active_tab_identity() == "timeline":
+            self._timeline_clear_selection(move_playhead_to=0.0)
+        elif self._active_tab_identity() == "articulation_lab":
+            self._reset_current_phoneme_source()
+        else:
+            self._preset_pure_a4()
+
+    def _sync_loop_buttons(self) -> None:
+        text = "🔁 Loop: On" if self.live_loop_enabled else "🔁 Loop"
+        for button in (self.loop_button, self.global_loop_button):
+            if button is None:
+                continue
+            button.blockSignals(True)
+            button.setChecked(self.live_loop_enabled)
+            button.setText(text)
+            button.setProperty("active", self.live_loop_enabled)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.blockSignals(False)
+
+
+    def _make_slider_value_spin(
+        self,
+        source: QSlider,
+        scale: float,
+        *,
+        suffix: str = "",
+        decimals: int = 2,
+        width: int = 86,
+    ) -> NoWheelDoubleSpinBox:
+        """Create a compact far-right numeric field synchronized to a slider."""
+        spin = NoWheelDoubleSpinBox()
+        spin.setObjectName("sliderValueField")
+        spin.setDecimals(decimals)
+        spin.setRange(source.minimum() / scale, source.maximum() / scale)
+        spin.setSingleStep(1.0 / scale)
+        spin.setSuffix(suffix)
+        spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        spin.setMinimumWidth(width)
+        spin.setMaximumWidth(max(width, 112))
+        spin.setValue(source.value() / scale)
+
+        def slider_to_spin(value: int) -> None:
+            spin.blockSignals(True)
+            spin.setValue(value / scale)
+            spin.blockSignals(False)
+
+        def spin_to_slider(value: float) -> None:
+            source.setValue(int(round(value * scale)))
+
+        source.valueChanged.connect(slider_to_spin)
+        spin.valueChanged.connect(spin_to_slider)
+        return spin
+
+    def _make_slider_preset_combo(
+        self,
+        source: QSlider,
+        scale: float,
+        presets: List[Tuple[str, float]],
+        *,
+        width: int = 94,
+    ) -> NoWheelComboBox:
+        """Create a compact preset picker that writes chosen human-unit values to a slider."""
+        combo = NoWheelComboBox()
+        combo.setObjectName("sliderPresetPicker")
+        combo.setMinimumWidth(width)
+        combo.setMaximumWidth(max(width, 128))
+        combo.addItem("Presets…", None)
+        for text, value in presets:
+            combo.addItem(text, float(value))
+        combo.currentIndexChanged.connect(
+            lambda _index, c=combo, s=source, sc=scale: s.setValue(int(round(float(c.currentData()) * sc))) if c.currentData() is not None else None
+        )
+        return combo
+
+    def _add_precise_slider_row(
+        self,
+        layout: QGridLayout,
+        row: int,
+        title: str,
+        symbolic_label: QLabel,
+        slider: QSlider,
+        scale: float,
+        *,
+        suffix: str = "",
+        decimals: int = 2,
+        presets: List[Tuple[str, float]] | None = None,
+    ) -> None:
+        """Add a lean two-line slider row with numeric entry anchored at the far right."""
+        title_label = QLabel(title)
+        value_spin = self._make_slider_value_spin(slider, scale, suffix=suffix, decimals=decimals)
+        symbolic_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(title_label, row, 0)
+        layout.addWidget(symbolic_label, row, 1)
+        layout.addWidget(value_spin, row + 1, 2)
+        layout.addWidget(slider, row + 1, 0, 1, 2)
+        if presets:
+            layout.addWidget(self._make_slider_preset_combo(slider, scale, presets), row, 2)
+
     def _build_ui(self) -> None:
         app_shell = QWidget()
         app_shell.setObjectName("appShell")
         app_layout = QVBoxLayout(app_shell)
         app_layout.setContentsMargins(12, 8, 12, 12)
-        app_layout.setSpacing(2)
+        app_layout.setSpacing(4)
         app_layout.addWidget(self._build_toy_title_banner())
+        app_layout.addWidget(self._build_global_control_panel())
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("mainTabs")
@@ -5793,13 +6074,13 @@ class WaveToyWindow(QMainWindow):
         body.addLayout(left, 7)
         body.addLayout(right, 3)
 
-        wave_box = self._toy_group("1. Mix Wave Shapes and Stereo Placement")
+        wave_box = self._toy_group("2. Mix Wave Shapes and Stereo Placement")
         wave_box.setMinimumWidth(620)
         wave_layout = QVBoxLayout(wave_box)
         wave_layout.setContentsMargins(12, 18, 12, 12)
         wave_layout.setSpacing(8)
 
-        def make_slider_cell(label: QLabel, slider: QSlider, caption: str) -> QWidget:
+        def make_slider_cell(label: QLabel, slider: QSlider, caption: str, scale: float, suffix: str, decimals: int, presets: List[Tuple[str, float]] | None = None) -> QWidget:
             cell = QWidget()
             cell.setObjectName("sliderCell")
             layout = QVBoxLayout(cell)
@@ -5809,12 +6090,19 @@ class WaveToyWindow(QMainWindow):
             title.setObjectName("controlCaption")
             title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             label.setObjectName("controlValue")
-            label.setMinimumWidth(72)
+            label.setMinimumWidth(64)
             label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            slider.setMinimumWidth(86)
+            slider.setMinimumWidth(104)
+            value_row = QHBoxLayout()
+            value_row.setContentsMargins(0, 0, 0, 0)
+            value_row.setSpacing(4)
+            value_row.addWidget(label, 1)
+            value_row.addWidget(self._make_slider_value_spin(slider, scale, suffix=suffix, decimals=decimals, width=74), 0, Qt.AlignRight)
             layout.addWidget(title)
-            layout.addWidget(label)
+            layout.addLayout(value_row)
             layout.addWidget(slider)
+            if presets:
+                layout.addWidget(self._make_slider_preset_combo(slider, scale, presets, width=90))
             return cell
 
         def make_pitch_cell(
@@ -6075,18 +6363,18 @@ class WaveToyWindow(QMainWindow):
                 "Envelope",
                 envelope_preview,
                 [
-                    make_slider_cell(start_label, start_slider, "Start"),
-                    make_slider_cell(end_label, end_slider, "End"),
-                    make_slider_cell(time_label, time_slider, "Time"),
+                    make_slider_cell(start_label, start_slider, "Start", DB_SLIDER_SCALE, " dB", 2, [("Off", -20.0), ("Soft", -12.0), ("Full", 0.0)]),
+                    make_slider_cell(end_label, end_slider, "End", DB_SLIDER_SCALE, " dB", 2, [("Off", -20.0), ("Soft", -12.0), ("Full", 0.0)]),
+                    make_slider_cell(time_label, time_slider, "Time", PERCENT_SLIDER_SCALE, "%", 2, [("Fast", 20.0), ("Mid", 50.0), ("Slow", 100.0)]),
                 ],
             )
             stereo_stage = make_stage(
                 "Stereo",
                 stereo_field_preview,
                 [
-                    make_slider_cell(pan_label, pan_slider, "Place"),
-                    make_slider_cell(width_label, width_slider, "Spread"),
-                    make_slider_cell(dance_label, dance_slider, "Dance"),
+                    make_slider_cell(pan_label, pan_slider, "Place", PERCENT_SLIDER_SCALE, "%", 2, [("Left", -75.0), ("Center", 0.0), ("Right", 75.0)]),
+                    make_slider_cell(width_label, width_slider, "Spread", PERCENT_SLIDER_SCALE, "%", 2, [("Narrow", 15.0), ("Medium", 50.0), ("Wide", 90.0)]),
+                    make_slider_cell(dance_label, dance_slider, "Dance", PERCENT_SLIDER_SCALE, "%", 2, [("Still", 0.0), ("Sway", 35.0), ("Dance", 80.0)]),
                 ],
             )
             output_stage = make_stage("Output", output_visual)
@@ -6113,15 +6401,14 @@ class WaveToyWindow(QMainWindow):
         self.clear_solo_button.clicked.connect(self._clear_solo)
         wave_layout.addWidget(self.clear_solo_button, 0, Qt.AlignRight)
 
-        left.addWidget(wave_box)
-
-        pitch_box = self._toy_group("2. Choose Pitch")
+        pitch_box = self._toy_group("1. Choose Pitch")
         pitch_box.setMinimumWidth(300)
         pitch_layout = QGridLayout(pitch_box)
         pitch_layout.setHorizontalSpacing(12)
         pitch_layout.setVerticalSpacing(10)
         pitch_layout.setColumnStretch(0, 1)
         pitch_layout.setColumnStretch(1, 2)
+        pitch_layout.setColumnStretch(2, 0)
 
         self.note_combo = NoWheelComboBox()
         self.note_combo.addItems(NOTE_NAMES)
@@ -6164,26 +6451,23 @@ class WaveToyWindow(QMainWindow):
         self.tuning_reference_spin.setToolTip("Reference pitch for A4. Default is 440 Hz.")
 
         pitch_layout.addWidget(QLabel("Note"), 0, 0)
-        pitch_layout.addWidget(self.note_combo, 0, 1)
-        pitch_layout.addWidget(QLabel("Voice Size"), 1, 0)
-        pitch_layout.addWidget(self.octave_label, 1, 1)
-        pitch_layout.addWidget(self.octave_slider, 2, 0, 1, 2)
-        pitch_layout.addWidget(QLabel("Tiny Wiggle"), 3, 0)
-        pitch_layout.addWidget(self.cents_label, 3, 1)
-        pitch_layout.addWidget(self.cents_slider, 4, 0, 1, 2)
+        pitch_layout.addWidget(self.note_combo, 0, 1, 1, 2)
+        self._add_precise_slider_row(pitch_layout, 1, "Voice Size", self.octave_label, self.octave_slider, OCTAVE_SLIDER_SCALE, suffix=" oct", decimals=2, presets=[("Low", 2.0), ("Middle", 4.0), ("High", 6.0)])
+        self._add_precise_slider_row(pitch_layout, 3, "Tiny Wiggle", self.cents_label, self.cents_slider, 100.0, suffix="¢", decimals=2, presets=[("Flat", -25.0), ("Center", 0.0), ("Sharp", 25.0)])
         tuning_title = QLabel("🎼 Tuning Playground")
         tuning_title.setObjectName("symbolHint")
-        pitch_layout.addWidget(tuning_title, 5, 0, 1, 2)
+        pitch_layout.addWidget(tuning_title, 5, 0, 1, 3)
         pitch_layout.addWidget(QLabel("🎼 Tuning Map"), 6, 0)
-        pitch_layout.addWidget(self.tuning_method_combo, 6, 1)
+        pitch_layout.addWidget(self.tuning_method_combo, 6, 1, 1, 2)
         pitch_layout.addWidget(QLabel("Home Note"), 7, 0)
-        pitch_layout.addWidget(self.tuning_root_combo, 7, 1)
+        pitch_layout.addWidget(self.tuning_root_combo, 7, 1, 1, 2)
         pitch_layout.addWidget(QLabel("A4 Sparkle"), 8, 0)
-        pitch_layout.addWidget(self.tuning_reference_spin, 8, 1)
-        pitch_layout.addWidget(self.base_pitch_label, 9, 0, 1, 2)
-        pitch_layout.addWidget(self.note_emotion_label, 10, 0, 1, 2)
+        pitch_layout.addWidget(self.tuning_reference_spin, 8, 1, 1, 2)
+        pitch_layout.addWidget(self.base_pitch_label, 9, 0, 1, 3)
+        pitch_layout.addWidget(self.note_emotion_label, 10, 0, 1, 3)
 
         left.addWidget(pitch_box)
+        left.addWidget(wave_box)
 
         explain_box = self._toy_group("What happened?")
         explain_box.setMinimumHeight(110)
@@ -6213,6 +6497,7 @@ class WaveToyWindow(QMainWindow):
         motion_layout.setVerticalSpacing(10)
         motion_layout.setColumnStretch(0, 1)
         motion_layout.setColumnStretch(1, 2)
+        motion_layout.setColumnStretch(2, 0)
 
         self.duration_slider = NoWheelSlider(Qt.Horizontal)
         self.duration_slider.setRange(int(TIMELINE_MIN_CLIP_SECONDS * SECONDS_SLIDER_SCALE), int(MAX_PREVIEW_SECONDS * SECONDS_SLIDER_SCALE))
@@ -6244,23 +6529,13 @@ class WaveToyWindow(QMainWindow):
         for key, label in CURVE_LABELS.items():
             self.curve_combo.addItem(label, key)
 
-        motion_layout.addWidget(QLabel("Clip Time"), 0, 0)
-        motion_layout.addWidget(self.duration_label, 0, 1)
-        motion_layout.addWidget(self.duration_slider, 1, 0, 1, 2)
-        motion_layout.addWidget(QLabel("Start Pitch"), 2, 0)
-        motion_layout.addWidget(self.pitch_start_label, 2, 1)
-        motion_layout.addWidget(self.pitch_start, 3, 0, 1, 2)
-        motion_layout.addWidget(QLabel("End Pitch"), 4, 0)
-        motion_layout.addWidget(self.pitch_end_label, 4, 1)
-        motion_layout.addWidget(self.pitch_end, 5, 0, 1, 2)
-        motion_layout.addWidget(QLabel("Start Wiggle"), 6, 0)
-        motion_layout.addWidget(self.loud_start_label, 6, 1)
-        motion_layout.addWidget(self.loud_start, 7, 0, 1, 2)
-        motion_layout.addWidget(QLabel("End Wiggle"), 8, 0)
-        motion_layout.addWidget(self.loud_end_label, 8, 1)
-        motion_layout.addWidget(self.loud_end, 9, 0, 1, 2)
+        self._add_precise_slider_row(motion_layout, 0, "Clip Time", self.duration_label, self.duration_slider, SECONDS_SLIDER_SCALE, suffix=" s", decimals=3, presets=[("0.25s", 0.25), ("1.5s", 1.5), ("4s", 4.0), ("8s", 8.0)])
+        self._add_precise_slider_row(motion_layout, 2, "Start Pitch", self.pitch_start_label, self.pitch_start, MIDI_SLIDER_SCALE, suffix=" MIDI", decimals=2, presets=[("C3", 48.0), ("A4", 69.0), ("C6", 84.0)])
+        self._add_precise_slider_row(motion_layout, 4, "End Pitch", self.pitch_end_label, self.pitch_end, MIDI_SLIDER_SCALE, suffix=" MIDI", decimals=2, presets=[("C3", 48.0), ("A4", 69.0), ("C6", 84.0)])
+        self._add_precise_slider_row(motion_layout, 6, "Start Wiggle", self.loud_start_label, self.loud_start, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, presets=[("Quiet", 15.0), ("Medium", 45.0), ("Full", 100.0)])
+        self._add_precise_slider_row(motion_layout, 8, "End Wiggle", self.loud_end_label, self.loud_end, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, presets=[("Quiet", 15.0), ("Medium", 45.0), ("Full", 100.0)])
         motion_layout.addWidget(QLabel("Change Style"), 10, 0)
-        motion_layout.addWidget(self.curve_combo, 10, 1)
+        motion_layout.addWidget(self.curve_combo, 10, 1, 1, 2)
 
         right.addWidget(motion_box)
 
@@ -6289,13 +6564,11 @@ class WaveToyWindow(QMainWindow):
         paul_layout.addWidget(self.modules_label, 0, 0, 1, 2)
         paul_layout.addWidget(self.paulstretch_enabled, 1, 0, 1, 2)
 
-        paul_layout.addWidget(QLabel("Stretch Amount"), 2, 0)
-        paul_layout.addWidget(self.paul_amount_label, 2, 1)
-        paul_layout.addWidget(self.paul_amount_slider, 3, 0, 1, 2)
-
-        paul_layout.addWidget(QLabel("Sound Evolution"), 4, 0)
-        paul_layout.addWidget(self.paul_evolution_label, 4, 1)
-        paul_layout.addWidget(self.paul_evolution_slider, 5, 0, 1, 2)
+        paul_layout.setColumnStretch(0, 1)
+        paul_layout.setColumnStretch(1, 2)
+        paul_layout.setColumnStretch(2, 0)
+        self._add_precise_slider_row(paul_layout, 2, "Stretch Amount", self.paul_amount_label, self.paul_amount_slider, PAULSTRETCH_SCALE, suffix="x", decimals=3, presets=[("Normal", 1.0), ("Drone", 4.0), ("Ambient", 12.0), ("Melt", 30.0)])
+        self._add_precise_slider_row(paul_layout, 4, "Sound Evolution", self.paul_evolution_label, self.paul_evolution_slider, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, presets=[("Gentle", 10.0), ("Shimmer", 35.0), ("Alien", 70.0), ("Chaos", 100.0)])
 
         right.addWidget(paul_box)
 
@@ -6306,6 +6579,7 @@ class WaveToyWindow(QMainWindow):
         stereo_layout.setVerticalSpacing(10)
         stereo_layout.setColumnStretch(0, 1)
         stereo_layout.setColumnStretch(1, 2)
+        stereo_layout.setColumnStretch(2, 0)
 
         self.pan_start_slider = self._make_percent_slider(-100, 100, 0)
         self.pan_end_slider = self._make_percent_slider(-100, 100, 0)
@@ -6324,22 +6598,12 @@ class WaveToyWindow(QMainWindow):
         global_stereo_hint.setObjectName("symbolHint")
         global_stereo_hint.setWordWrap(True)
 
-        stereo_layout.addWidget(global_stereo_hint, 0, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("Start Place"), 1, 0)
-        stereo_layout.addWidget(self.pan_start_label, 1, 1)
-        stereo_layout.addWidget(self.pan_start_slider, 2, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("End Place"), 3, 0)
-        stereo_layout.addWidget(self.pan_end_label, 3, 1)
-        stereo_layout.addWidget(self.pan_end_slider, 4, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("Ear Spread"), 5, 0)
-        stereo_layout.addWidget(self.width_label, 5, 1)
-        stereo_layout.addWidget(self.width_slider, 6, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("Ear Dance"), 7, 0)
-        stereo_layout.addWidget(self.auto_pan_depth_label, 7, 1)
-        stereo_layout.addWidget(self.auto_pan_depth_slider, 8, 0, 1, 2)
-        stereo_layout.addWidget(QLabel("Dance Speed"), 9, 0)
-        stereo_layout.addWidget(self.auto_pan_rate_label, 9, 1)
-        stereo_layout.addWidget(self.auto_pan_rate, 10, 0, 1, 2)
+        stereo_layout.addWidget(global_stereo_hint, 0, 0, 1, 3)
+        self._add_precise_slider_row(stereo_layout, 1, "Start Place", self.pan_start_label, self.pan_start_slider, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, presets=[("Left", -75.0), ("Center", 0.0), ("Right", 75.0)])
+        self._add_precise_slider_row(stereo_layout, 3, "End Place", self.pan_end_label, self.pan_end_slider, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, presets=[("Left", -75.0), ("Center", 0.0), ("Right", 75.0)])
+        self._add_precise_slider_row(stereo_layout, 5, "Ear Spread", self.width_label, self.width_slider, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, presets=[("Narrow", 15.0), ("Medium", 50.0), ("Wide", 90.0)])
+        self._add_precise_slider_row(stereo_layout, 7, "Ear Dance", self.auto_pan_depth_label, self.auto_pan_depth_slider, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, presets=[("Still", 0.0), ("Sway", 35.0), ("Dance", 80.0)])
+        self._add_precise_slider_row(stereo_layout, 9, "Dance Speed", self.auto_pan_rate_label, self.auto_pan_rate, RATE_SLIDER_SCALE, suffix=" Hz", decimals=3, presets=[("Slow", 0.25), ("Medium", 1.0), ("Fast", 4.0), ("Max", 8.0)])
 
         right.addWidget(stereo_box)
 
@@ -6371,15 +6635,18 @@ class WaveToyWindow(QMainWindow):
         controls.setSpacing(12)
         outer.addLayout(controls)
 
-        self.make_button = ToyButton("Play", "#5cdb95")
-        self.stop_button = ToyButton("Stop", "#ff6b6b")
-        self.save_button = ToyButton("Save Audio", "#ffd166")
-        self.load_button = ToyButton("Load Audio", "#b8f2e6")
+        self.make_button = ToyButton("▶ Play", "#5cdb95")
+        self.stop_button = ToyButton("■ Stop", "#ff6b6b")
+        self.loop_button = ToyButton("🔁 Loop", "#24d7ff")
+        self.loop_button.setCheckable(True)
+        self.save_button = ToyButton("💾 Save Audio", "#ffd166")
+        self.load_button = ToyButton("📂 Load Audio", "#b8f2e6")
         for button, width in (
-            (self.make_button, 160),
+            (self.make_button, 140),
             (self.stop_button, 110),
-            (self.save_button, 170),
-            (self.load_button, 160),
+            (self.loop_button, 120),
+            (self.save_button, 160),
+            (self.load_button, 150),
         ):
             button.setMinimumWidth(width)
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
@@ -6388,12 +6655,14 @@ class WaveToyWindow(QMainWindow):
 
         controls.addWidget(self.make_button, 2)
         controls.addWidget(self.stop_button, 1)
+        controls.addWidget(self.loop_button, 1)
         controls.addWidget(self.save_button, 2)
         controls.addWidget(self.load_button, 2)
         controls.addWidget(self.loop_status_label, 1)
 
         self.make_button.clicked.connect(self._play)
         self.stop_button.clicked.connect(self._stop)
+        self.loop_button.clicked.connect(self._toggle_live_loop)
         self.save_button.clicked.connect(self._save)
         self.load_button.clicked.connect(self._load_sound)
 
@@ -6512,8 +6781,8 @@ class WaveToyWindow(QMainWindow):
         loop_button = self._make_story_button("🔁", "Loop", "#b8f2e6", self._toggle_phoneme_loop)
         stop_button = self._make_story_button("⏹", "Stop", "#ff6b6b", self._stop_phoneme_preview)
         for button in (play_button, loop_button, stop_button):
-            button.setMinimumSize(QSize(92, 58))
-            button.setMaximumHeight(64)
+            button.setMinimumSize(QSize(104, 40))
+            button.setMaximumHeight(44)
         top.addWidget(self.articulation_name_label, 2)
         top.addWidget(self.articulation_ipa_label, 1)
         top.addWidget(play_button)
@@ -6544,8 +6813,8 @@ class WaveToyWindow(QMainWindow):
         self.articulation_source_badge_label.setObjectName("articulationIpaBadge")
         self.articulation_source_badge_label.setAlignment(Qt.AlignCenter)
         for button in (apply_wave_button, reset_wave_button):
-            button.setMinimumSize(QSize(120, 58))
-            button.setMaximumHeight(64)
+            button.setMinimumSize(QSize(144, 40))
+            button.setMaximumHeight(44)
         source_layout.addWidget(source_title)
         source_layout.addWidget(self.articulation_source_combo, 1)
         source_layout.addWidget(apply_wave_button)
@@ -6676,7 +6945,7 @@ class WaveToyWindow(QMainWindow):
             row.setSpacing(8)
             for icon, button_label, color, callback, height in actions:
                 button = self._make_story_button(icon, button_label, color, callback)
-                button.setMinimumHeight(height)
+                button.setMinimumHeight(min(max(height, WaveToySizing.BUTTON_HEIGHT), 44))
                 row.addWidget(button)
             chain_layout.addLayout(row)
         self.articulation_word_status_label = QLabel("Create Word saves a named asset to Speech Assets without changing the editable chain.")
@@ -6882,10 +7151,27 @@ class WaveToyWindow(QMainWindow):
         slider.valueChanged.connect(lambda _value, slider_key=key: self._articulation_slider_changed(slider_key))
         self.articulation_sliders[key] = slider
         self.articulation_value_labels[key] = value_label
+        preset_map = {
+            "voice_pitch": [("Low", 110.0), ("Natural", 220.0), ("High", 440.0), ("Bright", 660.0)],
+            "air_pressure": [("Gentle", 25.0), ("Normal", 45.0), ("Strong", 75.0), ("Max", 100.0)],
+            "closure": [("Open", 0.0), ("Narrow", 35.0), ("Closed", 100.0)],
+            "burst_strength": [("None", 0.0), ("Soft", 30.0), ("Sharp", 80.0)],
+            "teeth_gap": [("Tight", 10.0), ("Normal", 50.0), ("Wide", 90.0)],
+            "mouth_open": [("Closed", 0.0), ("Mid", 50.0), ("Open", 95.0)],
+            "tongue_height": [("Low", 20.0), ("Mid", 50.0), ("High", 85.0)],
+            "tongue_frontness": [("Back", 20.0), ("Central", 50.0), ("Front", 85.0)],
+            "lip_rounding": [("Flat", 0.0), ("Soft", 35.0), ("Round", 85.0)],
+            "voice_strength": [("Soft", 25.0), ("Natural", 65.0), ("Strong", 95.0)],
+            "nasal_open": [("Closed", 0.0), ("Blend", 35.0), ("Nasal", 85.0)],
+        }
+        suffix = " Hz" if key == "voice_pitch" else "%"
+        value_spin = self._make_slider_value_spin(slider, 1.0, suffix=suffix, decimals=0, width=72)
         layout.addWidget(name)
         layout.addWidget(low)
         layout.addWidget(slider, 1)
         layout.addWidget(high)
+        layout.addWidget(self._make_slider_preset_combo(slider, 1.0, preset_map.get(key, []), width=88))
+        layout.addWidget(value_spin)
         layout.addWidget(value_label)
         return row
 
@@ -8605,26 +8891,39 @@ class WaveToyWindow(QMainWindow):
         self._refresh_phoneme_cards()
 
     def _make_story_button(self, icon: str, label: str, color: str, callback) -> QPushButton:
-        button = QPushButton(f"{icon} {label}")
+        button = QPushButton(f"{icon}  {label}")
         button.setObjectName("storyTransportButton")
+        button.setProperty("accent", color)
         button.setMinimumSize(QSize(108, WaveToySizing.BUTTON_HEIGHT))
         button.setCursor(Qt.PointingHandCursor)
         button.setToolTip(label)
         button.setStyleSheet(
             f"""
             QPushButton#storyTransportButton {{
-                background: rgba(255, 255, 255, 0.14);
-                color: #e8f3ff;
-                border: 1px solid rgba(180, 220, 255, 0.26);
-                border-left: 3px solid {color};
+                background: rgba(6, 18, 32, 0.88);
+                color: #f7fbff;
+                border: 1px solid rgba(190, 232, 255, 0.62);
+                border-left: 4px solid {color};
                 border-radius: 8px;
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 900;
-                min-height: 34px;
-                padding: 4px 8px;
+                min-height: 36px;
+                padding: 5px 10px;
+                text-align: left;
+            }}
+            QPushButton#storyTransportButton:hover {{
+                background: rgba(13, 37, 58, 0.96);
+                border-color: rgba(36, 215, 255, 0.95);
             }}
             QPushButton#storyTransportButton:pressed {{
-                padding-top: 6px;
+                background: rgba(5, 12, 23, 1.0);
+                padding-top: 7px;
+            }}
+            QPushButton#storyTransportButton:disabled {{
+                background: rgba(56, 68, 82, 0.72);
+                color: #b7c9d8;
+                border-color: rgba(185, 199, 212, 0.42);
+                border-left-color: #7d8b98;
             }}
             """
         )
@@ -9288,10 +9587,10 @@ class WaveToyWindow(QMainWindow):
         self.timeline_snap_checkbox.setChecked(self.timeline_snap_enabled)
         self.timeline_snap_checkbox.stateChanged.connect(self._timeline_snap_changed)
         edit_layout.addWidget(self.timeline_snap_checkbox)
-        self.timeline_snap_combo = QComboBox()
-        for value in (0.005, 0.01, 0.02, 0.05, 0.10, 0.25, 0.50, 1.00):
+        self.timeline_snap_combo = NoWheelComboBox()
+        for value in (0.001, 0.002, 0.005, 0.010, 0.020, 0.025, 0.050, 0.100, 0.125, 0.250, 0.500, 1.000):
             self.timeline_snap_combo.addItem(f"{value:.3f}s" if value < 0.1 else f"{value:.2f}s", value)
-        self.timeline_snap_combo.setCurrentIndex(3)
+        self.timeline_snap_combo.setCurrentIndex(6)
         self.timeline_snap_combo.currentIndexChanged.connect(self._timeline_snap_changed)
         edit_layout.addWidget(self.timeline_snap_combo)
         quality_label = QLabel("Stretch Quality")
@@ -11541,20 +11840,32 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QPushButton#phonemeCardPrimaryAction, QPushButton#phonemeCardDangerAction, QPushButton#phonemeCardSecondaryAction {
-                border-radius: 16px;
+                border-radius: 10px;
                 font-size: 14px;
                 font-weight: 900;
-                padding: 8px 10px;
+                padding: 7px 10px;
                 min-height: 36px;
+                color: #f7fbff;
+                border: 1px solid rgba(190, 232, 255, 0.62);
+                text-align: left;
             }
             QPushButton#phonemeCardPrimaryAction {
-                background: #5cdb95;
+                background: rgba(9, 96, 68, 0.94);
+                border-left: 4px solid #5cdb95;
             }
             QPushButton#phonemeCardDangerAction {
-                background: #ffadad;
+                background: rgba(104, 28, 36, 0.94);
+                border-left: 4px solid #ff6b6b;
             }
             QPushButton#phonemeCardSecondaryAction {
-                background: #eefbff;
+                background: rgba(7, 19, 34, 0.90);
+                border-left: 4px solid #24d7ff;
+            }
+            QPushButton#phonemeCardPrimaryAction:disabled, QPushButton#phonemeCardDangerAction:disabled, QPushButton#phonemeCardSecondaryAction:disabled {
+                background: rgba(62, 74, 88, 0.72);
+                color: #b7c9d8;
+                border-color: rgba(185, 199, 212, 0.42);
+                border-left-color: #7d8b98;
             }
             QPushButton#articulationPresetButton {
                 border-radius: 18px;
@@ -11671,17 +11982,21 @@ class WaveToyWindow(QMainWindow):
                 padding: 6px 9px;
             }
             QPushButton#phonemeRailButton {
-                background: #ffffff;
-                border: 1px solid rgba(0, 0, 0, 0.12);
-                border-radius: 18px;
-                color: #263238;
-                font-size: 14px;
+                background: rgba(7, 19, 34, 0.90);
+                border: 1px solid rgba(190, 232, 255, 0.62);
+                border-radius: 12px;
+                color: #f7fbff;
+                font-size: 18px;
                 font-weight: 900;
                 padding: 4px;
             }
             QPushButton#phonemeRailButton:checked {
-                background: #ffd166;
-                border: 1px solid #ff4fa3;
+                background: rgba(20, 168, 212, 0.42);
+                border: 2px solid #24d7ff;
+            }
+            QPushButton#phonemeRailButton:disabled {
+                background: rgba(62, 74, 88, 0.72);
+                color: #b7c9d8;
             }
             QWidget#phonemeDrawerPage, QWidget#phonemeDrawerBody {
                 background: transparent;
@@ -11731,18 +12046,23 @@ class WaveToyWindow(QMainWindow):
                 background: rgba(255, 255, 255, 0.72);
             }
             QPushButton {
-                min-height: 32px;
+                min-height: 34px;
                 border-radius: 8px;
-                border: 1px solid rgba(180, 220, 255, 0.24);
-                background: rgba(255, 255, 255, 0.16);
-                color: #dcecff;
-                font-size: 13px;
-                font-weight: 800;
-                padding: 4px 8px;
+                border: 1px solid rgba(190, 232, 255, 0.58);
+                background: rgba(7, 19, 34, 0.88);
+                color: #f7fbff;
+                font-size: 14px;
+                font-weight: 900;
+                padding: 5px 10px;
             }
             QPushButton:hover {
-                background: rgba(36, 215, 255, 0.18);
-                border-color: rgba(36, 215, 255, 0.55);
+                background: rgba(13, 37, 58, 0.98);
+                border-color: rgba(36, 215, 255, 0.92);
+            }
+            QPushButton:disabled {
+                background: rgba(62, 74, 88, 0.72);
+                color: #b7c9d8;
+                border-color: rgba(185, 199, 212, 0.42);
             }
             QWidget#collapsibleSection {
                 background: transparent;
@@ -12367,12 +12687,15 @@ class WaveToyWindow(QMainWindow):
         layout.addWidget(QLabel("Shape"), 0, 1); layout.addWidget(shape_combo, 0, 2)
         layout.addWidget(mute_button, 0, 3); layout.addWidget(solo_button, 0, 4); layout.addWidget(remove_button, 0, 5)
         layout.addWidget(shape_preview, 1, 0)
-        for col, (caption, label, control) in enumerate((("Start", self.wave_start_labels[wave_id], start_slider), ("End", self.wave_end_labels[wave_id], end_slider), ("Time", self.wave_time_labels[wave_id], time_slider)), start=1):
-            box = QWidget(); box_layout = QVBoxLayout(box); box_layout.setContentsMargins(0, 0, 0, 0); box_layout.addWidget(QLabel(caption)); box_layout.addWidget(label); box_layout.addWidget(control); layout.addWidget(box, 1, col)
+        envelope_specs = (("Start", self.wave_start_labels[wave_id], start_slider, DB_SLIDER_SCALE, " dB"), ("End", self.wave_end_labels[wave_id], end_slider, DB_SLIDER_SCALE, " dB"), ("Time", self.wave_time_labels[wave_id], time_slider, PERCENT_SLIDER_SCALE, "%"))
+        for col, (caption, label, control, scale, suffix) in enumerate(envelope_specs, start=1):
+            box = QWidget(); box_layout = QVBoxLayout(box); box_layout.setContentsMargins(0, 0, 0, 0)
+            value_row = QHBoxLayout(); value_row.setContentsMargins(0, 0, 0, 0); value_row.addWidget(label, 1); value_row.addWidget(self._make_slider_value_spin(control, scale, suffix=suffix, decimals=2, width=74), 0, Qt.AlignRight)
+            box_layout.addWidget(QLabel(caption)); box_layout.addLayout(value_row); box_layout.addWidget(control); layout.addWidget(box, 1, col)
         pitch_box = QWidget(); pitch_layout = QVBoxLayout(pitch_box); pitch_layout.setContentsMargins(0, 0, 0, 0); pitch_layout.addWidget(pitch_label); pitch_layout.addWidget(follow_pitch); pitch_layout.addWidget(note_button); pitch_layout.addWidget(octave_spin); pitch_layout.addWidget(cents_slider); layout.addWidget(pitch_box, 1, 4)
         stereo_box = QWidget(); stereo_layout = QGridLayout(stereo_box); stereo_layout.setContentsMargins(0, 0, 0, 0)
         for row, (caption, label, control) in enumerate((("Pan", self.wave_pan_labels[wave_id], pan_slider), ("Width", self.wave_width_labels[wave_id], width_slider), ("Auto-pan", self.wave_dance_labels[wave_id], dance_slider))):
-            stereo_layout.addWidget(QLabel(caption), row, 0); stereo_layout.addWidget(label, row, 1); stereo_layout.addWidget(control, row, 2)
+            stereo_layout.addWidget(QLabel(caption), row, 0); stereo_layout.addWidget(label, row, 1); stereo_layout.addWidget(control, row, 2); stereo_layout.addWidget(self._make_slider_value_spin(control, PERCENT_SLIDER_SCALE, suffix="%", decimals=2, width=74), row, 3)
         layout.addWidget(stereo_box, 1, 5)
         row_index = max(0, self.wave_rows_layout.count() - 2)
         self.wave_rows_layout.insertWidget(row_index, card)
@@ -12780,6 +13103,7 @@ class WaveToyWindow(QMainWindow):
 
         self.live_loop_enabled = True
         self.loop_status_label.setText("Loop: On")
+        self._sync_loop_buttons()
         self._preview_stop_timer.stop()
         self._set_preview_motion(True)
         self._start_playback_tracking(len(self.current_audio), SAMPLE_RATE)
@@ -12798,6 +13122,7 @@ class WaveToyWindow(QMainWindow):
             except Exception:
                 pass
         self.loop_status_label.setText("Loop: Off")
+        self._sync_loop_buttons()
 
     def _live_loop_tick(self) -> None:
         """Timer callback: rebuild the sound and play the next loop."""
@@ -13041,11 +13366,18 @@ class WaveToyWindow(QMainWindow):
         except Exception:
             numeric = minimum
 
-        # If the stored number is in human units, scale it. If already raw slider units, keep it.
+        # If the stored number is in human units, scale it. If it looks like an
+        # older coarse raw slider value, promote it to the current finer scale.
         if minimum <= numeric <= maximum:
             numeric *= scale
+        elif scale == PERCENT_SLIDER_SCALE and max(abs(minimum), abs(maximum)) <= 100 and abs(numeric) <= 1000:
+            numeric *= PERCENT_SLIDER_SCALE / 10.0
+        elif scale == RATE_SLIDER_SCALE / 10 and abs(numeric) <= 800:
+            numeric *= RATE_SLIDER_SCALE / 100.0
+        elif scale == PAULSTRETCH_SCALE / 10 and abs(numeric) <= 3000:
+            numeric *= PAULSTRETCH_SCALE / 100.0
 
-        return int(round(numeric))
+        return int(round(np.clip(numeric, minimum * scale, maximum * scale)))
 
     def _apply_recipe(self, recipe: Dict[str, object]) -> None:
         ui = recipe.get("ui", {})
