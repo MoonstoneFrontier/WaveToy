@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,7 @@ from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QS
 from PySide6.QtGui import QAction, QColor, QDrag, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractButton,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -5557,6 +5559,8 @@ class WaveToyWindow(QMainWindow):
         self.playback_sample_rate = SAMPLE_RATE
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self._playback_timer_tick)
+        self.playback_rate_limit_seconds = 1.0
+        self.last_playback_activation_monotonic = 0.0
 
         self.timeline_clips: List[TimelineClip] = []
         self.timeline_lane_names = ["Melody", "Rhythm", "Atmosphere", "Effects"]
@@ -5581,6 +5585,7 @@ class WaveToyWindow(QMainWindow):
         self.timeline_last_mix_path: Path | None = None
         self.timeline_mix_dirty = True
         self.timeline_playback_started_at: float | None = None
+        self.timeline_playback_offset_seconds = 0.0
         self.timeline_play_timer = QTimer(self)
         self.timeline_play_timer.timeout.connect(self._timeline_playback_tick)
         self.timeline_fallback_process: subprocess.Popen | None = None
@@ -5698,10 +5703,12 @@ class WaveToyWindow(QMainWindow):
         """Install application-level shortcuts so focused sliders/buttons do not swallow Space."""
         play_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
         play_shortcut.setContext(Qt.ApplicationShortcut)
-        play_shortcut.activated.connect(self._play)
+        play_shortcut.setAutoRepeat(False)
+        play_shortcut.activated.connect(self._handle_spacebar_playback)
 
         loop_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_Space), self)
         loop_shortcut.setContext(Qt.ApplicationShortcut)
+        loop_shortcut.setAutoRepeat(False)
         loop_shortcut.activated.connect(self._toggle_live_loop)
 
     def _build_toy_title_banner(self) -> QWidget:
@@ -5754,6 +5761,7 @@ class WaveToyWindow(QMainWindow):
         self.setCentralWidget(app_shell)
 
         scroll = WaveToyScrollArea(scroll_speed=1.05)
+        scroll.setObjectName("classicControlsTab")
         self.tabs.addTab(scroll, "Classic Controls")
 
         root = QWidget()
@@ -7482,6 +7490,8 @@ class WaveToyWindow(QMainWindow):
         self._refresh_articulation_chain_cards()
 
     def _play_chain_item(self, index: int) -> None:
+        if not self._can_start_playback():
+            return
         if index < 0 or index >= len(self.articulation_chain_items):
             return
         self._play_audio_array(self._render_articulation_with_source(self.articulation_chain_items[index].phoneme_for_render()))
@@ -7700,6 +7710,8 @@ class WaveToyWindow(QMainWindow):
 
     def _play_articulation_motion(self, checked: bool = False) -> None:
         del checked
+        if not self._can_start_playback():
+            return
         audio = self._current_gapless_word_audio()
         if audio.size == 0:
             return
@@ -8280,6 +8292,8 @@ class WaveToyWindow(QMainWindow):
 
     def _play_articulation_word(self, checked: bool = False) -> None:
         del checked
+        if not self._can_start_playback():
+            return
         if self.articulation_word_render_audio.size == 0:
             audio = self._render_word_audio_for_current_chain()
             if audio.size == 0:
@@ -8339,6 +8353,8 @@ class WaveToyWindow(QMainWindow):
 
     def _play_articulation_chain(self, checked: bool = False) -> None:
         del checked
+        if not self._can_start_playback():
+            return
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Articulation Chain", "Add at least one phoneme to the chain first.")
             return
@@ -8418,6 +8434,8 @@ class WaveToyWindow(QMainWindow):
 
     def _play_phoneme_preview(self, checked: bool = False) -> None:
         del checked
+        if not self._can_start_playback():
+            return
         self.current_phoneme = self._phoneme_from_articulation_ui()
         self.phoneme_preview_audio = self._render_articulation_with_source(self.current_phoneme)
         self._play_audio_array(self.phoneme_preview_audio)
@@ -8550,6 +8568,8 @@ class WaveToyWindow(QMainWindow):
         return card
 
     def _play_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+        if not self._can_start_playback():
+            return
         self._play_audio_array(self._render_articulation_with_source(phoneme))
 
     def _load_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
@@ -9619,6 +9639,8 @@ class WaveToyWindow(QMainWindow):
         return None
 
     def _timeline_preview_speech_item(self, item_id: int | None = None) -> None:
+        if not self._can_start_playback():
+            return
         item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
         if item is None:
             QMessageBox.information(self, "Speech Assets", "Select a speech card to preview.")
@@ -10312,18 +10334,27 @@ class WaveToyWindow(QMainWindow):
         return self.timeline_last_mix
 
     def _timeline_play_story(self, checked: bool = False) -> None:
+        if not self._can_start_playback():
+            return
         self._timeline_debug("Timeline play clicked")
         mix = self._timeline_render_mix(checked=False)
         if mix.size == 0:
             return
-        self.timeline_playhead_seconds = 0.0
+        duration = len(mix) / SAMPLE_RATE
+        self.timeline_playback_offset_seconds = float(np.clip(self.timeline_playhead_seconds, 0.0, max(0.0, duration)))
+        start_sample = min(len(mix), max(0, int(round(self.timeline_playback_offset_seconds * SAMPLE_RATE))))
+        playback_mix = mix[start_sample:]
+        if playback_mix.size == 0:
+            self.timeline_playhead_seconds = 0.0
+            self.timeline_playback_offset_seconds = 0.0
+            playback_mix = mix
         self.timeline_playback_started_at = time.monotonic()
         self.timeline_play_timer.start(33)
         if self.timeline_canvas is not None:
             self.timeline_canvas.update()
         if sd is None:
             self._timeline_debug("Playback fallback selected: sounddevice is not installed")
-            ok, message = self._timeline_play_with_system_player(mix)
+            ok, message = self._timeline_play_with_system_player(playback_mix)
             if ok:
                 QMessageBox.information(self, "Timeline playback fallback", message)
             else:
@@ -10331,7 +10362,7 @@ class WaveToyWindow(QMainWindow):
             return
         try:
             sd.stop()
-            sd.play(mix, SAMPLE_RATE, blocking=False)
+            sd.play(playback_mix, SAMPLE_RATE, blocking=False)
         except Exception as exc:
             self._timeline_debug(f"Playback failed: {exc}")
             QMessageBox.warning(self, "Playback is not available", f"Timeline mix was rendered, but playback failed. Export still works.\n\nDetails: {exc}")
@@ -10390,6 +10421,7 @@ class WaveToyWindow(QMainWindow):
         self._timeline_debug("Stop clicked")
         self.timeline_play_timer.stop()
         self.timeline_playback_started_at = None
+        self.timeline_playback_offset_seconds = 0.0
         if sd is not None:
             try:
                 sd.stop()
@@ -10411,11 +10443,12 @@ class WaveToyWindow(QMainWindow):
             return
         elapsed = time.monotonic() - self.timeline_playback_started_at
         duration = len(self.timeline_last_mix) / SAMPLE_RATE if self.timeline_last_mix.size else self.timeline_duration_seconds
-        self.timeline_playhead_seconds = min(max(0.0, elapsed), max(0.0, duration))
+        self.timeline_playhead_seconds = min(max(0.0, self.timeline_playback_offset_seconds + elapsed), max(0.0, duration))
         self._timeline_update_inspector()
         if self.timeline_canvas is not None:
             self.timeline_canvas.update()
-        if duration > 0 and elapsed >= duration:
+        remaining = max(0.0, duration - self.timeline_playback_offset_seconds)
+        if duration > 0 and elapsed >= remaining:
             self.timeline_play_timer.stop()
             self.timeline_playback_started_at = None
 
@@ -12523,13 +12556,125 @@ class WaveToyWindow(QMainWindow):
                 f"Grown-up words: waveform, frequency, decibels, amplitude envelope, stereo field."
             )
 
+    def _show_non_modal_status(self, message: str, timeout_ms: int = 2500) -> None:
+        """Show concise, non-modal feedback in the best available status surface."""
+        if self.statusBar() is not None:
+            self.statusBar().showMessage(message, timeout_ms)
+        for label_name in ("timeline_status_label", "articulation_word_status_label", "graphical_status_label"):
+            label = getattr(self, label_name, None)
+            if label is not None and label.isVisible():
+                label.setText(message)
+                break
+
+    def _can_start_playback(self, *, show_status: bool = True) -> bool:
+        """Global playback activation gate; Stop/cancel paths deliberately bypass this."""
+        now = time.monotonic()
+        elapsed = now - self.last_playback_activation_monotonic
+        if elapsed < self.playback_rate_limit_seconds:
+            if show_status:
+                self._show_non_modal_status("Playback is rate-limited. Try again in a moment.")
+            return False
+        self.last_playback_activation_monotonic = now
+        return True
+
+    def _active_tab_identity(self) -> str:
+        """Return a stable-ish tab identity, preferring objectName over display text."""
+        if self.tabs is None:
+            return "classic_controls"
+        widget = self.tabs.currentWidget()
+        object_name = widget.objectName() if widget is not None else ""
+        if object_name:
+            tab_by_object = {
+                "playTab": "synthesis",
+                "classicControlsTab": "classic_controls",
+                "waveExplorerTab": "wave_explorer",
+                "articulationLabTab": "articulation_lab",
+                "graphicalEditorTab": "graphical_editor",
+                "libraryTab": "library",
+                "timelineStoryboardTab": "timeline",
+            }
+            if object_name in tab_by_object:
+                return tab_by_object[object_name]
+        label = self.tabs.tabText(self.tabs.currentIndex()).lower()
+        normalized = "_".join(part for part in re.sub(r"[^a-z0-9]+", " ", label).split() if part)
+        return {
+            "synthesis": "synthesis",
+            "classic_controls": "classic_controls",
+            "wave_explorer": "wave_explorer",
+            "articulation_lab": "articulation_lab",
+            "graphical_editor": "graphical_editor",
+            "library": "library",
+            "timeline": "timeline",
+        }.get(normalized, normalized or "classic_controls")
+
+    def _handle_spacebar_playback(self) -> None:
+        """Route Spacebar playback to the final audio product for the active workspace."""
+        focused_widget = QApplication.focusWidget()
+        if isinstance(focused_widget, QAbstractButton):
+            focused_widget.clearFocus()
+        tab_identity = self._active_tab_identity()
+        if tab_identity in {"synthesis", "classic_controls"}:
+            self._play()
+        elif tab_identity == "timeline":
+            self._timeline_play_story()
+        elif tab_identity == "articulation_lab":
+            self._play_articulation_context()
+        elif tab_identity == "library":
+            self._play_library_context()
+        elif tab_identity == "wave_explorer":
+            self._play_wave_explorer_context()
+        elif tab_identity == "graphical_editor":
+            self._play_graphical_editor_context()
+        else:
+            self._play()
+
+    def _play_wave_explorer_context(self) -> None:
+        """TODO: route to a dedicated Wave Explorer workspace render when one is introduced."""
+        self._play()
+
+    def _play_graphical_editor_context(self) -> None:
+        """TODO: route selected graphical sections/layers before falling back to full synthesis."""
+        self._play()
+
+    def _play_articulation_context(self) -> None:
+        """Play the current articulation product, preferring word/chain focus over a single phoneme."""
+        focused_widget = QApplication.focusWidget()
+        if self.articulation_chain_items and focused_widget is not None:
+            chain_widgets = [self.articulation_chain_widget, self.articulation_timeline_canvas, self.articulation_timeline_scroll]
+            if any(widget is not None and (focused_widget is widget or widget.isAncestorOf(focused_widget)) for widget in chain_widgets):
+                self._play_articulation_timeline_context()
+                return
+        self._play_phoneme_preview()
+
+    def _play_articulation_timeline_context(self) -> None:
+        """Play the current chain's final word render when available, then fall back to chain playback."""
+        if self.articulation_word_render_audio.size:
+            self._play_articulation_word()
+        elif self.articulation_chain_items:
+            self._play_articulation_chain()
+        else:
+            self._play_phoneme_preview()
+
+    def _play_library_context(self) -> None:
+        """Play the selected Speech Asset; Audio Asset-specific routing can be added later."""
+        if self.timeline_selected_speech_item_id is not None:
+            self._timeline_preview_speech_item(self.timeline_selected_speech_item_id)
+            return
+        item = self._timeline_palette_item_by_id(self.timeline_selected_palette_item_id)
+        if item is not None:
+            if not self._can_start_playback():
+                return
+            self._play_audio_array(item.audio_data)
+            return
+        self._show_non_modal_status("Select a Speech Asset or Audio Asset to preview.")
+
     def keyPressEvent(self, event) -> None:
         """Fallback keyboard handler. QShortcut handles this more reliably."""
         if event.key() == Qt.Key_Space:
             if event.modifiers() & Qt.ShiftModifier:
                 self._toggle_live_loop()
             else:
-                self._play()
+                self._handle_spacebar_playback()
             event.accept()
             return
 
@@ -12537,6 +12682,8 @@ class WaveToyWindow(QMainWindow):
 
     def _play(self) -> None:
         """Play the current sound once."""
+        if not self._can_start_playback():
+            return
         self._generate()
         self._play_current_audio_once()
         self._start_playback_tracking(len(self.current_audio), SAMPLE_RATE)
@@ -12627,6 +12774,8 @@ class WaveToyWindow(QMainWindow):
 
         if sd is None:
             self._show_playback_warning("Live loop mode requires sounddevice. Run: pip install sounddevice")
+            return
+        if not self._can_start_playback():
             return
 
         self.live_loop_enabled = True
