@@ -201,9 +201,10 @@ ARTICULATION_DEFAULT_TRANSITION_MS = 35
 ARTICULATION_MOTION_FRAME_MS = 5
 ARTICULATION_MIN_WORD_CROSSFADE_MS = 12
 ARTICULATION_DEFAULT_WORD_CROSSFADE_MS = 24
+ARTICULATION_WORD_RENDER_PLAIN = "Plain"
 ARTICULATION_WORD_RENDER_CLIP_CROSSFADE = "Clip Crossfade"
 ARTICULATION_WORD_RENDER_CONTINUOUS = "Continuous Mouth Motion"
-ARTICULATION_WORD_RENDER_MODES = (ARTICULATION_WORD_RENDER_CLIP_CROSSFADE, ARTICULATION_WORD_RENDER_CONTINUOUS)
+ARTICULATION_WORD_RENDER_MODES = (ARTICULATION_WORD_RENDER_PLAIN, ARTICULATION_WORD_RENDER_CLIP_CROSSFADE, ARTICULATION_WORD_RENDER_CONTINUOUS)
 ARTICULATION_TRANSITION_CURVES = ("Linear", "Smoothstep", "Ease In", "Ease Out", "Ease In Out", "Sigmoid")
 ARTICULATION_DEFAULT_TRANSITION_CURVE = "Smoothstep"
 ARTICULATION_ENVELOPE_TRACKS = (
@@ -5684,6 +5685,8 @@ class WaveToyWindow(QMainWindow):
         self.timeline_play_timer.timeout.connect(self._timeline_playback_tick)
         self.timeline_fallback_process: subprocess.Popen | None = None
         self.timeline_fallback_temp_path: Path | None = None
+        self.fallback_process: subprocess.Popen | None = None
+        self.fallback_temp_path: Path | None = None
         self.timeline_canvas: TimelineCanvas | None = None
         self.timeline_status_label: QLabel | None = None
         self.timeline_inspector_label: QLabel | None = None
@@ -5804,7 +5807,7 @@ class WaveToyWindow(QMainWindow):
         loop_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_Space), self)
         loop_shortcut.setContext(Qt.ApplicationShortcut)
         loop_shortcut.setAutoRepeat(False)
-        loop_shortcut.activated.connect(self._toggle_live_loop)
+        loop_shortcut.activated.connect(self._global_loop)
 
     def _build_toy_title_banner(self) -> QWidget:
         """Create the compact in-app WaveToy title banner while leaving native chrome alone."""
@@ -5882,54 +5885,63 @@ class WaveToyWindow(QMainWindow):
 
     def _global_stop(self, checked: bool = False) -> None:
         del checked
-        tab_identity = self._active_tab_identity()
-        if tab_identity == "timeline":
-            self._timeline_stop_story()
-        elif tab_identity == "articulation_lab":
-            self._stop_phoneme_preview()
-            self._stop_articulation_motion()
-        else:
-            self._stop()
+        self._stop()
 
     def _global_loop(self, checked: bool = False) -> None:
         del checked
         tab_identity = self._active_tab_identity()
         if tab_identity == "articulation_lab":
             self._toggle_phoneme_loop()
-        else:
+        elif tab_identity == "articulation_timeline":
+            self._loop_articulation_motion()
+        elif tab_identity in {"synthesis", "classic_controls", "wave_explorer", "graphical_editor"}:
             self._toggle_live_loop()
+        else:
+            self._show_non_modal_status("Loop is unavailable for this workspace until context looping is rebuilt.")
+            self._sync_loop_buttons()
 
     def _global_save_export(self, checked: bool = False) -> None:
         del checked
-        if self._active_tab_identity() == "timeline":
+        tab_identity = self._active_tab_identity()
+        if tab_identity == "timeline":
             self._timeline_export_last_mix()
-        elif self._active_tab_identity() == "articulation_lab":
+        elif tab_identity == "articulation_timeline":
             self._export_articulation_word()
+        elif tab_identity == "articulation_lab":
+            self._save_current_phoneme()
         else:
             self._save()
 
     def _global_add_to_timeline(self, checked: bool = False) -> None:
         del checked
-        if self._active_tab_identity() == "articulation_lab":
-            self._send_current_phoneme_to_timeline()
+        tab_identity = self._active_tab_identity()
+        if tab_identity == "articulation_lab":
+            self._add_current_phoneme_to_chain()
+            self._show_named_tab("Articulation Timeline")
+        elif tab_identity == "articulation_timeline":
+            self._send_articulation_word_to_timeline()
         else:
             self._drop_story_sound()
             self._show_named_tab("Timeline")
 
     def _global_render_create(self, checked: bool = False) -> None:
         del checked
-        if self._active_tab_identity() == "timeline":
+        tab_identity = self._active_tab_identity()
+        if tab_identity == "timeline":
             self._timeline_render_mix()
-        elif self._active_tab_identity() == "articulation_lab":
+        elif tab_identity == "articulation_timeline":
             self._create_articulation_word()
+        elif tab_identity == "articulation_lab":
+            self._save_current_phoneme()
         else:
             self._generate(update_message=True)
 
     def _global_reset_context(self, checked: bool = False) -> None:
         del checked
-        if self._active_tab_identity() == "timeline":
+        tab_identity = self._active_tab_identity()
+        if tab_identity == "timeline":
             self._timeline_clear_selection(move_playhead_to=0.0)
-        elif self._active_tab_identity() == "articulation_lab":
+        elif tab_identity in {"articulation_lab", "articulation_timeline"}:
             self._reset_current_phoneme_source()
         else:
             self._preset_pure_a4()
@@ -6723,6 +6735,7 @@ class WaveToyWindow(QMainWindow):
         self._build_wave_explorer_tab()
         self._build_play_tab()
         self._build_articulation_tab()
+        self._build_articulation_timeline_tab()
         self._build_graphical_editor_tab()
         self._build_timeline_tab()
         self._build_library_tab()
@@ -6764,7 +6777,7 @@ class WaveToyWindow(QMainWindow):
         left.setSpacing(10)
         main.addLayout(left, 6)
 
-        explorer = self._toy_group("Vocal Explorer")
+        explorer = self._toy_group("Vocal Tract Preview")
         explorer.setMinimumHeight(500)
         explorer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         explorer_layout = QVBoxLayout(explorer)
@@ -6777,9 +6790,12 @@ class WaveToyWindow(QMainWindow):
         self.articulation_name_label.setObjectName("articulationPhonemeTitle")
         self.articulation_ipa_label = QLabel("IPA /a/")
         self.articulation_ipa_label.setObjectName("articulationIpaBadge")
-        play_button = self._make_story_button("▶", "Play", "#5cdb95", self._play_phoneme_preview)
-        loop_button = self._make_story_button("🔁", "Loop", "#b8f2e6", self._toggle_phoneme_loop)
-        stop_button = self._make_story_button("⏹", "Stop", "#ff6b6b", self._stop_phoneme_preview)
+        play_button = self._make_story_button("▶", "Play Phoneme", "#5cdb95", self._play_phoneme_preview)
+        loop_button = self._make_story_button("🔁", "Loop Phoneme Preview", "#b8f2e6", self._toggle_phoneme_loop)
+        stop_button = self._make_story_button("⏹", "Stop Preview", "#ff6b6b", self._stop_phoneme_preview)
+        play_button.setToolTip("Render and play only the currently shaped phoneme.")
+        loop_button.setToolTip("Repeat the current phoneme preview only; it does not loop chains or words.")
+        stop_button.setToolTip("Stop phoneme preview playback immediately.")
         for button in (play_button, loop_button, stop_button):
             button.setMinimumSize(QSize(104, 40))
             button.setMaximumHeight(44)
@@ -6854,7 +6870,7 @@ class WaveToyWindow(QMainWindow):
         controls_layout = QVBoxLayout(controls_card)
         controls_layout.setContentsMargins(12, 20, 12, 12)
         controls_layout.setSpacing(8)
-        controls_hint = QLabel("Move each toy control from the plain-English left meaning to the right meaning.")
+        controls_hint = QLabel("Adjust each articulatory control between the plain-language endpoints.")
         controls_hint.setObjectName("symbolHint")
         controls_hint.setWordWrap(True)
         controls_layout.addWidget(controls_hint)
@@ -6902,7 +6918,116 @@ class WaveToyWindow(QMainWindow):
         controls_layout.addWidget(controls_body)
         left.addWidget(controls_card)
 
-        chain_card = self._toy_group("Articulation Timeline")
+        phoneme_actions = self._toy_group("Current Phoneme Actions")
+        phoneme_actions_layout = QVBoxLayout(phoneme_actions)
+        phoneme_actions_layout.setContentsMargins(12, 18, 12, 12)
+        phoneme_actions_layout.setSpacing(8)
+        phoneme_actions_hint = QLabel("Save this shaped phoneme or append it to the shared Articulation Timeline chain. Word and chain editing live in the Articulation Timeline tab.")
+        phoneme_actions_hint.setObjectName("symbolHint")
+        phoneme_actions_hint.setWordWrap(True)
+        phoneme_actions_layout.addWidget(phoneme_actions_hint)
+        phoneme_actions_row = QHBoxLayout()
+        phoneme_actions_row.setSpacing(8)
+        for icon, label, color, callback, tooltip in (
+            ("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme, "Store the current vocal-tract design as a reusable phoneme."),
+            ("➕", "Add to Articulation Timeline", "#5cdb95", self._add_current_phoneme_to_chain, "Append the current phoneme to the shared chain in the Articulation Timeline tab."),
+        ):
+            button = self._make_story_button(icon, label, color, callback)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            button.setToolTip(tooltip)
+            phoneme_actions_row.addWidget(button)
+        phoneme_actions_layout.addLayout(phoneme_actions_row)
+        left.addWidget(phoneme_actions)
+
+        drawer_shell = QWidget()
+        drawer_shell.setObjectName("phonemeDrawerShell")
+        drawer_shell.setMinimumWidth(300)
+        drawer_shell.setMaximumWidth(390)
+        drawer_shell.resize(340, drawer_shell.height())
+        drawer_layout = QHBoxLayout(drawer_shell)
+        drawer_layout.setContentsMargins(0, 0, 0, 0)
+        drawer_layout.setSpacing(8)
+
+        rail = QWidget()
+        rail.setObjectName("phonemeIconRail")
+        rail.setFixedWidth(64)
+        rail_layout = QVBoxLayout(rail)
+        rail_layout.setContentsMargins(6, 8, 6, 8)
+        rail_layout.setSpacing(4)
+        self.phoneme_drawer_buttons = {}
+        self.phoneme_drawer_stack = QStackedWidget()
+        self.phoneme_drawer_stack.setObjectName("phonemeDrawerStack")
+
+        drawer_specs = [
+            ("vowels", "😀", "Vowels", VOWEL_PRESETS, lambda name, _data: self._select_vowel_preset(name)),
+            ("fricatives", "🌬", "Fricatives", dict(CONSONANT_PRESET_SECTIONS[0][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("stops", "💥", "Stops", dict(CONSONANT_PRESET_SECTIONS[1][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("nasals", "👃", "Nasals", dict(CONSONANT_PRESET_SECTIONS[2][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("glides", "〰️", "Glides", dict(CONSONANT_PRESET_SECTIONS[3][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("liquids", "👅", "Liquids", dict(CONSONANT_PRESET_SECTIONS[4][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("affricates", "💥", "Affricates", dict(CONSONANT_PRESET_SECTIONS[5][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("extra_fricatives", "🦷", "Extra Fricatives", dict(CONSONANT_PRESET_SECTIONS[6][1]), lambda name, data: self._select_consonant_preset(name, data)),
+            ("saved", "💾", "Saved Phonemes", {}, None),
+        ]
+        for index, (key, icon, title_text, presets, callback) in enumerate(drawer_specs):
+            button = QPushButton(icon)
+            button.setObjectName("phonemeRailButton")
+            button.setCheckable(True)
+            button.setToolTip(title_text)
+            button.setAccessibleName(title_text)
+            button.setMinimumSize(QSize(52, 44))
+            button.setMaximumHeight(48)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda checked=False, drawer_key=key: self._set_phoneme_drawer(drawer_key))
+            self.phoneme_drawer_buttons[key] = button
+            rail_layout.addWidget(button)
+            self.phoneme_drawer_stack.addWidget(self._build_phoneme_drawer_page(title_text, icon, presets, callback))
+        rail_layout.addStretch(1)
+
+        drawer_layout.addWidget(rail)
+        drawer_layout.addWidget(self.phoneme_drawer_stack, 1)
+        main.addWidget(drawer_shell, 2)
+
+        tab.setWidget(page)
+        self.tabs.insertTab(min(2, self.tabs.count()), tab, "Articulation Lab")
+        self._refresh_phoneme_cards()
+        self._set_phoneme_drawer("vowels")
+        self._select_vowel_preset("AH", play=False)
+
+    def _build_articulation_timeline_tab(self) -> None:
+        if self.tabs is None:
+            return
+        tab = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
+        tab.setObjectName("articulationTimelineTab")
+        tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page = QWidget()
+        page.setObjectName("articulationTimelinePage")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(14, 10, 14, 18)
+        outer.setSpacing(8)
+
+        header = QWidget()
+        header.setObjectName("articulationLabHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 8, 14, 8)
+        header_layout.setSpacing(12)
+        title = QLabel("Articulation Timeline")
+        title.setObjectName("articulationCompactTitle")
+        info = QLabel("Arrange phoneme blocks into chains, edit timing and transitions, render smoothed words, and send speech assets to the main Timeline.")
+        info.setObjectName("articulationInfoBadge")
+        info.setWordWrap(True)
+        header_layout.addWidget(title)
+        header_layout.addWidget(info, 1)
+        outer.addWidget(header)
+
+        main = QHBoxLayout()
+        main.setSpacing(12)
+        outer.addLayout(main, 1)
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        main.addLayout(left, 6)
+
+        chain_card = self._toy_group("Chain and Word Timeline")
         chain_layout = QVBoxLayout(chain_card)
         chain_layout.setContentsMargins(12, 18, 12, 12)
         chain_layout.setSpacing(8)
@@ -6922,7 +7047,7 @@ class WaveToyWindow(QMainWindow):
             ),
             (
                 "Render Speech",
-                (("🧩", "Create Word", "#ffd166", self._create_articulation_word, 76), ("▶", "Play Word", "#b8f2e6", self._play_articulation_word, 58), ("▶", "Play Chain", "#caffbf", self._play_articulation_chain, 58), ("💾", "Export Word", "#fdffb6", self._export_articulation_word, 58)),
+                (("🧩", "Create Word", "#ffd166", self._create_articulation_word, 76), ("▶", "Play Word (smoothed render)", "#b8f2e6", self._play_articulation_word, 58), ("▶", "Play Chain (raw sequence)", "#caffbf", self._play_articulation_chain, 58), ("💾", "Export Word", "#fdffb6", self._export_articulation_word, 58)),
             ),
             (
                 "Send to Timeline",
@@ -6946,6 +7071,10 @@ class WaveToyWindow(QMainWindow):
             for icon, button_label, color, callback, height in actions:
                 button = self._make_story_button(icon, button_label, color, callback)
                 button.setMinimumHeight(min(max(height, WaveToySizing.BUTTON_HEIGHT), 44))
+                if button_label == "Play Word (smoothed render)":
+                    button.setToolTip("Play the smoothed, coarticulated word render using transition handling and Word Motion Preview settings.")
+                elif button_label == "Play Chain (raw sequence)":
+                    button.setToolTip("Play each phoneme sequentially with the raw phoneme render path for checking chain order; it may sound less smooth than Play Word.")
                 row.addWidget(button)
             chain_layout.addLayout(row)
         self.articulation_word_status_label = QLabel("Create Word saves a named asset to Speech Assets without changing the editable chain.")
@@ -7046,7 +7175,7 @@ class WaveToyWindow(QMainWindow):
         motion_buttons.setSpacing(8)
         for icon, label, color, callback in (
             ("▶", "Play Word Motion", "#b8f2e6", self._play_articulation_motion),
-            ("🔁", "Loop Motion", "#caffbf", self._loop_articulation_motion),
+            ("🔁", "Loop Word Motion", "#caffbf", self._loop_articulation_motion),
             ("⏹", "Stop Motion", "#ffadad", self._stop_articulation_motion),
             ("🐢", "Slow Motion Visual Only", "#ffd6a5", self._slow_articulation_motion),
         ):
@@ -7066,61 +7195,9 @@ class WaveToyWindow(QMainWindow):
         left.addWidget(chain_card)
         self._refresh_articulation_chain_cards()
 
-        drawer_shell = QWidget()
-        drawer_shell.setObjectName("phonemeDrawerShell")
-        drawer_shell.setMinimumWidth(300)
-        drawer_shell.setMaximumWidth(390)
-        drawer_shell.resize(340, drawer_shell.height())
-        drawer_layout = QHBoxLayout(drawer_shell)
-        drawer_layout.setContentsMargins(0, 0, 0, 0)
-        drawer_layout.setSpacing(8)
-
-        rail = QWidget()
-        rail.setObjectName("phonemeIconRail")
-        rail.setFixedWidth(64)
-        rail_layout = QVBoxLayout(rail)
-        rail_layout.setContentsMargins(6, 8, 6, 8)
-        rail_layout.setSpacing(4)
-        self.phoneme_drawer_buttons = {}
-        self.phoneme_drawer_stack = QStackedWidget()
-        self.phoneme_drawer_stack.setObjectName("phonemeDrawerStack")
-
-        drawer_specs = [
-            ("vowels", "😀", "Vowels", VOWEL_PRESETS, lambda name, _data: self._select_vowel_preset(name)),
-            ("fricatives", "🌬", "Fricatives", dict(CONSONANT_PRESET_SECTIONS[0][1]), lambda name, data: self._select_consonant_preset(name, data)),
-            ("stops", "💥", "Stops", dict(CONSONANT_PRESET_SECTIONS[1][1]), lambda name, data: self._select_consonant_preset(name, data)),
-            ("nasals", "👃", "Nasals", dict(CONSONANT_PRESET_SECTIONS[2][1]), lambda name, data: self._select_consonant_preset(name, data)),
-            ("glides", "〰️", "Glides", dict(CONSONANT_PRESET_SECTIONS[3][1]), lambda name, data: self._select_consonant_preset(name, data)),
-            ("liquids", "👅", "Liquids", dict(CONSONANT_PRESET_SECTIONS[4][1]), lambda name, data: self._select_consonant_preset(name, data)),
-            ("affricates", "💥", "Affricates", dict(CONSONANT_PRESET_SECTIONS[5][1]), lambda name, data: self._select_consonant_preset(name, data)),
-            ("extra_fricatives", "🦷", "Extra Fricatives", dict(CONSONANT_PRESET_SECTIONS[6][1]), lambda name, data: self._select_consonant_preset(name, data)),
-            ("saved", "💾", "Saved Phonemes", {}, None),
-        ]
-        for index, (key, icon, title_text, presets, callback) in enumerate(drawer_specs):
-            button = QPushButton(icon)
-            button.setObjectName("phonemeRailButton")
-            button.setCheckable(True)
-            button.setToolTip(title_text)
-            button.setAccessibleName(title_text)
-            button.setMinimumSize(QSize(52, 44))
-            button.setMaximumHeight(48)
-            button.setCursor(Qt.PointingHandCursor)
-            button.clicked.connect(lambda checked=False, drawer_key=key: self._set_phoneme_drawer(drawer_key))
-            self.phoneme_drawer_buttons[key] = button
-            rail_layout.addWidget(button)
-            self.phoneme_drawer_stack.addWidget(self._build_phoneme_drawer_page(title_text, icon, presets, callback))
-        rail_layout.addStretch(1)
-
-        drawer_layout.addWidget(rail)
-        drawer_layout.addWidget(self.phoneme_drawer_stack, 1)
-        main.addWidget(drawer_shell, 2)
-        main.addWidget(self._build_speech_assets_panel("articulation"), 2)
-
+        main.addWidget(self._build_speech_assets_panel("articulation_timeline"), 2)
         tab.setWidget(page)
-        self.tabs.insertTab(min(2, self.tabs.count()), tab, "Articulation Lab")
-        self._refresh_phoneme_cards()
-        self._set_phoneme_drawer("vowels")
-        self._select_vowel_preset("AH", play=False)
+        self.tabs.insertTab(min(3, self.tabs.count()), tab, "Articulation Timeline")
 
     def _make_articulation_toy_control(self, key: str, label: str, low_label: str, high_label: str, minimum: int, maximum: int, value: int) -> QWidget:
         row = QWidget()
@@ -7345,7 +7422,7 @@ class WaveToyWindow(QMainWindow):
         self.current_phoneme = self._phoneme_from_articulation_ui()
         self._update_articulation_preview(regenerate=True)
         if self.phoneme_loop_enabled:
-            self._play_phoneme_preview()
+            self._play_phoneme_preview(rate_limit=False)
 
     def _update_articulation_preview(self, regenerate: bool = False) -> None:
         p = self.current_phoneme.clamped()
@@ -7587,9 +7664,10 @@ class WaveToyWindow(QMainWindow):
         for text, callback, danger in (
             ("▶ Play", lambda checked=False, i=index: self._play_chain_item(i), False),
             ("📂 Load/Edit", lambda checked=False, i=index: self._select_articulation_chain_item(i), False),
-            ("⬅ Move Earlier", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
-            ("➡ Move Later", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
-            ("Remove", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
+            ("⧉ Duplicate Block", lambda checked=False, i=index: self._duplicate_articulation_chain_item(i), False),
+            ("⬅ Move Left", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
+            ("➡ Move Right", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
+            ("Remove Block", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
         ):
             button = QPushButton(text)
             button.setObjectName("phonemeCardDangerAction" if danger else "phonemeCardSecondaryAction")
@@ -7600,6 +7678,17 @@ class WaveToyWindow(QMainWindow):
         layout.addLayout(actions)
         return card
 
+
+    def _duplicate_articulation_chain_item(self, index: int) -> None:
+        if index < 0 or index >= len(self.articulation_chain_items):
+            return
+        source = self.articulation_chain_items[index]
+        duplicate = ArticulationChainItem.from_json_dict(source.to_json_dict())
+        duplicate.name = f"{source.name} copy"
+        self.articulation_chain_items.insert(index + 1, duplicate)
+        self.articulation_selected_chain_index = index + 1
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
 
     def _make_articulation_transition_control(self, index: int, left: ArticulationChainItem, right: ArticulationChainItem) -> QWidget:
         from_name = left.phoneme.name
@@ -8005,6 +8094,9 @@ class WaveToyWindow(QMainWindow):
 
     def _loop_articulation_motion(self, checked: bool = False) -> None:
         del checked
+        if self.articulation_motion_loop and self.articulation_motion_timer.isActive():
+            self._stop_articulation_motion()
+            return
         audio = self._current_gapless_word_audio()
         if audio.size == 0:
             return
@@ -8021,12 +8113,14 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_started_at = None
         self.word_motion_start_monotonic = None
         self.word_motion_play_audio = False
+        self.articulation_motion_loop = False
         self.articulation_motion_timer.stop()
         if sd is not None:
             try:
                 sd.stop()
             except Exception:
                 pass
+        self._stop_fallback_playback()
         if self.articulation_motion_status_label is not None:
             self.articulation_motion_status_label.setText("Motion stopped • audio stopped.")
 
@@ -8251,10 +8345,42 @@ class WaveToyWindow(QMainWindow):
                 f"left_source={left_phoneme.source_mode} right_source={right_phoneme.source_mode}"
             )
 
+    def _log_word_render_debug(self, render_mode: str, audio: np.ndarray) -> None:
+        gains = [self._transition_gain_snapshot(item.phoneme_for_render()) for item in self.articulation_chain_items]
+        voiced_gain = max((float(gain.get("voiced_gain", 0.0)) for gain in gains), default=0.0)
+        noise_gain = max((float(gain.get("noise_gain", 0.0)) for gain in gains), default=0.0)
+        source_modes = ",".join(dict.fromkeys(item.phoneme_for_render().source_mode for item in self.articulation_chain_items)) or ARTICULATION_SOURCE_DEFAULT
+        final_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        print(
+            "[WaveToy Word Debug] "
+            f"render_mode={render_mode} "
+            f"voiced_gain={voiced_gain:.3f} "
+            f"noise_gain={noise_gain:.3f} "
+            f"source_mode={source_modes} "
+            f"final_peak={final_peak:.3f}"
+        )
+
+    def _render_articulation_word_plain(self) -> np.ndarray:
+        word = np.zeros((0, 2), dtype=np.float32)
+        print(f"[WaveToy Word] word render started • mode {ARTICULATION_WORD_RENDER_PLAIN} • phoneme count {len(self.articulation_chain_items)}")
+        for index, item in enumerate(self.articulation_chain_items):
+            clip = self._render_articulation_with_source(item.phoneme_for_render())
+            if clip.size == 0:
+                continue
+            word = clip if word.size == 0 else np.vstack([word, clip])
+            gap_samples = int(self._word_gap_after_ms(item, index) * SAMPLE_RATE / 1000.0)
+            if gap_samples:
+                word = np.vstack([word, np.zeros((gap_samples, 2), dtype=np.float32)])
+        word = self._fade_word_edges(word)
+        word = normalize_audio(word).astype(np.float32)
+        print(f"[WaveToy Word] final word duration {len(word) / SAMPLE_RATE:.3f} s")
+        self._log_word_render_debug(ARTICULATION_WORD_RENDER_PLAIN, word)
+        return word
+
     def _render_articulation_word_simple(self) -> np.ndarray:
         word = np.zeros((0, 2), dtype=np.float32)
         boundaries: List[int] = []
-        print(f"[WaveToy Word] word render started • mode simple • phoneme count {len(self.articulation_chain_items)}")
+        print(f"[WaveToy Word] word render started • mode simple crossfade • phoneme count {len(self.articulation_chain_items)}")
         for index, item in enumerate(self.articulation_chain_items):
             clip = self._render_articulation_with_source(item.phoneme_for_render())
             gap_after_ms = self._word_gap_after_ms(item, index)
@@ -8268,6 +8394,7 @@ class WaveToyWindow(QMainWindow):
         word = normalize_audio(word).astype(np.float32)
         self._diagnose_word_boundaries(word, boundaries)
         print(f"[WaveToy Word] final word duration {len(word) / SAMPLE_RATE:.3f} s")
+        self._log_word_render_debug("simple crossfade", word)
         return word
 
     def _render_interpolated_transition_clip(self, left: ArticulationChainItem, right: ArticulationChainItem, transition_ms: int) -> np.ndarray:
@@ -8404,6 +8531,17 @@ class WaveToyWindow(QMainWindow):
         voiced_trace = np.zeros(total_samples, dtype=np.float32)
         noise_trace = np.zeros(total_samples, dtype=np.float32)
         closure_trace = np.zeros(total_samples, dtype=np.float32)
+        source_cache: Dict[int, np.ndarray | None] = {}
+        for index, item in enumerate(self.articulation_chain_items):
+            phoneme = item.phoneme_for_render().clamped()
+            if phoneme.source_mode == ARTICULATION_SOURCE_DEFAULT:
+                source_cache[index] = None
+                continue
+            source_audio = self._resolve_articulation_source_audio(phoneme)
+            if source_audio is None:
+                source_cache[index] = None
+                continue
+            source_cache[index] = prepare_articulation_source_audio(source_audio, phoneme, total_ms / 1000.0)
         phase = 0.0
         previous_tail = 0.0
         for frame_index in range(frame_count):
@@ -8413,13 +8551,25 @@ class WaveToyWindow(QMainWindow):
             if count <= 0:
                 continue
             center_ms = ((start_sample + end_sample) * 0.5) * 1000.0 / SAMPLE_RATE
-            phoneme, voiced_gain, noise_gain, closure, _active = self._envelope_state_at_ms(center_ms, segments)
+            phoneme, voiced_gain, noise_gain, closure, active = self._envelope_state_at_ms(center_ms, segments)
             t = np.arange(count, dtype=np.float64) / SAMPLE_RATE
+            source_excitation = np.zeros(count, dtype=np.float64)
+            source_audio = source_cache.get(int(active.get("index", 0)))
+            if source_audio is not None and source_audio.size:
+                source_slice = source_audio[start_sample:end_sample]
+                if len(source_slice) < count:
+                    source_slice = np.vstack([source_slice, np.zeros((count - len(source_slice), 2), dtype=np.float32)])
+                source_excitation = source_slice[:count].mean(axis=1).astype(np.float64)
+                source_peak = float(np.max(np.abs(source_excitation))) if source_excitation.size else 0.0
+                if source_peak > 1.0e-8:
+                    source_excitation = source_excitation / source_peak
             pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
             phase_step = 2.0 * math.pi * pitch / SAMPLE_RATE
             phases = phase + phase_step * np.arange(count, dtype=np.float64)
             phase = float((phases[-1] + phase_step) % (2.0 * math.pi))
+            voice_strength = float(np.clip(phoneme.voice_strength, 0.0, 1.0))
             tone = (np.sin(phases) + 0.28 * np.sin(phases * 2.0) + 0.12 * np.sin(phases * 3.0)) * voiced_gain
+            source_tone = source_excitation * voiced_gain * (0.42 + 0.58 * voice_strength)
             raw_noise = rng.normal(0.0, 1.0, count)
             brightness = float(np.clip((phoneme.noise_color + phoneme.tongue_frontness + (1.0 - phoneme.lip_rounding)) / 3.0, 0.0, 1.0))
             diff_noise = np.concatenate([[previous_tail], raw_noise[:-1]])
@@ -8430,11 +8580,13 @@ class WaveToyWindow(QMainWindow):
                 noise *= noise_gain * (0.04 + 0.18 * stop_params["air_pressure"]) * (0.25 + 0.75 * (1.0 - stop_params["teeth_gap"]))
                 closure_gate = float(np.clip(1.0 - closure * 0.97, 0.02, 1.0))
                 voice_gate = float(np.clip(1.0 - closure * 0.70, 0.10, 1.0)) if phoneme.voiced else closure_gate
-                frame = self._shape_continuous_frame(tone * 0.62 * voice_gate + noise * 0.16 * closure_gate, phoneme)
+                frame = self._shape_continuous_frame((tone * 0.78 + source_tone * 0.48) * voice_gate + noise * 0.12 * closure_gate, phoneme)
             else:
                 noise *= noise_gain * (0.18 + 0.82 * phoneme.air_pressure) * (0.35 + 0.65 * phoneme.teeth_gap)
                 closure_gate = float(np.clip(1.0 - closure * 0.94, 0.04, 1.0))
-                frame = self._shape_continuous_frame((tone * 0.62 + noise * 0.28) * closure_gate, phoneme)
+                voiced_noise_duck = float(np.clip(1.0 - voiced_gain * 0.62, 0.28, 1.0))
+                voice_frame = tone * (0.88 + 0.34 * voice_strength) + source_tone * 0.72
+                frame = self._shape_continuous_frame((voice_frame + noise * 0.16 * voiced_noise_duck) * closure_gate, phoneme)
             mono[start_sample:end_sample] += frame
             voiced_trace[start_sample:end_sample] = voiced_gain
             noise_trace[start_sample:end_sample] = noise_gain
@@ -8472,8 +8624,10 @@ class WaveToyWindow(QMainWindow):
         print(
             f"[WaveToy Envelope] max_voiced_gain={float(np.max(voiced_trace)):.3f} "
             f"max_noise_gain={float(np.max(noise_trace)):.3f} max_closure={float(np.max(closure_trace)):.3f} "
+            f"final_peak={float(np.max(np.abs(audio))) if audio.size else 0.0:.3f} "
             f"final_rendered_duration={len(audio) / SAMPLE_RATE:.3f}s"
         )
+        self._log_word_render_debug(ARTICULATION_WORD_RENDER_CONTINUOUS, audio)
         return audio.astype(np.float32)
 
     def _diagnose_word_boundaries(self, audio: np.ndarray, boundaries: List[int]) -> None:
@@ -8531,11 +8685,19 @@ class WaveToyWindow(QMainWindow):
     def _render_articulation_word_clip_crossfade(self) -> np.ndarray:
         print(f"[WaveToy Envelope] render mode={ARTICULATION_WORD_RENDER_CLIP_CROSSFADE} phoneme_count={len(self.articulation_chain_items)}")
         if self._articulation_smooth_transitions_enabled():
-            return self._render_articulation_word_coarticulated()
-        return self._render_articulation_word_simple()
+            audio = self._render_articulation_word_coarticulated()
+        else:
+            audio = self._render_articulation_word_simple()
+        self._log_word_render_debug(ARTICULATION_WORD_RENDER_CLIP_CROSSFADE, audio)
+        return audio
 
     def _render_articulation_word(self) -> np.ndarray:
         mode = self._articulation_word_render_mode()
+        print(f"[WaveToy Word] selected render_mode={mode}")
+        if mode == ARTICULATION_WORD_RENDER_PLAIN:
+            return self._render_articulation_word_plain()
+        if mode == ARTICULATION_WORD_RENDER_CLIP_CROSSFADE:
+            return self._render_articulation_word_clip_crossfade()
         if mode == ARTICULATION_WORD_RENDER_CONTINUOUS:
             try:
                 audio = self._render_articulation_word_continuous()
@@ -8718,9 +8880,9 @@ class WaveToyWindow(QMainWindow):
         if not ok:
             self._show_playback_warning(message)
 
-    def _play_phoneme_preview(self, checked: bool = False) -> None:
+    def _play_phoneme_preview(self, checked: bool = False, *, rate_limit: bool = True) -> None:
         del checked
-        if not self._can_start_playback():
+        if rate_limit and not self._can_start_playback():
             return
         self.current_phoneme = self._phoneme_from_articulation_ui()
         self.phoneme_preview_audio = self._render_articulation_with_source(self.current_phoneme)
@@ -8733,13 +8895,13 @@ class WaveToyWindow(QMainWindow):
         del checked
         self.phoneme_loop_enabled = not self.phoneme_loop_enabled
         if self.phoneme_loop_enabled:
-            self._play_phoneme_preview()
+            self._play_phoneme_preview(rate_limit=False)
         else:
             self._stop_phoneme_preview()
 
     def _articulation_loop_tick(self) -> None:
         if self.phoneme_loop_enabled:
-            self._play_phoneme_preview()
+            self._play_phoneme_preview(rate_limit=False)
 
     def _stop_phoneme_preview(self, checked: bool = False) -> None:
         del checked
@@ -8750,6 +8912,7 @@ class WaveToyWindow(QMainWindow):
                 sd.stop()
             except Exception:
                 pass
+        self._stop_fallback_playback()
 
     def _save_current_phoneme(self, checked: bool = False) -> None:
         del checked
@@ -9011,7 +9174,7 @@ class WaveToyWindow(QMainWindow):
             "Drag phoneme block edges and transition zones, scrub the playhead, and preview the mouth motion. Create Word uses these edited chain values.",
             self._build_graphical_chain_section(),
             "Advanced: Articulation Timeline",
-            lambda checked=False: self._show_named_tab("Articulation Lab"),
+            lambda checked=False: self._show_named_tab("Articulation Timeline"),
             expanded=True,
         ))
         outer.addWidget(self._graphical_workflow_section(
@@ -10819,7 +10982,7 @@ class WaveToyWindow(QMainWindow):
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
 
-        title = QLabel("Synthesis")
+        title = QLabel("Voice")
         title.setObjectName("title")
         title.setAlignment(Qt.AlignCenter)
         subtitle = QLabel("Fast performance controls. Use Wave Explorer for focused panels or Classic Controls for every fallback control.")
@@ -10850,7 +11013,7 @@ class WaveToyWindow(QMainWindow):
             controls.addWidget(button)
         layout.addLayout(controls)
         layout.addStretch(1)
-        self.tabs.insertTab(0, play, "Synthesis")
+        self.tabs.insertTab(0, play, "Voice")
 
     def _build_wave_explorer_tab(self) -> None:
         if self.tabs is None:
@@ -12912,6 +13075,7 @@ class WaveToyWindow(QMainWindow):
                 "classicControlsTab": "classic_controls",
                 "waveExplorerTab": "wave_explorer",
                 "articulationLabTab": "articulation_lab",
+                "articulationTimelineTab": "articulation_timeline",
                 "graphicalEditorTab": "graphical_editor",
                 "libraryTab": "library",
                 "timelineStoryboardTab": "timeline",
@@ -12925,6 +13089,7 @@ class WaveToyWindow(QMainWindow):
             "classic_controls": "classic_controls",
             "wave_explorer": "wave_explorer",
             "articulation_lab": "articulation_lab",
+            "articulation_timeline": "articulation_timeline",
             "graphical_editor": "graphical_editor",
             "library": "library",
             "timeline": "timeline",
@@ -12941,7 +13106,9 @@ class WaveToyWindow(QMainWindow):
         elif tab_identity == "timeline":
             self._timeline_play_story()
         elif tab_identity == "articulation_lab":
-            self._play_articulation_context()
+            self._play_phoneme_preview()
+        elif tab_identity == "articulation_timeline":
+            self._play_articulation_timeline_context()
         elif tab_identity == "library":
             self._play_library_context()
         elif tab_identity == "wave_explorer":
@@ -12995,7 +13162,7 @@ class WaveToyWindow(QMainWindow):
         """Fallback keyboard handler. QShortcut handles this more reliably."""
         if event.key() == Qt.Key_Space:
             if event.modifiers() & Qt.ShiftModifier:
-                self._toggle_live_loop()
+                self._global_loop()
             else:
                 self._handle_spacebar_playback()
             event.accept()
@@ -13008,6 +13175,7 @@ class WaveToyWindow(QMainWindow):
         if not self._can_start_playback():
             return
         self._generate()
+        self._stop_articulation_motion()
         self._play_current_audio_once()
         self._start_playback_tracking(len(self.current_audio), SAMPLE_RATE)
         if not self.live_loop_enabled:
@@ -13177,7 +13345,10 @@ class WaveToyWindow(QMainWindow):
         name, command = found[0]
 
         try:
-            subprocess.Popen(
+            if self.fallback_process is not None and self.fallback_process.poll() is None:
+                self.fallback_process.terminate()
+            self.fallback_temp_path = temp_path
+            self.fallback_process = subprocess.Popen(
                 [*command, str(temp_path)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -13187,10 +13358,21 @@ class WaveToyWindow(QMainWindow):
         except Exception as exc:
             return False, f"Could not launch {name}: {exc}"
 
+    def _stop_fallback_playback(self) -> None:
+        if self.fallback_process is not None and self.fallback_process.poll() is None:
+            try:
+                self.fallback_process.terminate()
+            except Exception:
+                pass
+        self.fallback_process = None
+
     def _stop(self) -> None:
         self._disable_live_loop()
         self._stop_playback_tracking(clear_playheads=True)
+        self._stop_phoneme_preview()
         self._stop_articulation_motion()
+        self._timeline_stop_story()
+        self._stop_fallback_playback()
         print("[WaveToy Playback] playback stopped")
 
     def _save(self) -> None:
