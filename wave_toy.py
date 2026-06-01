@@ -365,6 +365,10 @@ class SpeechBinItem:
     created_at: float
     audio_data: np.ndarray
 
+    def __post_init__(self) -> None:
+        if self.audio_data.size:
+            self.duration_seconds = max(0.0, float(len(self.audio_data)) / float(SAMPLE_RATE))
+
     @property
     def icon(self) -> str:
         return {
@@ -384,13 +388,15 @@ class SpeechBinItem:
         }.get(self.item_type, "articulation_word_render")
 
     def metadata(self) -> Dict[str, object]:
+        actual_duration = max(0.0, float(len(self.audio_data)) / float(SAMPLE_RATE)) if self.audio_data.size else self.duration_seconds
+        self.duration_seconds = actual_duration
         return {
             "id": self.id,
             "name": self.name,
             "item_type": self.item_type,
             "ipa_sequence": self.ipa_sequence,
             "display_sequence": self.display_sequence,
-            "duration_seconds": self.duration_seconds,
+            "duration_seconds": actual_duration,
             "audio_cache_path": self.audio_cache_path,
             "articulation_metadata": self.articulation_metadata,
             "source_mode": self.source_mode,
@@ -2857,6 +2863,7 @@ class TimelineCanvas(QWidget):
         self.drag_started = False
         self.drop_highlight_lane: int | None = None
         self.setAcceptDrops(True)
+        self._clip_rect_debug_cache: set[tuple] = set()
 
     def _refresh_size(self) -> None:
         arrangement = self.owner.timeline_clips if hasattr(self.owner, "timeline_clips") else []
@@ -2869,6 +2876,7 @@ class TimelineCanvas(QWidget):
 
     def set_zoom(self, factor: float) -> None:
         self.seconds_per_pixel = min(0.08, max(0.004, self.seconds_per_pixel * factor))
+        self._clip_rect_debug_cache.clear()
         self._refresh_size()
         self.update()
 
@@ -2886,15 +2894,45 @@ class TimelineCanvas(QWidget):
         return min(lane_count - 1, max(0, int((y - self.top_pad) // self.lane_height)))
 
     def _clip_rect(self, clip: TimelineClip) -> QRectF:
-        x = self._time_to_x(clip.start_time_seconds)
+        start_x = self._time_to_x(clip.start_time_seconds)
+        end_x = self._time_to_x(clip.start_time_seconds + clip.duration_seconds)
         y = self._lane_top(clip.lane) + 10
-        width = max(150.0, clip.duration_seconds / self.seconds_per_pixel)
+        width = max(1.0, end_x - start_x)
         height = 92.0
-        return QRectF(x, y, width, height)
+        self._debug_clip_rect(clip, width, False)
+        return QRectF(start_x, y, width, height)
+
+    def _clip_hit_rect(self, clip: TimelineClip) -> QRectF:
+        rect = self._clip_rect(clip)
+        minimum_hit_width = 24.0
+        if rect.width() >= minimum_hit_width:
+            return rect
+        hit_rect = QRectF(rect)
+        hit_rect.setWidth(minimum_hit_width)
+        hit_rect.moveCenter(QPointF(rect.center().x(), rect.center().y()))
+        hit_rect.setLeft(max(self.header_width, hit_rect.left()))
+        self._debug_clip_rect(clip, rect.width(), True)
+        return hit_rect
+
+    def _debug_clip_rect(self, clip: TimelineClip, width: float, hitbox_applied: bool) -> None:
+        cache = getattr(self, "_clip_rect_debug_cache", None)
+        if cache is None:
+            cache = set()
+            self._clip_rect_debug_cache = cache
+        key = (clip.clip_id, round(clip.start_time_seconds, 3), round(clip.duration_seconds, 4), round(self.seconds_per_pixel, 5), hitbox_applied)
+        if key in cache:
+            return
+        cache.add(key)
+        if hasattr(self.owner, "_timeline_debug"):
+            self.owner._timeline_debug(
+                f"Clip rect computed id={clip.clip_id} duration={clip.duration_seconds:.3f}s "
+                f"samples={len(clip.audio)} sample_rate={clip.sample_rate} visual_width={width:.1f}px "
+                f"seconds_per_pixel={self.seconds_per_pixel:.5f} minimum_hitbox_applied={hitbox_applied}"
+            )
 
     def _clip_at(self, pos: QPoint) -> TimelineClip | None:
         for clip in reversed(getattr(self.owner, "timeline_clips", [])):
-            if self._clip_rect(clip).contains(QPointF(pos)):
+            if self._clip_hit_rect(clip).contains(QPointF(pos)):
                 return clip
         return None
 
@@ -2947,25 +2985,48 @@ class TimelineCanvas(QWidget):
             gradient.setColorAt(1.0, QColor(("#e7c6ff" if is_speech else "#b8f2e6") if not selected else "#ffd166"))
             painter.setPen(QPen(QColor("#ff4fa3" if selected else ("#7b2cbf" if is_speech else "#5c6bc0")), 5 if selected else 4))
             painter.setBrush(gradient)
-            painter.drawRoundedRect(rect, 22, 22)
+            painter.drawRoundedRect(rect, min(22.0, max(1.0, rect.width() / 2.0)), 22)
 
-            painter.setFont(QFont("Arial", 30, QFont.Bold))
-            painter.setPen(QColor("#263238"))
-            painter.drawText(QRectF(rect.left() + 12, rect.top() + 10, 48, 42), Qt.AlignCenter, icon)
-            painter.setFont(QFont("Arial", 16, QFont.Bold))
-            painter.drawText(QRectF(rect.left() + 66, rect.top() + 10, rect.width() - 80, 28), Qt.AlignLeft | Qt.AlignVCenter, clip.name)
-            painter.setFont(QFont("Arial", 12, QFont.Bold))
-            painter.setPen(QColor("#7b2cbf" if is_speech else "#607d8b"))
-            badge = f" • {speech_type}" if is_speech else ""
-            warning = " • muted" if clip.muted_warning else ""
-            painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, rect.width() - 80, 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • Lane {clip.lane + 1}{badge}{warning}")
+            narrow = rect.width() < 72.0
+            very_narrow = rect.width() < 24.0
+            if narrow:
+                hit_rect = self._clip_hit_rect(clip)
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(255, 79, 163, 120), 2, Qt.DashLine))
+                painter.drawRoundedRect(hit_rect.adjusted(0, 10, 0, -10), 8, 8)
+                handle_x = rect.center().x()
+                handle_y = rect.top() + 12
+                painter.setBrush(QColor("#ff4fa3" if selected else "#ffffff"))
+                painter.setPen(QPen(QColor("#7b2cbf" if is_speech else "#5c6bc0"), 2))
+                painter.drawEllipse(QPointF(handle_x, handle_y), 6, 6)
+                label_rect = QRectF(rect.right() + 6, rect.top() + 6, 132, 38)
+                painter.setBrush(QColor(255, 255, 255, 220))
+                painter.setPen(QPen(QColor("#7b2cbf" if is_speech else "#5c6bc0"), 1))
+                painter.drawRoundedRect(label_rect, 8, 8)
+                painter.setFont(QFont("Arial", 10, QFont.Bold))
+                painter.setPen(QColor("#263238"))
+                painter.drawText(label_rect.adjusted(6, 0, -6, 0), Qt.AlignLeft | Qt.AlignVCenter, f"{icon} {clip.duration_seconds:.3f}s")
+            else:
+                painter.save()
+                painter.setClipRect(rect.adjusted(0, 0, -1, 0))
+                painter.setFont(QFont("Arial", 30, QFont.Bold))
+                painter.setPen(QColor("#263238"))
+                painter.drawText(QRectF(rect.left() + 12, rect.top() + 10, 48, 42), Qt.AlignCenter, icon)
+                painter.setFont(QFont("Arial", 16, QFont.Bold))
+                painter.drawText(QRectF(rect.left() + 66, rect.top() + 10, max(0.0, rect.width() - 80), 28), Qt.AlignLeft | Qt.AlignVCenter, clip.name)
+                painter.setFont(QFont("Arial", 12, QFont.Bold))
+                painter.setPen(QColor("#7b2cbf" if is_speech else "#607d8b"))
+                badge = f" • {speech_type}" if is_speech else ""
+                warning = " • muted" if clip.muted_warning else ""
+                painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, max(0.0, rect.width() - 80), 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • Lane {clip.lane + 1}{badge}{warning}")
+                painter.restore()
 
-            wave_rect = rect.adjusted(14, 62, -14, -12)
-            painter.setPen(QPen(QColor("#7b2cbf" if is_speech else "#00a8cc"), 3, Qt.SolidLine, Qt.RoundCap))
+            wave_rect = rect.adjusted(14 if not very_narrow else 1, 62, -14 if not very_narrow else -1, -12)
+            painter.setPen(QPen(QColor("#7b2cbf" if is_speech else "#00a8cc"), 3 if not very_narrow else 2, Qt.SolidLine, Qt.RoundCap))
             audio = np.asarray(clip.audio)
-            if audio.ndim == 2 and len(audio) > 1:
+            if audio.ndim == 2 and len(audio) > 1 and wave_rect.width() >= 2:
                 mono = audio.mean(axis=1)
-                steps = max(12, min(90, int(wave_rect.width() // 4)))
+                steps = max(2, min(90, int(max(2.0, wave_rect.width()) // 4)))
                 points = []
                 for i in range(steps):
                     sample_index = min(len(mono) - 1, int(i * len(mono) / steps))
@@ -8894,6 +8955,7 @@ class WaveToyWindow(QMainWindow):
             item.audio_cache_path = self._speech_cache_audio(item.audio_data, item.item_type, item.id)
             self._timeline_debug(f"Speech cache restored from in-memory audio id={item.id} cache={item.audio_cache_path}")
         if item.audio_data.size:
+            item.duration_seconds = len(item.audio_data) / float(SAMPLE_RATE)
             return np.array(item.audio_data, dtype=np.float32, copy=True), None
         if item.audio_cache_path:
             try:
@@ -8901,6 +8963,7 @@ class WaveToyWindow(QMainWindow):
                 if path.exists():
                     audio, _sample_rate = load_audio_file(path)
                     item.audio_data = np.array(audio, dtype=np.float32, copy=True)
+                    item.duration_seconds = len(item.audio_data) / float(SAMPLE_RATE)
                     return item.audio_data, None
             except Exception as exc:
                 self._timeline_debug(f"Speech cache load failed id={item.id} path={item.audio_cache_path} error={exc}")
@@ -8908,6 +8971,7 @@ class WaveToyWindow(QMainWindow):
         rerendered = self._rerender_speech_item_from_metadata(item)
         if rerendered.size:
             item.audio_data = np.array(rerendered, dtype=np.float32, copy=True)
+            item.duration_seconds = len(item.audio_data) / float(SAMPLE_RATE)
             if not item.audio_cache_path or not Path(item.audio_cache_path).exists():
                 item.audio_cache_path = self._speech_cache_audio(item.audio_data, item.item_type, item.id)
             return item.audio_data, None
@@ -9178,25 +9242,40 @@ class WaveToyWindow(QMainWindow):
         if clip is None:
             self.timeline_inspector_label.setText(f"No clip selected. Playhead: {self.timeline_playhead_seconds:.2f}s")
             return
-        source_text = f"\nSource: {clip.source_type}"
+        visual_width = None
+        if self.timeline_canvas is not None:
+            visual_width = clip.duration_seconds / self.timeline_canvas.seconds_per_pixel
+        source_text = (
+            f"\nSource: {clip.source_type}"
+            f"\nSample rate: {clip.sample_rate} Hz"
+            f"\nAudio samples: {len(clip.audio)}"
+        )
+        if visual_width is not None:
+            source_text += f"\nVisual width: {visual_width:.1f}px"
         if clip.speech_metadata:
             cache_path = str(clip.speech_metadata.get("audio_cache_path") or "")
             cache_status = "cached" if cache_path and Path(cache_path).exists() else "missing / will re-render if needed"
+            rendered_duration = clip.duration_seconds
             source_text += (
                 f"\nSpeech type: {clip.speech_metadata.get('item_type', 'speech')}"
                 f"\nPhoneme sequence: {clip.speech_metadata.get('display_sequence', '')}"
                 f"\nIPA: {clip.speech_metadata.get('ipa_sequence', '')}"
+                f"\nRendered duration: {rendered_duration:.3f}s"
+                f"\nCache path: {cache_path or 'none'}"
                 f"\nCache status: {cache_status}"
                 f"\nArticulation source mode: {clip.speech_metadata.get('source_mode', 'unknown')}"
             )
         if clip.muted_warning:
             source_text += f"\nWarning: {clip.muted_warning}"
         self.timeline_inspector_label.setText(
-            f"{clip.name}\nID: {clip.clip_id}\nStart: {clip.start_time_seconds:.2f}s\nLane: {clip.lane + 1}\nDuration: {clip.duration_seconds:.2f}s{source_text}"
+            f"{clip.name}\nID: {clip.clip_id}\nStart: {clip.start_time_seconds:.2f}s\nLane: {clip.lane + 1}\nDuration: {clip.duration_seconds:.3f}s{source_text}"
         )
 
     def _timeline_update_duration(self) -> None:
+        previous_duration = getattr(self, "timeline_duration_seconds", 0.0)
         self.timeline_duration_seconds = max([clip.start_time_seconds + clip.duration_seconds for clip in self.timeline_clips] or [0.0])
+        if abs(previous_duration - self.timeline_duration_seconds) > 0.0005:
+            self._timeline_debug(f"Timeline duration recalculated duration={self.timeline_duration_seconds:.3f}s clip_count={len(self.timeline_clips)}")
 
     def _timeline_mark_mix_dirty(self) -> None:
         self.timeline_mix_dirty = True
@@ -9264,10 +9343,21 @@ class WaveToyWindow(QMainWindow):
         mix = np.zeros((total_samples, 2), dtype=np.float32)
         for clip in self.timeline_clips:
             start = max(0, int(round(clip.start_time_seconds * SAMPLE_RATE)))
-            end = min(total_samples, start + len(clip.audio))
+            clip_audio = np.asarray(clip.audio, dtype=np.float32)
+            if clip_audio.ndim == 1:
+                clip_audio = np.column_stack([clip_audio, clip_audio]).astype(np.float32)
+            if clip_audio.ndim != 2 or clip_audio.size == 0:
+                continue
+            if clip_audio.shape[1] == 1:
+                clip_audio = np.repeat(clip_audio, 2, axis=1)
+            if clip_audio.shape[1] > 2:
+                clip_audio = clip_audio[:, :2]
+            if int(clip.sample_rate) != SAMPLE_RATE:
+                clip_audio = _resample_audio(clip_audio, int(clip.sample_rate), SAMPLE_RATE)
+            end = min(total_samples, start + len(clip_audio))
             if end <= start:
                 continue
-            mix[start:end, :2] += np.asarray(clip.audio[: end - start, :2], dtype=np.float32)
+            mix[start:end, :2] += np.asarray(clip_audio[: end - start, :2], dtype=np.float32)
         peak = float(np.max(np.abs(mix))) if mix.size else 0.0
         if peak > 1.0:
             mix = mix / peak
