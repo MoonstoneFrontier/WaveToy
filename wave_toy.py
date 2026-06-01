@@ -3134,6 +3134,7 @@ class TimelineCanvas(QWidget):
         self.setMouseTracking(True)
         self.setMinimumSize(QSize(980, 520))
         self.setCursor(Qt.ArrowCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.seconds_per_pixel = self.seconds_per_pixel_default
         self.selected_clip_id: int | None = None
         self.drag_clip_id: int | None = None
@@ -3145,6 +3146,11 @@ class TimelineCanvas(QWidget):
         self.drag_start_trim_end_seconds = 0.0
         self.drag_start_duration_seconds = 0.0
         self.drag_start_playback_rate = 1.0
+        self.interaction_state = "idle"
+        self.drag_candidate_clip_id: int | None = None
+        self.drag_candidate_operation: str | None = None
+        self.drag_press_pos: QPoint | None = None
+        self.drag_original_snapshot: Dict[str, object] | None = None
         self.drop_highlight_lane: int | None = None
         self.setAcceptDrops(True)
         self._clip_rect_debug_cache: set[tuple] = set()
@@ -3229,6 +3235,164 @@ class TimelineCanvas(QWidget):
         if abs(x - rect.right()) <= handle:
             return "right"
         return None
+
+    def _interaction_debug(self, event_name: str, clip: TimelineClip | None = None, operation: str | None = None) -> None:
+        parts = [f"event={event_name}", f"interaction_state={self.interaction_state}"]
+        if clip is not None:
+            parts.extend([
+                f"clip_id={clip.clip_id}",
+                f"operation={operation or self.drag_operation or self.drag_candidate_operation or 'none'}",
+                f"start_time_seconds={clip.start_time_seconds:.3f}",
+                f"duration_seconds={clip.duration_seconds:.3f}",
+                f"trim_start_seconds={clip.trim_start_seconds:.3f}",
+                f"trim_end_seconds={clip.trim_end_seconds:.3f}",
+                f"stretch_ratio={clip.stretch_ratio:.3f}",
+            ])
+        else:
+            parts.append(f"operation={operation or self.drag_operation or self.drag_candidate_operation or 'none'}")
+        print(f"[WaveToy Timeline Interaction] {' '.join(parts)}")
+
+    def _set_interaction_status(self, message: str) -> None:
+        if getattr(self.owner, "timeline_status_label", None) is not None:
+            self.owner.timeline_status_label.setText(message)
+
+    def _snapshot_clip(self, clip: TimelineClip) -> Dict[str, object]:
+        return {
+            "clip_id": clip.clip_id,
+            "start_time_seconds": clip.start_time_seconds,
+            "lane": clip.lane,
+            "trim_start_seconds": clip.trim_start_seconds,
+            "trim_end_seconds": clip.trim_end_seconds,
+            "playback_rate": clip.playback_rate,
+            "duration_seconds": clip.duration_seconds,
+            "stretched_audio_cache": np.array(clip.stretched_audio_cache, dtype=np.float32, copy=True) if clip.stretched_audio_cache is not None else None,
+            "stretch_cache_key": clip._stretch_cache_key,
+        }
+
+    def _restore_timeline_drag_snapshot(self) -> None:
+        snapshot = self.drag_original_snapshot or {}
+        clip_id = snapshot.get("clip_id")
+        clip = self.owner._timeline_clip_by_id(int(clip_id)) if clip_id is not None else None
+        if clip is None:
+            return
+        clip.start_time_seconds = float(snapshot.get("start_time_seconds", clip.start_time_seconds))
+        clip.lane = int(snapshot.get("lane", clip.lane))
+        clip.trim_start_seconds = float(snapshot.get("trim_start_seconds", clip.trim_start_seconds))
+        clip.trim_end_seconds = float(snapshot.get("trim_end_seconds", clip.trim_end_seconds))
+        clip.playback_rate = float(snapshot.get("playback_rate", clip.playback_rate))
+        cache = snapshot.get("stretched_audio_cache")
+        clip.stretched_audio_cache = np.array(cache, dtype=np.float32, copy=True) if isinstance(cache, np.ndarray) else None
+        clip._stretch_cache_key = snapshot.get("stretch_cache_key")
+        self.owner._timeline_update_duration()
+        self.owner._timeline_update_inspector()
+        self._refresh_size()
+        self.update()
+
+    def _clear_timeline_interaction_state(self) -> None:
+        self.drag_clip_id = None
+        self.drag_operation = None
+        self.drag_started = False
+        self.drag_candidate_clip_id = None
+        self.drag_candidate_operation = None
+        self.drag_press_pos = None
+        self.drag_original_snapshot = None
+        self.interaction_state = "idle"
+
+    def _cancel_or_end_drag(self, commit: bool = False) -> None:
+        clip = self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id)
+        active_state = self.interaction_state in {"dragging", "trimming", "stretching"}
+        if commit and active_state and clip is not None:
+            self.owner._timeline_update_duration()
+            self.owner._timeline_mark_mix_dirty()
+            self.owner._timeline_update_inspector()
+            self._set_interaction_status("Edit committed")
+            self._interaction_debug("edit_committed", clip, self.drag_operation)
+        elif not commit and active_state:
+            self._restore_timeline_drag_snapshot()
+            self._set_interaction_status("Edit cancelled")
+            self._interaction_debug("edit_cancelled", clip, self.drag_operation)
+        self._clear_timeline_interaction_state()
+        self.setCursor(Qt.OpenHandCursor if clip is not None else Qt.ArrowCursor)
+        self.update()
+
+    def _operation_state(self, operation: str) -> str:
+        if operation == "move":
+            return "dragging"
+        if operation.startswith("trim"):
+            return "trimming"
+        if operation.startswith("stretch"):
+            return "stretching"
+        return "dragging"
+
+    def _operation_status(self, operation: str) -> str:
+        return {
+            "move": "Move clip",
+            "trim_left": "Trim clip start",
+            "trim_right": "Trim clip end",
+            "stretch_left": "Time stretch clip",
+            "stretch_right": "Time stretch clip",
+        }.get(operation, "Move clip")
+
+    def _begin_candidate_drag(self) -> TimelineClip | None:
+        clip = self.owner._timeline_clip_by_id(self.drag_candidate_clip_id)
+        if clip is None or self.drag_candidate_operation is None:
+            self._clear_timeline_interaction_state()
+            return None
+        self.drag_clip_id = clip.clip_id
+        self.drag_operation = self.drag_candidate_operation
+        snapshot = self.drag_original_snapshot or self._snapshot_clip(clip)
+        self.drag_start_time_seconds = float(snapshot.get("start_time_seconds", clip.start_time_seconds))
+        self.drag_start_trim_start_seconds = float(snapshot.get("trim_start_seconds", clip.trim_start_seconds))
+        self.drag_start_trim_end_seconds = float(snapshot.get("trim_end_seconds", clip.trim_end_seconds))
+        self.drag_start_duration_seconds = float(snapshot.get("duration_seconds", clip.duration_seconds))
+        self.drag_start_playback_rate = float(snapshot.get("playback_rate", clip.playback_rate))
+        press_x = self.drag_press_pos.x() if self.drag_press_pos is not None else self._time_to_x(clip.start_time_seconds)
+        self.drag_offset_seconds = self._x_to_time(float(press_x)) - self.drag_start_time_seconds
+        self.interaction_state = self._operation_state(self.drag_operation)
+        self.drag_started = True
+        self.setCursor(Qt.SizeHorCursor if self.drag_operation != "move" else Qt.ClosedHandCursor)
+        self._set_interaction_status(self._operation_status(self.drag_operation))
+        self._interaction_debug("drag_threshold_crossed", clip, self.drag_operation)
+        self._interaction_debug("edit_started", clip, self.drag_operation)
+        return clip
+
+    def _apply_clip_edit_from_mouse(self, clip: TimelineClip, event) -> None:
+        target_time = self.owner._timeline_snap_time(self._x_to_time(event.position().x()))
+        minimum = 0.005
+        op = self.drag_operation or "move"
+        if op == "move":
+            clip.start_time_seconds = self.owner._timeline_snap_time(self._x_to_time(event.position().x()) - self.drag_offset_seconds)
+            clip.lane = self._lane_from_y(event.position().y())
+        elif op == "trim_left":
+            right_edge = self.drag_start_time_seconds + self.drag_start_duration_seconds
+            new_start = min(max(0.0, target_time), right_edge - minimum)
+            delta_visible = max(0.0, (new_start - self.drag_start_time_seconds) * clip.playback_rate)
+            max_trim = max(0.0, clip.source_duration_seconds - self.drag_start_trim_end_seconds - minimum * clip.playback_rate)
+            clip.trim_start_seconds = min(max_trim, self.drag_start_trim_start_seconds + delta_visible)
+            clip.stretched_audio_cache = None
+            clip._stretch_cache_key = None
+            clip.start_time_seconds = new_start
+        elif op == "trim_right":
+            new_end = max(clip.start_time_seconds + minimum, target_time)
+            wanted_source_visible = max(minimum * clip.playback_rate, (new_end - clip.start_time_seconds) * clip.playback_rate)
+            clip.trim_end_seconds = max(0.0, clip.source_duration_seconds - clip.trim_start_seconds - wanted_source_visible)
+            clip.stretched_audio_cache = None
+            clip._stretch_cache_key = None
+        elif op.startswith("stretch"):
+            anchor = self.drag_start_time_seconds if op == "stretch_right" else self.drag_start_time_seconds + self.drag_start_duration_seconds
+            new_duration = abs(target_time - anchor)
+            new_duration = max(minimum, new_duration)
+            new_duration = self.owner._timeline_snap_time(new_duration) if getattr(self.owner, "timeline_snap_enabled", True) else new_duration
+            visible_source = max(minimum, clip.source_visible_duration_seconds)
+            clip.playback_rate = float(np.clip(visible_source / max(minimum, new_duration), 0.25, 4.0))
+            clip.stretched_audio_cache = None
+            clip._stretch_cache_key = None
+            if op == "stretch_left":
+                clip.start_time_seconds = max(0.0, anchor - clip.duration_seconds)
+        self.owner._timeline_update_duration()
+        self.owner._timeline_update_inspector()
+        self._refresh_size()
+        self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -3354,34 +3518,57 @@ class TimelineCanvas(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
+        self.setFocus(Qt.MouseFocusReason)
+        if self.interaction_state != "idle":
+            self._cancel_or_end_drag(commit=False)
         clip = self._clip_at(event.pos())
         if clip is not None:
             tool = getattr(self.owner, "timeline_edit_tool", "select")
             edge = self._edge_at(clip, event.pos())
-            self.selected_clip_id = clip.clip_id
-            self.drag_clip_id = clip.clip_id
-            self.drag_operation = "move"
+            operation = "move"
             if tool == "trim" and edge is not None:
-                self.drag_operation = f"trim_{edge}"
+                operation = f"trim_{edge}"
             elif tool == "stretch" and edge is not None:
-                self.drag_operation = f"stretch_{edge}"
-            self.drag_offset_seconds = self._x_to_time(event.position().x()) - clip.start_time_seconds
-            self.drag_start_time_seconds = clip.start_time_seconds
-            self.drag_start_trim_start_seconds = clip.trim_start_seconds
-            self.drag_start_trim_end_seconds = clip.trim_end_seconds
-            self.drag_start_duration_seconds = clip.duration_seconds
-            self.drag_start_playback_rate = clip.playback_rate
-            self.drag_started = False
-            self.setCursor(Qt.SizeHorCursor if self.drag_operation != "move" else Qt.ClosedHandCursor)
-            self.owner._timeline_select_clip(clip.clip_id)
-        else:
-            self.selected_clip_id = None
+                operation = f"stretch_{edge}"
+            self.selected_clip_id = clip.clip_id
+            self.drag_candidate_clip_id = clip.clip_id
+            self.drag_candidate_operation = operation
+            self.drag_press_pos = event.pos()
+            self.drag_original_snapshot = self._snapshot_clip(clip)
+            self.interaction_state = "pressed"
             self.drag_clip_id = None
             self.drag_operation = None
+            self.drag_started = False
+            self.setCursor(Qt.SizeHorCursor if operation != "move" else Qt.OpenHandCursor)
+            self.owner._timeline_select_clip(clip.clip_id)
+            self._set_interaction_status("Clip selected")
+            self._interaction_debug("mouse_press_candidate", clip, operation)
+        else:
+            self.selected_clip_id = None
+            self._clear_timeline_interaction_state()
             self.owner._timeline_clear_selection(move_playhead_to=self.owner._timeline_snap_time(self._x_to_time(event.position().x())))
+            self.setCursor(Qt.ArrowCursor)
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
+        if self.drag_clip_id is not None and not (event.buttons() & Qt.LeftButton):
+            self._cancel_or_end_drag(commit=False)
+            self._interaction_debug("mouse_move_ignored_no_button")
+            return
+        if self.interaction_state == "pressed" and self.drag_candidate_clip_id is not None:
+            if not (event.buttons() & Qt.LeftButton):
+                self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_candidate_clip_id), self.drag_candidate_operation)
+                self._clear_timeline_interaction_state()
+                self.setCursor(Qt.ArrowCursor)
+                self.update()
+                return
+            if self.drag_press_pos is None or (event.pos() - self.drag_press_pos).manhattanLength() < QApplication.startDragDistance():
+                return
+            clip = self._begin_candidate_drag()
+            if clip is None:
+                return
+            self._apply_clip_edit_from_mouse(clip, event)
+            return
         if self.drag_clip_id is None:
             hover = self._clip_at(event.pos())
             if hover is not None and self._edge_at(hover, event.pos()) is not None and getattr(self.owner, "timeline_edit_tool", "select") in {"trim", "stretch"}:
@@ -3389,59 +3576,67 @@ class TimelineCanvas(QWidget):
             else:
                 self.setCursor(Qt.OpenHandCursor if hover is not None else Qt.ArrowCursor)
             return
+        if self.interaction_state not in {"dragging", "trimming", "stretching"}:
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id), self.drag_operation)
+            self._clear_timeline_interaction_state()
+            self.update()
+            return
         clip = self.owner._timeline_clip_by_id(self.drag_clip_id)
         if clip is None:
+            self._clear_timeline_interaction_state()
             return
-        old_start, old_lane = clip.start_time_seconds, clip.lane
-        target_time = self.owner._timeline_snap_time(self._x_to_time(event.position().x()))
-        minimum = 0.005
-        op = self.drag_operation or "move"
-        if op == "move":
-            clip.start_time_seconds = self.owner._timeline_snap_time(self._x_to_time(event.position().x()) - self.drag_offset_seconds)
-            clip.lane = self._lane_from_y(event.position().y())
-        elif op == "trim_left":
-            right_edge = self.drag_start_time_seconds + self.drag_start_duration_seconds
-            new_start = min(max(0.0, target_time), right_edge - minimum)
-            delta_visible = max(0.0, (new_start - self.drag_start_time_seconds) * clip.playback_rate)
-            max_trim = max(0.0, clip.source_duration_seconds - self.drag_start_trim_end_seconds - minimum * clip.playback_rate)
-            clip.trim_start_seconds = min(max_trim, self.drag_start_trim_start_seconds + delta_visible)
-            clip.stretched_audio_cache = None
-            clip._stretch_cache_key = None
-            clip.start_time_seconds = new_start
-        elif op == "trim_right":
-            new_end = max(clip.start_time_seconds + minimum, target_time)
-            wanted_source_visible = max(minimum * clip.playback_rate, (new_end - clip.start_time_seconds) * clip.playback_rate)
-            clip.trim_end_seconds = max(0.0, clip.source_duration_seconds - clip.trim_start_seconds - wanted_source_visible)
-            clip.stretched_audio_cache = None
-            clip._stretch_cache_key = None
-        elif op.startswith("stretch"):
-            anchor = self.drag_start_time_seconds if op == "stretch_right" else self.drag_start_time_seconds + self.drag_start_duration_seconds
-            new_duration = abs(target_time - anchor)
-            new_duration = max(minimum, new_duration)
-            new_duration = self.owner._timeline_snap_time(new_duration) if getattr(self.owner, "timeline_snap_enabled", True) else new_duration
-            visible_source = max(minimum, clip.source_visible_duration_seconds)
-            clip.playback_rate = float(np.clip(visible_source / max(minimum, new_duration), 0.25, 4.0))
-            clip.stretched_audio_cache = None
-            clip._stretch_cache_key = None
-            if op == "stretch_left":
-                clip.start_time_seconds = max(0.0, anchor - clip.duration_seconds)
-        self.drag_started = True
-        self.owner._timeline_update_duration()
-        self.owner._timeline_update_inspector()
-        if abs(old_start - clip.start_time_seconds) > 0.001 or old_lane != clip.lane:
-            self.owner._timeline_debug(f"Clip edited id={clip.clip_id} op={op} start={clip.start_time_seconds:.3f}s lane={clip.lane} duration={clip.duration_seconds:.3f}s stretch_ratio={clip.stretch_ratio:.2f}x")
-        self._refresh_size()
-        self.update()
+        self._apply_clip_edit_from_mouse(clip, event)
 
     def mouseReleaseEvent(self, event) -> None:
-        if self.drag_clip_id is not None:
-            self.owner._timeline_update_duration()
-            self.owner._timeline_mark_mix_dirty()
-        self.drag_clip_id = None
-        self.drag_operation = None
-        self.drag_started = False
-        self.setCursor(Qt.OpenHandCursor)
-        self.update()
+        if event.button() != Qt.LeftButton:
+            return super().mouseReleaseEvent(event)
+        if self.interaction_state in {"dragging", "trimming", "stretching"} and self.drag_clip_id is not None:
+            self._cancel_or_end_drag(commit=True)
+        elif self.interaction_state == "pressed":
+            clip = self.owner._timeline_clip_by_id(self.drag_candidate_clip_id)
+            if clip is not None:
+                self.selected_clip_id = clip.clip_id
+                self.owner._timeline_select_clip(clip.clip_id)
+                self._set_interaction_status("Clip selected")
+            self._clear_timeline_interaction_state()
+            self.setCursor(Qt.OpenHandCursor if clip is not None else Qt.ArrowCursor)
+            self.update()
+        else:
+            self._clear_timeline_interaction_state()
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape and self.interaction_state != "idle":
+            self._restore_timeline_drag_snapshot()
+            clip = self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id)
+            self._set_interaction_status("Edit cancelled")
+            self._interaction_debug("edit_cancelled", clip, self.drag_operation or self.drag_candidate_operation)
+            self._clear_timeline_interaction_state()
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self.interaction_state != "idle" and not (QApplication.mouseButtons() & Qt.LeftButton):
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id), self.drag_operation or self.drag_candidate_operation)
+            self._cancel_or_end_drag(commit=False)
+        super().leaveEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        if self.interaction_state != "idle":
+            commit = self.interaction_state in {"dragging", "trimming", "stretching"}
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id), self.drag_operation or self.drag_candidate_operation)
+            self._cancel_or_end_drag(commit=commit)
+        super().focusOutEvent(event)
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.WindowDeactivate and self.interaction_state != "idle":
+            commit = self.interaction_state in {"dragging", "trimming", "stretching"}
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id), self.drag_operation or self.drag_candidate_operation)
+            self._cancel_or_end_drag(commit=commit)
+        return super().event(event)
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasFormat("application/x-wavetoy-palette-id") or event.mimeData().hasFormat("application/x-wavetoy-speech-id"):
