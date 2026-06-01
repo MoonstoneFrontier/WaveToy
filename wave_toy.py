@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Wave Toy - single-file educational waveform synthesizer GUI.
+WaveToy - single-file educational waveform synthesis and articulation lab.
 
-A kid-friendly Python/PySide6 app for teaching sound waves from first principles.
+A professional educational Python/PySide6 app for teaching sound waves, stereo imaging, and articulatory synthesis from first principles.
 
 Features:
 - Four waveform mixer: sine, triangle, sawtooth, square
@@ -397,7 +397,7 @@ TUNING_METHODS = {
 
 @dataclass
 class AudioPaletteItem:
-    """Imported reusable audio source for the Timeline Audio Palette."""
+    """Imported reusable audio source for the Timeline Audio Assets."""
 
     id: int
     name: str
@@ -425,7 +425,7 @@ class AudioPaletteItem:
 
 @dataclass
 class SpeechBinItem:
-    """Created articulation audio source available inside the Timeline Speech Bin."""
+    """Created articulation audio source available inside the Timeline Speech Assets panel."""
 
     id: int
     name: str
@@ -480,7 +480,7 @@ class SpeechBinItem:
 
 @dataclass
 class TimelineClip:
-    """Audio clip placed on the Timeline storyboard."""
+    """Audio clip placed on the Timeline."""
 
     clip_id: int
     name: str
@@ -499,6 +499,10 @@ class TimelineClip:
     trim_end_seconds: float = 0.0
     playback_rate: float = 1.0
     rendered_duration_seconds: float = 0.0
+    stretch_mode: str = "preserve_pitch"
+    stretch_algorithm: str = "numpy_phase_vocoder"
+    stretched_audio_cache: np.ndarray | None = field(default=None, repr=False, compare=False)
+    _stretch_cache_key: tuple | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.source_audio_full_length_samples <= 0:
@@ -507,6 +511,8 @@ class TimelineClip:
         self.trim_start_seconds = float(np.clip(float(self.trim_start_seconds), 0.0, source_duration))
         self.trim_end_seconds = float(np.clip(float(self.trim_end_seconds), 0.0, max(0.0, source_duration - self.trim_start_seconds)))
         self.playback_rate = float(np.clip(float(self.playback_rate or 1.0), 0.25, 4.0))
+        self.stretch_mode = str(self.stretch_mode or "preserve_pitch")
+        self.stretch_algorithm = str(self.stretch_algorithm or "numpy_phase_vocoder")
         self.rendered_duration_seconds = self.duration_seconds
 
     @property
@@ -520,6 +526,19 @@ class TimelineClip:
     @property
     def duration_seconds(self) -> float:
         return max(0.0, self.source_visible_duration_seconds / max(0.25, float(self.playback_rate or 1.0)))
+
+    @property
+    def stretch_ratio(self) -> float:
+        trimmed = max(1e-9, self.source_visible_duration_seconds)
+        return max(0.0, self.duration_seconds / trimmed)
+
+    @property
+    def pitch_preserve_enabled(self) -> bool:
+        return self.stretch_mode != "speed_change"
+
+    @property
+    def stretch_badge(self) -> str:
+        return f"{self.stretch_ratio:.2f}x duration"
 
     @property
     def end_time_seconds(self) -> float:
@@ -546,6 +565,10 @@ class TimelineClip:
             "trim_start_seconds": self.trim_start_seconds,
             "trim_end_seconds": self.trim_end_seconds,
             "playback_rate": self.playback_rate,
+            "stretch_ratio": self.stretch_ratio,
+            "stretch_mode": self.stretch_mode,
+            "stretch_algorithm": self.stretch_algorithm,
+            "pitch_preserve_enabled": self.pitch_preserve_enabled,
             "rendered_duration_seconds": self.rendered_duration_seconds,
             "sample_rate": self.sample_rate,
             "source_type": self.source_type,
@@ -1939,6 +1962,142 @@ def _resample_audio(audio: np.ndarray, source_rate: int, target_rate: int = SAMP
     return np.column_stack(channels).astype(np.float32)
 
 
+
+def _fit_audio_length(audio: np.ndarray, target_len: int) -> np.ndarray:
+    audio = _ensure_stereo_float(audio)
+    target_len = max(0, int(target_len))
+    if target_len <= 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if len(audio) == target_len:
+        return audio.astype(np.float32, copy=False)
+    if len(audio) > target_len:
+        return audio[:target_len].astype(np.float32, copy=True)
+    pad = np.zeros((target_len - len(audio), 2), dtype=np.float32)
+    return np.vstack([audio, pad]).astype(np.float32, copy=False)
+
+
+def _fade_audio_edges(audio: np.ndarray, sample_rate: int, max_fade_ms: float = 6.0) -> np.ndarray:
+    audio = _ensure_stereo_float(audio).astype(np.float32, copy=True)
+    if len(audio) < 4:
+        return audio
+    fade_len = min(len(audio) // 2, max(2, int(round(float(sample_rate) * max_fade_ms / 1000.0))))
+    if fade_len <= 1:
+        return audio
+    fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)[:, None]
+    fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)[:, None]
+    audio[:fade_len] *= fade_in
+    audio[-fade_len:] *= fade_out
+    return audio
+
+
+def _phase_vocoder_channel(samples: np.ndarray, stretch_factor: float, quality: str = "Balanced") -> np.ndarray:
+    samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if samples.size == 0:
+        return samples
+    quality_key = str(quality or "Balanced").lower()
+    n_fft = 1024 if quality_key == "fast" else 4096 if quality_key.startswith("best") else 2048
+    n_fft = min(n_fft, max(256, 2 ** int(math.floor(math.log2(max(256, len(samples)))))))
+    hop = max(64, n_fft // 4)
+    if len(samples) < n_fft * 2 or stretch_factor <= 0.0:
+        return _ola_time_stretch_channel(samples, stretch_factor, n_fft=max(128, min(512, n_fft)), hop=max(32, min(128, hop)))
+
+    padded = np.pad(samples, (0, n_fft), mode="constant")
+    frame_count = 1 + max(0, (len(padded) - n_fft) // hop)
+    if frame_count < 2:
+        return _ola_time_stretch_channel(samples, stretch_factor, n_fft=max(128, min(512, n_fft)), hop=max(32, min(128, hop)))
+    window = np.hanning(n_fft).astype(np.float32)
+    frames = np.empty((frame_count, n_fft), dtype=np.float32)
+    for frame in range(frame_count):
+        start = frame * hop
+        frames[frame] = padded[start:start + n_fft] * window
+    spectrum = np.fft.rfft(frames, axis=1).T
+    bins = spectrum.shape[0]
+    speed = 1.0 / max(1e-6, float(stretch_factor))
+    time_steps = np.arange(0, max(1, spectrum.shape[1] - 1), speed, dtype=np.float32)
+    if time_steps.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    omega = 2.0 * np.pi * hop * np.arange(bins, dtype=np.float32) / float(n_fft)
+    phase = np.angle(spectrum[:, 0]).astype(np.float32)
+    stretched = np.empty((bins, len(time_steps)), dtype=np.complex64)
+    for out_index, step in enumerate(time_steps):
+        left = int(np.floor(step))
+        right = min(left + 1, spectrum.shape[1] - 1)
+        frac = float(step - left)
+        left_spec = spectrum[:, left]
+        right_spec = spectrum[:, right]
+        magnitude = (1.0 - frac) * np.abs(left_spec) + frac * np.abs(right_spec)
+        stretched[:, out_index] = magnitude * np.exp(1.0j * phase)
+        delta = np.angle(right_spec) - np.angle(left_spec) - omega
+        delta = delta - 2.0 * np.pi * np.round(delta / (2.0 * np.pi))
+        phase += omega + delta
+    out_len = n_fft + hop * (stretched.shape[1] - 1)
+    output = np.zeros(out_len, dtype=np.float32)
+    norm = np.zeros(out_len, dtype=np.float32)
+    for frame in range(stretched.shape[1]):
+        chunk = np.fft.irfft(stretched[:, frame], n=n_fft).astype(np.float32)
+        start = frame * hop
+        output[start:start + n_fft] += chunk * window
+        norm[start:start + n_fft] += window * window
+    valid = norm > 1e-8
+    output[valid] /= norm[valid]
+    return output.astype(np.float32, copy=False)
+
+
+def _ola_time_stretch_channel(samples: np.ndarray, stretch_factor: float, n_fft: int = 512, hop: int = 128) -> np.ndarray:
+    samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if samples.size == 0:
+        return samples
+    stretch_factor = max(0.25, min(4.0, float(stretch_factor or 1.0)))
+    n_fft = max(64, min(int(n_fft), max(64, len(samples))))
+    hop = max(16, min(int(hop), n_fft // 2))
+    target_len = max(1, int(round(len(samples) * stretch_factor)))
+    window = np.hanning(n_fft).astype(np.float32)
+    output = np.zeros(target_len + n_fft, dtype=np.float32)
+    norm = np.zeros_like(output)
+    out_pos = 0
+    while out_pos < target_len:
+        source_pos = int(round(out_pos / stretch_factor))
+        source_pos = min(max(0, source_pos), max(0, len(samples) - n_fft))
+        chunk = samples[source_pos:source_pos + n_fft]
+        if len(chunk) < n_fft:
+            chunk = np.pad(chunk, (0, n_fft - len(chunk)), mode="constant")
+        output[out_pos:out_pos + n_fft] += chunk * window
+        norm[out_pos:out_pos + n_fft] += window * window
+        out_pos += hop
+    valid = norm > 1e-8
+    output[valid] /= norm[valid]
+    return output[:target_len].astype(np.float32, copy=False)
+
+
+def time_stretch_preserve_pitch(audio: np.ndarray, source_rate: int, target_duration_seconds: float, quality: str = "Balanced") -> np.ndarray:
+    """Stretch audio to a target duration without changing sample rate or intentional pitch."""
+    source_rate = max(1, int(source_rate or SAMPLE_RATE))
+    audio = _ensure_stereo_float(audio)
+    target_len = max(1, int(round(max(0.0, float(target_duration_seconds)) * source_rate)))
+    if audio.size == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    source_duration = len(audio) / float(source_rate)
+    if source_duration <= 0.0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if abs(target_len - len(audio)) <= 1:
+        return _fit_audio_length(audio, target_len)
+    stretch_factor = float(target_len) / float(len(audio))
+    channels = []
+    for channel in range(2):
+        stretched = _phase_vocoder_channel(audio[:, channel], stretch_factor, quality)
+        channels.append(stretched)
+    min_len = min(len(channels[0]), len(channels[1])) if channels else 0
+    if min_len <= 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    stretched_audio = np.column_stack([channels[0][:min_len], channels[1][:min_len]]).astype(np.float32)
+    stretched_audio = _fit_audio_length(stretched_audio, target_len)
+    stretched_audio = _fade_audio_edges(stretched_audio, source_rate)
+    peak = float(np.max(np.abs(stretched_audio))) if stretched_audio.size else 0.0
+    if peak > 1.0:
+        stretched_audio = stretched_audio / peak
+    return np.clip(stretched_audio, -1.0, 1.0).astype(np.float32, copy=False)
+
+
 def compute_waveform_peaks(audio: np.ndarray, bins: int = 36) -> List[float]:
     audio = _ensure_stereo_float(audio)
     if audio.size == 0:
@@ -2387,7 +2546,7 @@ class WaveCanvas(QWidget):
 
     def _draw_caption(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QColor("#263238"))
-        painter.setFont(QFont("Arial", 14, QFont.Bold))
+        painter.setFont(QFont("Arial", 13, QFont.Bold))
 
         text_rect = QRectF(rect.left() + 92, rect.top() + 18, rect.width() - 120, 52)
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.TextWordWrap, self.mascot_message)
@@ -2395,32 +2554,34 @@ class WaveCanvas(QWidget):
 
 
 class WaveToySizing:
-    """Central touch-friendly sizing tokens for WaveToy's toy UI."""
+    """Central professional sizing tokens for WaveToy's educational interface."""
 
-    MIN_TOUCH_TARGET = 48
-    BUTTON_HEIGHT = 56
-    LARGE_BUTTON_HEIGHT = 72
-    ICON_STANDARD = 32
-    ICON_LARGE = 48
-    ICON_HERO = 64
-    CARD_MIN_HEIGHT = 96
-    SCROLLBAR_WIDTH = 22
-    PAGE_MARGIN = 18
-    CARD_PADDING = 14
-    SECTION_SPACING = 14
+    COMPACT_SPACING = 6
+    NORMAL_SPACING = 10
+    SECTION_SPACING = 16
+    MIN_TOUCH_TARGET = 36
+    BUTTON_HEIGHT = 40
+    LARGE_BUTTON_HEIGHT = 52
+    ICON_STANDARD = 24
+    ICON_LARGE = 32
+    ICON_HERO = 48
+    CARD_MIN_HEIGHT = 76
+    SCROLLBAR_WIDTH = 14
+    PAGE_MARGIN = 16
+    CARD_PADDING = 10
 
 
 class WaveToyTheme:
     """Shared color, spacing, and style helpers for the WaveToy interface."""
 
-    BACKGROUND = "#7bdff2"
+    BACKGROUND = "#eef3f8"
     SURFACE = "#ffffff"
-    CARD = "#fff8d9"
-    INK = "#263238"
-    MUTED = "#607d8b"
-    ACCENT = "#ff4fa3"
-    ACCENT_DARK = "#ff2f91"
-    BLUE = "#dff8ff"
+    CARD = "#f7fafc"
+    INK = "#1f2933"
+    MUTED = "#5f6f7a"
+    ACCENT = "#2563eb"
+    ACCENT_DARK = "#1d4ed8"
+    BLUE = "#e6f0fb"
 
     @classmethod
     def scroll_area_style(cls) -> str:
@@ -2436,32 +2597,32 @@ class WaveToyTheme:
             }}
             QScrollBar:vertical {{
                 background: rgba(255, 255, 255, 0.44);
-                border: 3px solid rgba(0, 0, 0, 0.10);
+                border: 1px solid rgba(31, 41, 51, 0.16);
                 border-radius: {width // 2}px;
                 width: {width}px;
                 margin: 2px;
             }}
             QScrollBar::handle:vertical {{
                 background: {cls.ACCENT};
-                border: 3px solid white;
-                border-radius: {max(8, (width - 6) // 2)}px;
-                min-height: 72px;
+                border: 1px solid white;
+                border-radius: {max(6, (width - 2) // 2)}px;
+                min-height: 36px;
             }}
             QScrollBar::handle:vertical:hover {{
                 background: {cls.ACCENT_DARK};
             }}
             QScrollBar:horizontal {{
                 background: rgba(255, 255, 255, 0.44);
-                border: 3px solid rgba(0, 0, 0, 0.10);
+                border: 1px solid rgba(31, 41, 51, 0.16);
                 border-radius: {width // 2}px;
                 height: {width}px;
                 margin: 2px;
             }}
             QScrollBar::handle:horizontal {{
                 background: {cls.ACCENT};
-                border: 3px solid white;
+                border: 1px solid white;
                 border-radius: {max(8, (width - 6) // 2)}px;
-                min-width: 72px;
+                min-width: 48px;
             }}
             QScrollBar::handle:horizontal:hover {{
                 background: {cls.ACCENT_DARK};
@@ -2482,21 +2643,21 @@ class WaveToyTheme:
         return f"""
             QPushButton {{
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
-                padding: 8px 14px;
-                border-radius: 16px;
-                font-size: 16px;
-                font-weight: 800;
+                padding: 5px 10px;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 700;
             }}
             QComboBox, QSpinBox, QDoubleSpinBox {{
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
-                padding: 4px 10px;
-                border-radius: 14px;
+                padding: 3px 8px;
+                border-radius: 7px;
             }}
             QCheckBox {{
                 min-height: {WaveToySizing.MIN_TOUCH_TARGET}px;
-                spacing: 10px;
-                font-size: 16px;
-                font-weight: 800;
+                spacing: 6px;
+                font-size: 13px;
+                font-weight: 700;
             }}
             QGroupBox#toyGroup, QWidget#timelineInspector, QWidget#timelineAudioPalette, QWidget#explorerDashboardPanel {{
                 margin-top: 8px;
@@ -2505,7 +2666,7 @@ class WaveToyTheme:
 
 
 class WaveToyScrollArea(QScrollArea):
-    """Unified toy-like scroll area with wheel, drag, kinetic scrolling, and large handles."""
+    """Unified scroll area with wheel, drag, kinetic scrolling, and accessible handles."""
 
     def __init__(self, *, scroll_speed: float = 1.0, content_drag_scroll: bool = True, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2680,14 +2841,14 @@ class ToyButton(QPushButton):
             QPushButton {{
                 background: {color};
                 color: #1d1d1d;
-                border: 4px solid rgba(0, 0, 0, 0.18);
-                border-radius: 22px;
-                font-size: 20px;
+                border: 1px solid rgba(0, 0, 0, 0.18);
+                border-radius: 10px;
+                font-size: 15px;
                 font-weight: 800;
                 padding: 10px 18px;
             }}
             QPushButton:hover {{
-                border: 4px solid rgba(0, 0, 0, 0.35);
+                border: 1px solid rgba(0, 0, 0, 0.35);
             }}
             QPushButton:pressed {{
                 padding-top: 14px;
@@ -2706,7 +2867,7 @@ class StoryboardClipWidget(QWidget):
         self.setObjectName("storyboardClip")
         self.setCursor(Qt.OpenHandCursor)
         self.setMinimumSize(QSize(260, 96))
-        self.setToolTip("Drag this big sound card to rearrange the storyboard. Duplicate, mute, and solo are finger-friendly buttons.")
+        self.setToolTip("Drag this clip card to rearrange the Timeline. Duplicate, mute, and solo actions remain available.")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -2744,9 +2905,9 @@ class StoryboardClipWidget(QWidget):
         self.setStyleSheet(
             f"""
             QWidget#storyboardClip {{
-                background: #fff8d9;
-                border: 4px solid {color};
-                border-radius: 24px;
+                background: #f7fafc;
+                border: 1px solid {color};
+                border-radius: 10px;
             }}
             """
         )
@@ -2776,7 +2937,7 @@ class AudioPaletteCard(QWidget):
         self.customContextMenuRequested.connect(self._show_menu)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(76, 10, 10, 10)
+        layout.setContentsMargins(76, 8, 8, 8)
         layout.addStretch(1)
         add_button = QPushButton("➕ Add")
         add_button.setMinimumSize(QSize(86, WaveToySizing.MIN_TOUCH_TARGET))
@@ -2862,7 +3023,7 @@ class SpeechBinCard(QWidget):
         self.item = item
         self.drag_start_pos: QPoint | None = None
         self.setObjectName("speechBinCard")
-        self.setMinimumHeight(96)
+        self.setMinimumHeight(82)
         self.setCursor(Qt.OpenHandCursor)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_menu)
@@ -2874,13 +3035,13 @@ class SpeechBinCard(QWidget):
             ("▶", "Preview", self.owner._timeline_preview_speech_item),
             ("✏", "Rename", self.owner._timeline_rename_speech_item),
             ("⧉", "Duplicate", self.owner._timeline_duplicate_speech_item),
-            ("🗑", "Delete", self.owner._timeline_delete_speech_item),
-            ("➕", "Add", self.owner._timeline_add_speech_item_to_playhead),
+            ("Del", "Delete", self.owner._timeline_delete_speech_item),
+            ("+", "Add to Timeline", self.owner._timeline_add_speech_item_to_playhead),
         )
         for icon, tip, callback in actions:
-            button = QPushButton(icon if tip != "Add" else "➕ Add")
+            button = QPushButton(icon if tip != "Add to Timeline" else "+ Timeline")
             button.setToolTip(tip)
-            button.setMinimumSize(QSize(48 if tip != "Add" else 86, WaveToySizing.MIN_TOUCH_TARGET))
+            button.setMinimumSize(QSize(42 if tip != "Add to Timeline" else 86, WaveToySizing.MIN_TOUCH_TARGET))
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(lambda checked=False, item_id=self.item.id, cb=callback: cb(item_id))
             layout.addWidget(button, 0, Qt.AlignRight | Qt.AlignBottom)
@@ -2890,11 +3051,11 @@ class SpeechBinCard(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(3, 3, -3, -3)
         selected = getattr(self.owner, "timeline_selected_speech_item_id", None) == self.item.id
-        painter.setPen(QPen(QColor("#ff4fa3" if selected else "#7b2cbf"), 4))
-        painter.setBrush(QColor("#fff1fb" if selected else "#ffffff"))
-        painter.drawRoundedRect(rect, 22, 22)
+        painter.setPen(QPen(QColor("#2563eb" if selected else "#64748b"), 2))
+        painter.setBrush(QColor("#eaf2ff" if selected else "#ffffff"))
+        painter.drawRoundedRect(rect, 10, 10)
 
-        painter.setFont(QFont("Arial", 28, QFont.Bold))
+        painter.setFont(QFont("Arial", 22, QFont.Bold))
         painter.setPen(QColor("#263238"))
         painter.drawText(QRectF(rect.left() + 10, rect.top() + 12, 54, 46), Qt.AlignCenter, self.item.icon)
 
@@ -2902,10 +3063,12 @@ class SpeechBinCard(QWidget):
         painter.setFont(QFont("Arial", 14, QFont.Bold))
         painter.drawText(QRectF(text_left, rect.top() + 12, rect.width() - 330, 24), Qt.AlignLeft | Qt.AlignVCenter, self.item.name)
         painter.setFont(QFont("Arial", 11, QFont.Bold))
-        painter.setPen(QColor("#7b2cbf"))
-        painter.drawText(QRectF(text_left, rect.top() + 36, rect.width() - 330, 20), Qt.AlignLeft | Qt.AlignVCenter, f"{self.item.item_type} • {self.item.duration_seconds:.2f}s")
+        painter.setPen(QColor("#2563eb"))
+        asset_type = "Phrase" if self.item.item_type == "chain" else self.item.item_type.title()
+        painter.drawText(QRectF(text_left, rect.top() + 34, rect.width() - 330, 18), Qt.AlignLeft | Qt.AlignVCenter, f"{asset_type} • {self.item.duration_seconds:.2f}s • {self.item.source_mode}")
         painter.setPen(QColor("#607d8b"))
-        painter.drawText(QRectF(text_left, rect.top() + 60, rect.width() - 330, 22), Qt.AlignLeft | Qt.AlignVCenter, self.item.display_sequence or self.item.ipa_sequence)
+        sequence = self.item.display_sequence or self.item.ipa_sequence
+        painter.drawText(QRectF(text_left, rect.top() + 56, rect.width() - 330, 20), Qt.AlignLeft | Qt.AlignVCenter, f"Sequence: {sequence}")
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -2942,7 +3105,7 @@ class SpeechBinCard(QWidget):
         rename_action = menu.addAction("✏ Rename")
         duplicate_action = menu.addAction("⧉ Duplicate")
         add_action = menu.addAction("➕ Add to Timeline at Playhead")
-        delete_action = menu.addAction("🗑 Delete from Speech Bin")
+        delete_action = menu.addAction("🗑 Delete from Speech Assets")
         action = menu.exec(self.mapToGlobal(pos))
         if action == preview_action:
             self.owner._timeline_preview_speech_item(self.item.id)
@@ -2971,6 +3134,7 @@ class TimelineCanvas(QWidget):
         self.setMouseTracking(True)
         self.setMinimumSize(QSize(980, 520))
         self.setCursor(Qt.ArrowCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.seconds_per_pixel = self.seconds_per_pixel_default
         self.selected_clip_id: int | None = None
         self.drag_clip_id: int | None = None
@@ -2982,6 +3146,11 @@ class TimelineCanvas(QWidget):
         self.drag_start_trim_end_seconds = 0.0
         self.drag_start_duration_seconds = 0.0
         self.drag_start_playback_rate = 1.0
+        self.interaction_state = "idle"
+        self.drag_candidate_clip_id: int | None = None
+        self.drag_candidate_operation: str | None = None
+        self.drag_press_pos: QPoint | None = None
+        self.drag_original_snapshot: Dict[str, object] | None = None
         self.drop_highlight_lane: int | None = None
         self.setAcceptDrops(True)
         self._clip_rect_debug_cache: set[tuple] = set()
@@ -3067,6 +3236,164 @@ class TimelineCanvas(QWidget):
             return "right"
         return None
 
+    def _interaction_debug(self, event_name: str, clip: TimelineClip | None = None, operation: str | None = None) -> None:
+        parts = [f"event={event_name}", f"interaction_state={self.interaction_state}"]
+        if clip is not None:
+            parts.extend([
+                f"clip_id={clip.clip_id}",
+                f"operation={operation or self.drag_operation or self.drag_candidate_operation or 'none'}",
+                f"start_time_seconds={clip.start_time_seconds:.3f}",
+                f"duration_seconds={clip.duration_seconds:.3f}",
+                f"trim_start_seconds={clip.trim_start_seconds:.3f}",
+                f"trim_end_seconds={clip.trim_end_seconds:.3f}",
+                f"stretch_ratio={clip.stretch_ratio:.3f}",
+            ])
+        else:
+            parts.append(f"operation={operation or self.drag_operation or self.drag_candidate_operation or 'none'}")
+        print(f"[WaveToy Timeline Interaction] {' '.join(parts)}")
+
+    def _set_interaction_status(self, message: str) -> None:
+        if getattr(self.owner, "timeline_status_label", None) is not None:
+            self.owner.timeline_status_label.setText(message)
+
+    def _snapshot_clip(self, clip: TimelineClip) -> Dict[str, object]:
+        return {
+            "clip_id": clip.clip_id,
+            "start_time_seconds": clip.start_time_seconds,
+            "lane": clip.lane,
+            "trim_start_seconds": clip.trim_start_seconds,
+            "trim_end_seconds": clip.trim_end_seconds,
+            "playback_rate": clip.playback_rate,
+            "duration_seconds": clip.duration_seconds,
+            "stretched_audio_cache": np.array(clip.stretched_audio_cache, dtype=np.float32, copy=True) if clip.stretched_audio_cache is not None else None,
+            "stretch_cache_key": clip._stretch_cache_key,
+        }
+
+    def _restore_timeline_drag_snapshot(self) -> None:
+        snapshot = self.drag_original_snapshot or {}
+        clip_id = snapshot.get("clip_id")
+        clip = self.owner._timeline_clip_by_id(int(clip_id)) if clip_id is not None else None
+        if clip is None:
+            return
+        clip.start_time_seconds = float(snapshot.get("start_time_seconds", clip.start_time_seconds))
+        clip.lane = int(snapshot.get("lane", clip.lane))
+        clip.trim_start_seconds = float(snapshot.get("trim_start_seconds", clip.trim_start_seconds))
+        clip.trim_end_seconds = float(snapshot.get("trim_end_seconds", clip.trim_end_seconds))
+        clip.playback_rate = float(snapshot.get("playback_rate", clip.playback_rate))
+        cache = snapshot.get("stretched_audio_cache")
+        clip.stretched_audio_cache = np.array(cache, dtype=np.float32, copy=True) if isinstance(cache, np.ndarray) else None
+        clip._stretch_cache_key = snapshot.get("stretch_cache_key")
+        self.owner._timeline_update_duration()
+        self.owner._timeline_update_inspector()
+        self._refresh_size()
+        self.update()
+
+    def _clear_timeline_interaction_state(self) -> None:
+        self.drag_clip_id = None
+        self.drag_operation = None
+        self.drag_started = False
+        self.drag_candidate_clip_id = None
+        self.drag_candidate_operation = None
+        self.drag_press_pos = None
+        self.drag_original_snapshot = None
+        self.interaction_state = "idle"
+
+    def _cancel_or_end_drag(self, commit: bool = False) -> None:
+        clip = self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id)
+        active_state = self.interaction_state in {"dragging", "trimming", "stretching"}
+        if commit and active_state and clip is not None:
+            self.owner._timeline_update_duration()
+            self.owner._timeline_mark_mix_dirty()
+            self.owner._timeline_update_inspector()
+            self._set_interaction_status("Edit committed")
+            self._interaction_debug("edit_committed", clip, self.drag_operation)
+        elif not commit and active_state:
+            self._restore_timeline_drag_snapshot()
+            self._set_interaction_status("Edit cancelled")
+            self._interaction_debug("edit_cancelled", clip, self.drag_operation)
+        self._clear_timeline_interaction_state()
+        self.setCursor(Qt.OpenHandCursor if clip is not None else Qt.ArrowCursor)
+        self.update()
+
+    def _operation_state(self, operation: str) -> str:
+        if operation == "move":
+            return "dragging"
+        if operation.startswith("trim"):
+            return "trimming"
+        if operation.startswith("stretch"):
+            return "stretching"
+        return "dragging"
+
+    def _operation_status(self, operation: str) -> str:
+        return {
+            "move": "Move clip",
+            "trim_left": "Trim clip start",
+            "trim_right": "Trim clip end",
+            "stretch_left": "Time stretch clip",
+            "stretch_right": "Time stretch clip",
+        }.get(operation, "Move clip")
+
+    def _begin_candidate_drag(self) -> TimelineClip | None:
+        clip = self.owner._timeline_clip_by_id(self.drag_candidate_clip_id)
+        if clip is None or self.drag_candidate_operation is None:
+            self._clear_timeline_interaction_state()
+            return None
+        self.drag_clip_id = clip.clip_id
+        self.drag_operation = self.drag_candidate_operation
+        snapshot = self.drag_original_snapshot or self._snapshot_clip(clip)
+        self.drag_start_time_seconds = float(snapshot.get("start_time_seconds", clip.start_time_seconds))
+        self.drag_start_trim_start_seconds = float(snapshot.get("trim_start_seconds", clip.trim_start_seconds))
+        self.drag_start_trim_end_seconds = float(snapshot.get("trim_end_seconds", clip.trim_end_seconds))
+        self.drag_start_duration_seconds = float(snapshot.get("duration_seconds", clip.duration_seconds))
+        self.drag_start_playback_rate = float(snapshot.get("playback_rate", clip.playback_rate))
+        press_x = self.drag_press_pos.x() if self.drag_press_pos is not None else self._time_to_x(clip.start_time_seconds)
+        self.drag_offset_seconds = self._x_to_time(float(press_x)) - self.drag_start_time_seconds
+        self.interaction_state = self._operation_state(self.drag_operation)
+        self.drag_started = True
+        self.setCursor(Qt.SizeHorCursor if self.drag_operation != "move" else Qt.ClosedHandCursor)
+        self._set_interaction_status(self._operation_status(self.drag_operation))
+        self._interaction_debug("drag_threshold_crossed", clip, self.drag_operation)
+        self._interaction_debug("edit_started", clip, self.drag_operation)
+        return clip
+
+    def _apply_clip_edit_from_mouse(self, clip: TimelineClip, event) -> None:
+        target_time = self.owner._timeline_snap_time(self._x_to_time(event.position().x()))
+        minimum = 0.005
+        op = self.drag_operation or "move"
+        if op == "move":
+            clip.start_time_seconds = self.owner._timeline_snap_time(self._x_to_time(event.position().x()) - self.drag_offset_seconds)
+            clip.lane = self._lane_from_y(event.position().y())
+        elif op == "trim_left":
+            right_edge = self.drag_start_time_seconds + self.drag_start_duration_seconds
+            new_start = min(max(0.0, target_time), right_edge - minimum)
+            delta_visible = max(0.0, (new_start - self.drag_start_time_seconds) * clip.playback_rate)
+            max_trim = max(0.0, clip.source_duration_seconds - self.drag_start_trim_end_seconds - minimum * clip.playback_rate)
+            clip.trim_start_seconds = min(max_trim, self.drag_start_trim_start_seconds + delta_visible)
+            clip.stretched_audio_cache = None
+            clip._stretch_cache_key = None
+            clip.start_time_seconds = new_start
+        elif op == "trim_right":
+            new_end = max(clip.start_time_seconds + minimum, target_time)
+            wanted_source_visible = max(minimum * clip.playback_rate, (new_end - clip.start_time_seconds) * clip.playback_rate)
+            clip.trim_end_seconds = max(0.0, clip.source_duration_seconds - clip.trim_start_seconds - wanted_source_visible)
+            clip.stretched_audio_cache = None
+            clip._stretch_cache_key = None
+        elif op.startswith("stretch"):
+            anchor = self.drag_start_time_seconds if op == "stretch_right" else self.drag_start_time_seconds + self.drag_start_duration_seconds
+            new_duration = abs(target_time - anchor)
+            new_duration = max(minimum, new_duration)
+            new_duration = self.owner._timeline_snap_time(new_duration) if getattr(self.owner, "timeline_snap_enabled", True) else new_duration
+            visible_source = max(minimum, clip.source_visible_duration_seconds)
+            clip.playback_rate = float(np.clip(visible_source / max(minimum, new_duration), 0.25, 4.0))
+            clip.stretched_audio_cache = None
+            clip._stretch_cache_key = None
+            if op == "stretch_left":
+                clip.start_time_seconds = max(0.0, anchor - clip.duration_seconds)
+        self.owner._timeline_update_duration()
+        self.owner._timeline_update_inspector()
+        self._refresh_size()
+        self.update()
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -3133,11 +3460,11 @@ class TimelineCanvas(QWidget):
             if abs(float(clip.playback_rate or 1.0) - 1.0) > 0.005:
                 painter.setBrush(QColor("#7b2cbf"))
                 painter.setPen(Qt.NoPen)
-                rate_rect = QRectF(rect.right() - 58, rect.top() + 8, 52, 20)
+                rate_rect = QRectF(rect.right() - 104, rect.top() + 8, 98, 20)
                 painter.drawRoundedRect(rate_rect, 7, 7)
                 painter.setPen(QColor("#ffffff"))
                 painter.setFont(QFont("Arial", 9, QFont.Bold))
-                painter.drawText(rate_rect, Qt.AlignCenter, f"{clip.playback_rate:.2f}x")
+                painter.drawText(rate_rect, Qt.AlignCenter, clip.stretch_badge)
 
             narrow = rect.width() < 72.0
             very_narrow = rect.width() < 24.0
@@ -3170,7 +3497,7 @@ class TimelineCanvas(QWidget):
                 painter.setPen(QColor("#7b2cbf" if is_speech else "#607d8b"))
                 badge = f" • {speech_type}" if is_speech else ""
                 warning = " • muted" if clip.muted_warning else ""
-                painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, max(0.0, rect.width() - 80), 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • {clip.playback_rate:.2f}x • Lane {clip.lane + 1}{badge}{warning}")
+                painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, max(0.0, rect.width() - 80), 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • {clip.stretch_badge} • Pitch preserved • Lane {clip.lane + 1}{badge}{warning}")
                 painter.restore()
 
             wave_rect = rect.adjusted(14 if not very_narrow else 1, 62, -14 if not very_narrow else -1, -12)
@@ -3191,34 +3518,57 @@ class TimelineCanvas(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
+        self.setFocus(Qt.MouseFocusReason)
+        if self.interaction_state != "idle":
+            self._cancel_or_end_drag(commit=False)
         clip = self._clip_at(event.pos())
         if clip is not None:
             tool = getattr(self.owner, "timeline_edit_tool", "select")
             edge = self._edge_at(clip, event.pos())
-            self.selected_clip_id = clip.clip_id
-            self.drag_clip_id = clip.clip_id
-            self.drag_operation = "move"
+            operation = "move"
             if tool == "trim" and edge is not None:
-                self.drag_operation = f"trim_{edge}"
+                operation = f"trim_{edge}"
             elif tool == "stretch" and edge is not None:
-                self.drag_operation = f"stretch_{edge}"
-            self.drag_offset_seconds = self._x_to_time(event.position().x()) - clip.start_time_seconds
-            self.drag_start_time_seconds = clip.start_time_seconds
-            self.drag_start_trim_start_seconds = clip.trim_start_seconds
-            self.drag_start_trim_end_seconds = clip.trim_end_seconds
-            self.drag_start_duration_seconds = clip.duration_seconds
-            self.drag_start_playback_rate = clip.playback_rate
-            self.drag_started = False
-            self.setCursor(Qt.SizeHorCursor if self.drag_operation != "move" else Qt.ClosedHandCursor)
-            self.owner._timeline_select_clip(clip.clip_id)
-        else:
-            self.selected_clip_id = None
+                operation = f"stretch_{edge}"
+            self.selected_clip_id = clip.clip_id
+            self.drag_candidate_clip_id = clip.clip_id
+            self.drag_candidate_operation = operation
+            self.drag_press_pos = event.pos()
+            self.drag_original_snapshot = self._snapshot_clip(clip)
+            self.interaction_state = "pressed"
             self.drag_clip_id = None
             self.drag_operation = None
+            self.drag_started = False
+            self.setCursor(Qt.SizeHorCursor if operation != "move" else Qt.OpenHandCursor)
+            self.owner._timeline_select_clip(clip.clip_id)
+            self._set_interaction_status("Clip selected")
+            self._interaction_debug("mouse_press_candidate", clip, operation)
+        else:
+            self.selected_clip_id = None
+            self._clear_timeline_interaction_state()
             self.owner._timeline_clear_selection(move_playhead_to=self.owner._timeline_snap_time(self._x_to_time(event.position().x())))
+            self.setCursor(Qt.ArrowCursor)
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
+        if self.drag_clip_id is not None and not (event.buttons() & Qt.LeftButton):
+            self._cancel_or_end_drag(commit=False)
+            self._interaction_debug("mouse_move_ignored_no_button")
+            return
+        if self.interaction_state == "pressed" and self.drag_candidate_clip_id is not None:
+            if not (event.buttons() & Qt.LeftButton):
+                self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_candidate_clip_id), self.drag_candidate_operation)
+                self._clear_timeline_interaction_state()
+                self.setCursor(Qt.ArrowCursor)
+                self.update()
+                return
+            if self.drag_press_pos is None or (event.pos() - self.drag_press_pos).manhattanLength() < QApplication.startDragDistance():
+                return
+            clip = self._begin_candidate_drag()
+            if clip is None:
+                return
+            self._apply_clip_edit_from_mouse(clip, event)
+            return
         if self.drag_clip_id is None:
             hover = self._clip_at(event.pos())
             if hover is not None and self._edge_at(hover, event.pos()) is not None and getattr(self.owner, "timeline_edit_tool", "select") in {"trim", "stretch"}:
@@ -3226,53 +3576,67 @@ class TimelineCanvas(QWidget):
             else:
                 self.setCursor(Qt.OpenHandCursor if hover is not None else Qt.ArrowCursor)
             return
+        if self.interaction_state not in {"dragging", "trimming", "stretching"}:
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id), self.drag_operation)
+            self._clear_timeline_interaction_state()
+            self.update()
+            return
         clip = self.owner._timeline_clip_by_id(self.drag_clip_id)
         if clip is None:
+            self._clear_timeline_interaction_state()
             return
-        old_start, old_lane = clip.start_time_seconds, clip.lane
-        target_time = self.owner._timeline_snap_time(self._x_to_time(event.position().x()))
-        minimum = 0.005
-        op = self.drag_operation or "move"
-        if op == "move":
-            clip.start_time_seconds = self.owner._timeline_snap_time(self._x_to_time(event.position().x()) - self.drag_offset_seconds)
-            clip.lane = self._lane_from_y(event.position().y())
-        elif op == "trim_left":
-            right_edge = self.drag_start_time_seconds + self.drag_start_duration_seconds
-            new_start = min(max(0.0, target_time), right_edge - minimum)
-            delta_visible = max(0.0, (new_start - self.drag_start_time_seconds) * clip.playback_rate)
-            max_trim = max(0.0, clip.source_duration_seconds - self.drag_start_trim_end_seconds - minimum * clip.playback_rate)
-            clip.trim_start_seconds = min(max_trim, self.drag_start_trim_start_seconds + delta_visible)
-            clip.start_time_seconds = new_start
-        elif op == "trim_right":
-            new_end = max(clip.start_time_seconds + minimum, target_time)
-            wanted_source_visible = max(minimum * clip.playback_rate, (new_end - clip.start_time_seconds) * clip.playback_rate)
-            clip.trim_end_seconds = max(0.0, clip.source_duration_seconds - clip.trim_start_seconds - wanted_source_visible)
-        elif op.startswith("stretch"):
-            anchor = self.drag_start_time_seconds if op == "stretch_right" else self.drag_start_time_seconds + self.drag_start_duration_seconds
-            new_duration = abs(target_time - anchor)
-            new_duration = max(minimum, new_duration)
-            new_duration = self.owner._timeline_snap_time(new_duration) if getattr(self.owner, "timeline_snap_enabled", True) else new_duration
-            visible_source = max(minimum, clip.source_visible_duration_seconds)
-            clip.playback_rate = float(np.clip(visible_source / max(minimum, new_duration), 0.25, 4.0))
-            if op == "stretch_left":
-                clip.start_time_seconds = max(0.0, anchor - clip.duration_seconds)
-        self.drag_started = True
-        self.owner._timeline_update_duration()
-        self.owner._timeline_update_inspector()
-        if abs(old_start - clip.start_time_seconds) > 0.001 or old_lane != clip.lane:
-            self.owner._timeline_debug(f"Clip edited id={clip.clip_id} op={op} start={clip.start_time_seconds:.3f}s lane={clip.lane} duration={clip.duration_seconds:.3f}s rate={clip.playback_rate:.2f}x")
-        self._refresh_size()
-        self.update()
+        self._apply_clip_edit_from_mouse(clip, event)
 
     def mouseReleaseEvent(self, event) -> None:
-        if self.drag_clip_id is not None:
-            self.owner._timeline_update_duration()
-            self.owner._timeline_mark_mix_dirty()
-        self.drag_clip_id = None
-        self.drag_operation = None
-        self.drag_started = False
-        self.setCursor(Qt.OpenHandCursor)
-        self.update()
+        if event.button() != Qt.LeftButton:
+            return super().mouseReleaseEvent(event)
+        if self.interaction_state in {"dragging", "trimming", "stretching"} and self.drag_clip_id is not None:
+            self._cancel_or_end_drag(commit=True)
+        elif self.interaction_state == "pressed":
+            clip = self.owner._timeline_clip_by_id(self.drag_candidate_clip_id)
+            if clip is not None:
+                self.selected_clip_id = clip.clip_id
+                self.owner._timeline_select_clip(clip.clip_id)
+                self._set_interaction_status("Clip selected")
+            self._clear_timeline_interaction_state()
+            self.setCursor(Qt.OpenHandCursor if clip is not None else Qt.ArrowCursor)
+            self.update()
+        else:
+            self._clear_timeline_interaction_state()
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape and self.interaction_state != "idle":
+            self._restore_timeline_drag_snapshot()
+            clip = self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id)
+            self._set_interaction_status("Edit cancelled")
+            self._interaction_debug("edit_cancelled", clip, self.drag_operation or self.drag_candidate_operation)
+            self._clear_timeline_interaction_state()
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self.interaction_state != "idle" and not (QApplication.mouseButtons() & Qt.LeftButton):
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id), self.drag_operation or self.drag_candidate_operation)
+            self._cancel_or_end_drag(commit=False)
+        super().leaveEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        if self.interaction_state != "idle":
+            commit = self.interaction_state in {"dragging", "trimming", "stretching"}
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id), self.drag_operation or self.drag_candidate_operation)
+            self._cancel_or_end_drag(commit=commit)
+        super().focusOutEvent(event)
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.WindowDeactivate and self.interaction_state != "idle":
+            commit = self.interaction_state in {"dragging", "trimming", "stretching"}
+            self._interaction_debug("stale_drag_state_cleared", self.owner._timeline_clip_by_id(self.drag_clip_id or self.drag_candidate_clip_id), self.drag_operation or self.drag_candidate_operation)
+            self._cancel_or_end_drag(commit=commit)
+        return super().event(event)
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasFormat("application/x-wavetoy-palette-id") or event.mimeData().hasFormat("application/x-wavetoy-speech-id"):
@@ -3684,7 +4048,7 @@ class WaveExplorerWindow(QWidget):
 
 
 class MiniWavePreview(QWidget):
-    """Tiny cached sample-based waveform preview used beside Wave Toy sliders."""
+    """Tiny cached sample-based waveform preview used beside WaveToy sliders."""
 
     COLORS = {
         "sine": QColor("#2ecc71"),
@@ -5097,7 +5461,7 @@ class WaveToyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        self.setWindowTitle("Wave Toy - Build Sounds by Shaping Waves")
+        self.setWindowTitle("WaveToy - Visual Sound and Articulation Lab")
         self.setWindowFlags(Qt.Window)
         self.resize(1280, 820)
         self.setMinimumSize(QSize(960, 680))
@@ -5174,7 +5538,7 @@ class WaveToyWindow(QMainWindow):
         self.playback_timer.timeout.connect(self._playback_timer_tick)
 
         self.timeline_clips: List[TimelineClip] = []
-        self.timeline_lane_names = ["🎵 Melody Lane", "🥁 Rhythm Lane", "🌌 Atmosphere Lane", "✨ Effects Lane"]
+        self.timeline_lane_names = ["Melody", "Rhythm", "Atmosphere", "Effects"]
         self.timeline_lane_count = len(self.timeline_lane_names)
         self.timeline_next_clip_id = 1
         self.timeline_selected_clip_id: int | None = None
@@ -5187,6 +5551,7 @@ class WaveToyWindow(QMainWindow):
         self.timeline_next_speech_item_id = 1
         self.timeline_selected_speech_item_id: int | None = None
         self.timeline_speech_bin_widget: QWidget | None = None
+        self.speech_asset_list_widgets: List[Tuple[QWidget, str]] = []
         self.timeline_speech_count_label: QLabel | None = None
         self.timeline_speech_cache_dir = Path(".wavetoy_speech_cache")
         self.timeline_playhead_seconds = 0.0
@@ -5208,6 +5573,9 @@ class WaveToyWindow(QMainWindow):
         self.timeline_tool_buttons: Dict[str, QPushButton] = {}
         self.timeline_snap_checkbox: QCheckBox | None = None
         self.timeline_snap_combo: QComboBox | None = None
+        self.timeline_preserve_pitch = True
+        self.timeline_stretch_quality = "Balanced"
+        self.timeline_stretch_quality_combo: QComboBox | None = None
 
         self.phonemes_dir = Path("phonemes")
         self.current_phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
@@ -5301,7 +5669,7 @@ class WaveToyWindow(QMainWindow):
         self._generate_now(reason="startup", update_message=True, force=True)
 
     def _build_actions(self) -> None:
-        about = QAction("About Wave Toy", self)
+        about = QAction("About WaveToy", self)
         about.triggered.connect(self._show_about)
         self.menuBar().addMenu("Help").addAction(about)
 
@@ -5316,7 +5684,7 @@ class WaveToyWindow(QMainWindow):
         loop_shortcut.activated.connect(self._toggle_live_loop)
 
     def _build_toy_title_banner(self) -> QWidget:
-        """Create the compact in-app Wave Toy title banner while leaving native chrome alone."""
+        """Create the compact in-app WaveToy title banner while leaving native chrome alone."""
         banner = QWidget()
         banner.setObjectName("toyTitleBanner")
         banner.setMinimumHeight(66)
@@ -5325,23 +5693,23 @@ class WaveToyWindow(QMainWindow):
         layout.setContentsMargins(16, 6, 16, 6)
         layout.setSpacing(12)
 
-        left_icons = QLabel("🚂 ⭐")
+        left_icons = QLabel("Audio")
         left_icons.setObjectName("toyTitleIconRail")
         left_icons.setAlignment(Qt.AlignCenter)
         left_icons.setMinimumWidth(96)
 
         text_stack = QVBoxLayout()
         text_stack.setSpacing(0)
-        title = QLabel("⭐ Wave Toy ⭐")
+        title = QLabel("WaveToy")
         title.setObjectName("toyTitleText")
         title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel("Build Sounds by Shaping Waves")
+        subtitle = QLabel("Visual Sound and Articulation Lab")
         subtitle.setObjectName("toyTitleSubtitle")
         subtitle.setAlignment(Qt.AlignCenter)
         text_stack.addWidget(title)
         text_stack.addWidget(subtitle)
 
-        right_icons = QLabel("🌊 🔊")
+        right_icons = QLabel("Speech")
         right_icons.setObjectName("toyTitleIconRail")
         right_icons.setAlignment(Qt.AlignCenter)
         right_icons.setMinimumWidth(96)
@@ -5365,7 +5733,7 @@ class WaveToyWindow(QMainWindow):
         self.setCentralWidget(app_shell)
 
         scroll = WaveToyScrollArea(scroll_speed=1.05)
-        self.tabs.addTab(scroll, "🧰 Classic Editor")
+        self.tabs.addTab(scroll, "Classic Controls")
 
         root = QWidget()
         root.setMinimumSize(QSize(1060, 720))
@@ -5375,10 +5743,10 @@ class WaveToyWindow(QMainWindow):
         outer.setContentsMargins(WaveToySizing.PAGE_MARGIN, 16, WaveToySizing.PAGE_MARGIN, 16)
         outer.setSpacing(WaveToySizing.SECTION_SPACING)
 
-        title = QLabel("🌈 Wave Toy")
+        title = QLabel("WaveToy Synthesis")
         title.setObjectName("title")
 
-        subtitle = QLabel("Build sounds by shaping waves! Space = play. Shift+Space = live loop. Fine sliders use picture labels.")
+        subtitle = QLabel("Design layered waveforms, stereo placement, pitch motion, and texture. Space = play; Shift+Space = live loop.")
         subtitle.setObjectName("subtitle")
 
         outer.addWidget(title)
@@ -5974,10 +6342,10 @@ class WaveToyWindow(QMainWindow):
         controls.setSpacing(12)
         outer.addLayout(controls)
 
-        self.make_button = ToyButton("▶ Make Sound!", "#5cdb95")
-        self.stop_button = ToyButton("■ Stop!", "#ff6b6b")
-        self.save_button = ToyButton("💾 Save My Sound", "#ffd166")
-        self.load_button = ToyButton("📂 Load Sound", "#b8f2e6")
+        self.make_button = ToyButton("Play", "#5cdb95")
+        self.stop_button = ToyButton("Stop", "#ff6b6b")
+        self.save_button = ToyButton("Save Audio", "#ffd166")
+        self.load_button = ToyButton("Load Audio", "#b8f2e6")
         for button, width in (
             (self.make_button, 160),
             (self.stop_button, 110),
@@ -6059,6 +6427,7 @@ class WaveToyWindow(QMainWindow):
         self._build_articulation_tab()
         self._build_graphical_editor_tab()
         self._build_timeline_tab()
+        self._build_library_tab()
         if self.tabs is not None:
             self.tabs.setCurrentIndex(0)
 
@@ -6080,9 +6449,9 @@ class WaveToyWindow(QMainWindow):
         header_layout = QHBoxLayout(lab_header)
         header_layout.setContentsMargins(14, 8, 14, 8)
         header_layout.setSpacing(12)
-        title = QLabel("🗣 Articulation Lab")
+        title = QLabel("Articulation Lab")
         title.setObjectName("articulationCompactTitle")
-        info = QLabel("Toy speech workstation: shape the tract, then pick one phoneme drawer.")
+        info = QLabel("Speech workstation: shape the vocal tract, render phonemes, and manage created speech assets.")
         info.setObjectName("articulationInfoBadge")
         info.setWordWrap(True)
         header_layout.addWidget(title)
@@ -6136,7 +6505,7 @@ class WaveToyWindow(QMainWindow):
             (ARTICULATION_SOURCE_DEFAULT, "Default Voice"),
             (ARTICULATION_SOURCE_CURRENT, "Current WaveToy Sound"),
             (ARTICULATION_SOURCE_MIX_WAVE, "Selected Mix Wave"),
-            (ARTICULATION_SOURCE_IMPORTED, "Imported Audio Palette Item"),
+            (ARTICULATION_SOURCE_IMPORTED, "Imported Audio Asset"),
         ):
             self.articulation_source_combo.addItem(label, mode)
         self.articulation_source_combo.currentIndexChanged.connect(lambda _index: self._articulation_source_mode_changed())
@@ -6235,7 +6604,7 @@ class WaveToyWindow(QMainWindow):
         controls_layout.addWidget(controls_body)
         left.addWidget(controls_card)
 
-        chain_card = self._toy_group("Articulation Chain")
+        chain_card = self._toy_group("Articulation Timeline")
         chain_layout = QVBoxLayout(chain_card)
         chain_layout.setContentsMargins(12, 18, 12, 12)
         chain_layout.setSpacing(8)
@@ -6243,30 +6612,30 @@ class WaveToyWindow(QMainWindow):
         chain_hint.setObjectName("symbolHint")
         chain_hint.setWordWrap(True)
         chain_layout.addWidget(chain_hint)
-        primary_label = QLabel("⭐ Main path: Add Current → Create Word → Send Word to Timeline")
+        primary_label = QLabel("Workflow: Add Current → Create Word → Speech Assets → Add to Timeline")
         primary_label.setObjectName("symbolHint")
         primary_label.setWordWrap(True)
         chain_layout.addWidget(primary_label)
 
         chain_sections = (
             (
-                "✏️ Chain Editing",
+                "Chain Editing",
                 (("➕", "Add Current", "#5cdb95", self._add_current_phoneme_to_chain, 76), ("🔡", "Create Syllable", "#caffbf", self._create_articulation_syllable, 58), ("🧹", "Clear Chain", "#ffadad", self._clear_articulation_chain, 58)),
             ),
             (
-                "🗣 Render Speech",
+                "Render Speech",
                 (("🧩", "Create Word", "#ffd166", self._create_articulation_word, 76), ("▶", "Play Word", "#b8f2e6", self._play_articulation_word, 58), ("▶", "Play Chain", "#caffbf", self._play_articulation_chain, 58), ("💾", "Export Word", "#fdffb6", self._export_articulation_word, 58)),
             ),
             (
-                "🎬 Send to Timeline",
+                "Send to Timeline",
                 (("➕", "Send Word to Timeline", "#ffc6ff", self._send_articulation_word_to_timeline, 76), ("➕", "Send Phoneme", "#e7c6ff", self._send_current_phoneme_to_timeline, 54), ("➕", "Send Chain", "#e7c6ff", self._send_articulation_chain_to_timeline, 54)),
             ),
             (
-                "💾 Save/Load",
+                "Save/Load",
                 (("💾", "Save Chain", "#ffd166", self._save_articulation_chain, 54), ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain, 54)),
             ),
             (
-                "🌊 Wave Source",
+                "Wave Source",
                 (("🌊", "Apply Wave to Selected", "#b8f2e6", self._apply_current_wave_to_selected_chain_item, 54), ("🌊", "Apply Wave to Whole Chain", "#caffbf", self._apply_current_wave_to_whole_chain, 54), ("♻", "Reset Selected", "#ffd166", self._reset_selected_chain_item_source, 54), ("♻", "Reset Whole Chain", "#ffadad", self._reset_whole_chain_source, 54)),
             ),
         )
@@ -6281,7 +6650,7 @@ class WaveToyWindow(QMainWindow):
                 button.setMinimumHeight(height)
                 row.addWidget(button)
             chain_layout.addLayout(row)
-        self.articulation_word_status_label = QLabel("Create Word makes a named Speech Bin card without changing the editable chain.")
+        self.articulation_word_status_label = QLabel("Create Word saves a named asset to Speech Assets without changing the editable chain.")
         self.articulation_word_status_label.setObjectName("symbolHint")
         self.articulation_word_status_label.setWordWrap(True)
         chain_layout.addWidget(self.articulation_word_status_label)
@@ -6367,7 +6736,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_chain_widget = QWidget()
         chain_layout.addWidget(self.articulation_chain_widget)
 
-        motion_card = self._toy_group("🗣 Word Motion Preview")
+        motion_card = self._toy_group("Word Motion Preview")
         motion_layout = QVBoxLayout(motion_card)
         motion_layout.setContentsMargins(12, 18, 12, 12)
         motion_layout.setSpacing(8)
@@ -6447,9 +6816,10 @@ class WaveToyWindow(QMainWindow):
         drawer_layout.addWidget(rail)
         drawer_layout.addWidget(self.phoneme_drawer_stack, 1)
         main.addWidget(drawer_shell, 2)
+        main.addWidget(self._build_speech_assets_panel("articulation"), 2)
 
         tab.setWidget(page)
-        self.tabs.insertTab(min(2, self.tabs.count()), tab, "🗣 Articulation Lab")
+        self.tabs.insertTab(min(2, self.tabs.count()), tab, "Articulation Lab")
         self._refresh_phoneme_cards()
         self._set_phoneme_drawer("vowels")
         self._select_vowel_preset("AH", play=False)
@@ -6770,7 +7140,7 @@ class WaveToyWindow(QMainWindow):
                 metadata["source_audio_path"] = item.source_path
                 metadata["source_duration_seconds"] = item.duration_seconds
             else:
-                QMessageBox.information(self, "Imported Audio Source", "Select an Audio Palette item first. Falling back to Default Voice.")
+                QMessageBox.information(self, "Imported Audio Source", "Select an Audio Assets item first. Falling back to Default Voice.")
                 metadata["source_mode"] = ARTICULATION_SOURCE_DEFAULT
         return metadata
 
@@ -6863,7 +7233,7 @@ class WaveToyWindow(QMainWindow):
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         selected_border = "#1d3557" if index == self.articulation_selected_chain_index else "rgba(0, 0, 0, 0.16)"
         card.setStyleSheet(
-            f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border: 4px solid {selected_border}; border-radius: 24px; }}"
+            f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border: 1px solid {selected_border}; border-radius: 10px; }}"
         )
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -6926,7 +7296,7 @@ class WaveToyWindow(QMainWindow):
         card.setMinimumHeight(64)
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         card.setStyleSheet(
-            "QWidget#articulationTransitionControl { background: #fff8d9; border: 3px dashed #7b2cbf; border-radius: 20px; }"
+            "QWidget#articulationTransitionControl { background: #f7fafc; border: 1px dashed #7b2cbf; border-radius: 8px; }"
         )
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 8, 14, 8)
@@ -7874,7 +8244,7 @@ class WaveToyWindow(QMainWindow):
         if audio.size == 0:
             return audio
         default_name = (self._speech_display_sequence_for_chain().replace(" + ", "").lower() or "word")
-        name, ok = QInputDialog.getText(self, "Create Word", "Name this Speech Bin word:", text=default_name)
+        name, ok = QInputDialog.getText(self, "Create Word", "Name this Speech Assets word:", text=default_name)
         if not ok:
             name = default_name
         name = name.strip() or default_name
@@ -7882,7 +8252,7 @@ class WaveToyWindow(QMainWindow):
         if word_item is not None:
             self.timeline_selected_speech_item_id = word_item.id
             self._timeline_refresh_speech_bin_cards()
-            message = f"Word ready: {word_item.name} • {word_item.duration_seconds:.2f}s • {self._chain_custom_transition_summary()} • selected in Speech Bin."
+            message = f"Word ready: {word_item.name} • {word_item.duration_seconds:.2f}s • {self._chain_custom_transition_summary()} • saved to Speech Assets."
             self.articulation_word_status_label.setText(message)
             self._timeline_debug(message)
         return audio
@@ -8101,7 +8471,7 @@ class WaveToyWindow(QMainWindow):
         card.setObjectName("phonemeCard")
         card.setMinimumHeight(72)
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        card.setStyleSheet(f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border-radius: 22px; }}")
+        card.setStyleSheet(f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border-radius: 10px; }}")
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
@@ -8204,9 +8574,9 @@ class WaveToyWindow(QMainWindow):
             QPushButton#storyTransportButton {{
                 background: {color};
                 color: #1d1d1d;
-                border: 4px solid rgba(0, 0, 0, 0.18);
-                border-radius: 24px;
-                font-size: 22px;
+                border: 1px solid rgba(0, 0, 0, 0.18);
+                border-radius: 10px;
+                font-size: 15px;
                 font-weight: 900;
                 min-height: 76px;
                 padding: 8px 14px;
@@ -8224,6 +8594,11 @@ class WaveToyWindow(QMainWindow):
         if getattr(self, "timeline_status_label", None) is not None:
             self.timeline_status_label.setText(message)
 
+    def _timeline_stretch_debug(self, message: str) -> None:
+        print(f"[WaveToy Stretch] {message}")
+        if getattr(self, "timeline_status_label", None) is not None:
+            self.timeline_status_label.setText(message)
+
 
     def _build_graphical_editor_tab(self) -> None:
         if self.tabs is None:
@@ -8237,12 +8612,12 @@ class WaveToyWindow(QMainWindow):
         outer.setContentsMargins(16, 12, 16, 18)
         outer.setSpacing(12)
 
-        title = QLabel("🧩 Graphical Editor")
+        title = QLabel("Graphical Editor")
         title.setObjectName("title")
         subtitle = QLabel("Visual-first sound building: drag wave layers, stereo dots, pitch points, and the mouth model. Sliders stay available as advanced fallback controls.")
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
-        self.graphical_status_label = QLabel("Graphical Editor shares the same controls as Classic Editor, Wave Explorer, and Articulation Lab — no duplicate recipe state.")
+        self.graphical_status_label = QLabel("Graphical Editor shares the same controls as Classic Controls, Wave Explorer, and Articulation Lab — no duplicate recipe state.")
         self.graphical_status_label.setObjectName("dashboardSummary")
         self.graphical_status_label.setWordWrap(True)
         self.graphical_status_label.setAlignment(Qt.AlignCenter)
@@ -8251,64 +8626,64 @@ class WaveToyWindow(QMainWindow):
         outer.addWidget(self.graphical_status_label)
 
         outer.addWidget(self._graphical_workflow_section(
-            "1. Shape Source Wave",
-            "Drag loudness handles on each layer card. Add, duplicate, mute, solo, and remove waves here; Classic Editor mix sliders update immediately.",
+            "1. Source Wave",
+            "Drag loudness handles on each layer card. Add, duplicate, mute, solo, and remove waves here; Classic Controls mix sliders update immediately.",
             self._build_graphical_wave_section(),
-            "🧰 Advanced: Classic wave mix",
-            lambda checked=False: self._show_named_tab("🧰 Classic Editor"),
+            "Advanced: Classic Controls",
+            lambda checked=False: self._show_named_tab("Classic Controls"),
             expanded=True,
         ))
         outer.addWidget(self._graphical_workflow_section(
-            "2. Place Sound in Stereo Space",
+            "2. Stereo Field",
             "Drag start/end dots across the ears to update whole-mix Stereo Placement. Use the mouse wheel over the field for stereo width.",
             self._build_graphical_stereo_section(),
-            "🌊 Advanced: Wave Explorer stereo",
-            lambda checked=False: self._show_named_tab("🌊 Wave Explorer"),
+            "Advanced: Wave Explorer",
+            lambda checked=False: self._show_named_tab("Wave Explorer"),
             expanded=True,
         ))
         outer.addWidget(self._graphical_workflow_section(
-            "3. Tune Pitch Motion",
-            "Drag pitch start/end points on an octave grid. The curve writes to the same pitch sliders used by Classic Editor and the tuning map.",
+            "3. Pitch Motion",
+            "Drag pitch start/end points on an octave grid. The curve writes to the same pitch sliders used by Classic Controls and the tuning map.",
             self._build_graphical_pitch_section(),
-            "🧰 Advanced: Classic pitch toys",
-            lambda checked=False: self._show_named_tab("🧰 Classic Editor"),
+            "Advanced: Pitch Tools",
+            lambda checked=False: self._show_named_tab("Classic Controls"),
             expanded=True,
         ))
         outer.addWidget(self._graphical_workflow_section(
-            "4. Add Sound Magic",
+            "4. Texture / Effects",
             "Preview-only blocks show the signal order for this phase. Toggle and intensity controls still use existing Sound Modules sliders.",
             self._build_graphical_sound_magic_section(),
-            "🧰 Advanced: Sound Modules",
-            lambda checked=False: self._show_named_tab("🧰 Classic Editor"),
+            "Advanced: Texture / Effects",
+            lambda checked=False: self._show_named_tab("Classic Controls"),
             expanded=False,
         ))
         outer.addWidget(self._graphical_workflow_section(
-            "5. Shape Mouth / Articulation",
+            "5. Vocal Tract",
             "Drag tongue, mouth/lips, airflow, click the nose, or click the voice bubble. Articulation Lab sliders and phoneme preview stay synchronized.",
             self._build_graphical_vocal_section(),
-            "🗣 Advanced: Articulation Lab",
-            lambda checked=False: self._show_named_tab("🗣 Articulation Lab"),
+            "Advanced: Articulation Lab",
+            lambda checked=False: self._show_named_tab("Articulation Lab"),
             expanded=True,
         ))
         outer.addWidget(self._graphical_workflow_section(
-            "6. Build Speech Motion",
+            "6. Articulation Timeline",
             "Drag phoneme block edges and transition zones, scrub the playhead, and preview the mouth motion. Create Word uses these edited chain values.",
             self._build_graphical_chain_section(),
-            "🗣 Advanced: Articulation Chain",
-            lambda checked=False: self._show_named_tab("🗣 Articulation Lab"),
+            "Advanced: Articulation Timeline",
+            lambda checked=False: self._show_named_tab("Articulation Lab"),
             expanded=True,
         ))
         outer.addWidget(self._graphical_workflow_section(
             "7. Send to Timeline",
-            "Preview-only handoff panel: use existing Speech Bin, Audio Palette, and Timeline buttons to place rendered sounds without changing those workflows.",
+            "Preview-only handoff panel: use existing Speech Assets, Audio Assets, and Timeline buttons to place rendered sounds without changing those workflows.",
             self._build_graphical_timeline_section(),
-            "🎬 Open Timeline",
-            lambda checked=False: self._show_named_tab("🎬 Timeline"),
+            "Open Timeline",
+            lambda checked=False: self._show_named_tab("Timeline"),
             expanded=False,
         ))
         outer.addStretch(1)
         tab.setWidget(page)
-        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "🧩 Graphical Editor")
+        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "Graphical Editor")
         self._refresh_graphical_editor()
 
     def _graphical_workflow_section(self, title: str, body: str, content: QWidget, button_text: str, callback, *, expanded: bool) -> QWidget:
@@ -8396,7 +8771,7 @@ class WaveToyWindow(QMainWindow):
             ("🌫 Noise Texture", "preview-only: articulation/noise sources"),
             ("✨ Shimmer", "preview-only roadmap block"),
             ("😴 Stretch", "editable via existing Effect Nap sliders"),
-            ("🎚 Filter / Magic", "preview-only roadmap block"),
+            ("Filter / Modulation", "preview-only roadmap block"),
         ]
         for index, (name, note) in enumerate(blocks):
             block = QLabel(f"{name}\n{note}")
@@ -8446,9 +8821,9 @@ class WaveToyWindow(QMainWindow):
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         for text, callback in (
-            ("🎬 Open Timeline Storyboard", lambda checked=False: self._show_named_tab("🎬 Timeline")),
-            ("➕ Send Current Phoneme", self._send_current_phoneme_to_timeline),
-            ("➕ Send Chain", self._send_articulation_chain_to_timeline),
+            ("Open Timeline", lambda checked=False: self._show_named_tab("Timeline")),
+            ("Send Current Phoneme", self._send_current_phoneme_to_timeline),
+            ("Send Chain", self._send_articulation_chain_to_timeline),
         ):
             button = QPushButton(text)
             button.setMinimumHeight(46)
@@ -8715,6 +9090,92 @@ class WaveToyWindow(QMainWindow):
         phoneme, current_name, next_name, transition_progress, playhead, transition_ms, in_transition = self._motion_state_at_ms(self.articulation_playhead_ms)
         self.graphical_chain_mouth_canvas.set_motion_state(phoneme, current_name, next_name, transition_progress, playhead, transition_ms, in_transition)
 
+
+    def _build_speech_assets_panel(self, context: str = "timeline") -> QWidget:
+        """Create a visible Speech Assets panel backed by the existing Speech Bin data model."""
+        panel = QWidget()
+        panel.setObjectName("speechAssetsPanel")
+        panel.setMinimumWidth(300)
+        if context in {"timeline", "library"}:
+            panel.setMaximumWidth(380)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("Speech Assets")
+        title.setObjectName("timelineInspectorTitle")
+        subtitle = QLabel("Created phonemes, syllables, words, and phrases. Create Word saves here; select an asset to preview or add it to the Timeline.")
+        subtitle.setObjectName("timelineInspectorText")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        filters = QTabWidget()
+        filters.setObjectName("speechAssetFilterTabs")
+        for label, item_filter in (
+            ("All", "all"),
+            ("Phonemes", "phoneme"),
+            ("Syllables", "syllable"),
+            ("Words", "word"),
+            ("Phrases", "phrase"),
+        ):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(4, 6, 4, 4)
+            page_layout.setSpacing(8)
+            if item_filter == "word":
+                actions = QHBoxLayout()
+                add_word = QPushButton("Add Latest Word")
+                add_word.clicked.connect(lambda checked=False: self._timeline_add_first_speech_type_to_playhead("word"))
+                clear = QPushButton("Clear Assets")
+                clear.clicked.connect(self._timeline_clear_speech_bin)
+                actions.addWidget(add_word)
+                actions.addWidget(clear)
+                page_layout.addLayout(actions)
+            count_label = QLabel("No created speech yet.")
+            count_label.setObjectName("timelineInspectorText")
+            count_label.setWordWrap(True)
+            if context == "timeline" and item_filter == "all":
+                self.timeline_speech_count_label = count_label
+            page_layout.addWidget(count_label)
+            scroll = WaveToyScrollArea(scroll_speed=0.9)
+            list_widget = QWidget()
+            list_widget.setObjectName("timelineSpeechBinList")
+            if context == "timeline" and item_filter == "all":
+                self.timeline_speech_bin_widget = list_widget
+            scroll.setWidget(list_widget)
+            page_layout.addWidget(scroll, 1)
+            self.speech_asset_list_widgets.append((list_widget, item_filter))
+            filters.addTab(page, label)
+        layout.addWidget(filters, 1)
+        return panel
+
+    def _build_library_tab(self) -> None:
+        if self.tabs is None:
+            return
+        tab = QWidget()
+        tab.setObjectName("libraryTab")
+        layout = QHBoxLayout(tab)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(12)
+        intro = QWidget()
+        intro.setObjectName("timelineInspector")
+        intro_layout = QVBoxLayout(intro)
+        intro_layout.setContentsMargins(12, 12, 12, 12)
+        intro_layout.setSpacing(8)
+        title = QLabel("Library")
+        title.setObjectName("timelineInspectorTitle")
+        body = QLabel("Central asset management for imported Audio Assets and created Speech Assets. Speech Assets uses the existing Speech Bin data model so saved chains and Timeline integration remain compatible.")
+        body.setObjectName("timelineInspectorText")
+        body.setWordWrap(True)
+        intro_layout.addWidget(title)
+        intro_layout.addWidget(body)
+        intro_layout.addStretch(1)
+        layout.addWidget(intro, 1)
+        layout.addWidget(self._build_speech_assets_panel("library"), 2)
+        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "Library")
+        self._timeline_refresh_speech_bin_cards()
+
     def _build_timeline_tab(self) -> None:
         if self.tabs is None:
             return
@@ -8724,10 +9185,10 @@ class WaveToyWindow(QMainWindow):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(14)
 
-        title = QLabel("🎬 Timeline Storyboard")
+        title = QLabel("Timeline")
         title.setObjectName("timelineStoryboardTitle")
         title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel("Drop the current sound, drag big clips across lanes, play the story, then export the mix.")
+        subtitle = QLabel("Arrange Audio Assets and Speech Assets on measured lanes, edit timing, then render and export the mix.")
         subtitle.setObjectName("timelineStoryboardSubtitle")
         subtitle.setWordWrap(True)
         subtitle.setAlignment(Qt.AlignCenter)
@@ -8741,17 +9202,17 @@ class WaveToyWindow(QMainWindow):
         transport_layout.setContentsMargins(12, 10, 12, 10)
         transport_layout.setSpacing(12)
         buttons = [
-            self._make_story_button("▶️", "Play Story", "#5cdb95", self._timeline_play_story),
-            self._make_story_button("⏹", "Stop", "#ff6b6b", self._timeline_stop_story),
-            self._make_story_button("🎚", "Mix Story", "#ffd166", self._timeline_render_mix),
-            self._make_story_button("➕", "Drop Sound", "#b8f2e6", self._drop_story_sound),
-            self._make_story_button("🛤️", "Add Lane", "#d7b9ff", self._add_story_lane),
-            self._make_story_button("➕", "Add Voice Lane", "#ffc6ff", self._add_voice_lane),
-            self._make_story_button("🔍", "Zoom In", "#caffbf", lambda checked=False: self._timeline_zoom(0.72)),
-            self._make_story_button("🔎", "Zoom Out", "#ffc6ff", lambda checked=False: self._timeline_zoom(1.28)),
+            self._make_story_button("▶", "Play", "#5cdb95", self._timeline_play_story),
+            self._make_story_button("■", "Stop", "#ff6b6b", self._timeline_stop_story),
+            self._make_story_button("Mix", "Render Mix", "#ffd166", self._timeline_render_mix),
+            self._make_story_button("+", "Add Sound", "#b8f2e6", self._drop_story_sound),
+            self._make_story_button("Lane", "Add Lane", "#d7b9ff", self._add_story_lane),
+            self._make_story_button("Voice", "Add Voice Lane", "#ffc6ff", self._add_voice_lane),
+            self._make_story_button("+", "Zoom In", "#caffbf", lambda checked=False: self._timeline_zoom(0.72)),
+            self._make_story_button("-", "Zoom Out", "#ffc6ff", lambda checked=False: self._timeline_zoom(1.28)),
         ]
         for button in buttons:
-            button.setMinimumHeight(72)
+            button.setMinimumHeight(44)
             transport_layout.addWidget(button)
         layout.addWidget(transport)
 
@@ -8763,14 +9224,14 @@ class WaveToyWindow(QMainWindow):
         for tool, icon, label, color, shortcut in (
             ("select", "➤", "Select/Move", "#b8f2e6", "V"),
             ("trim", "↔", "Trim Tool", "#caffbf", "T"),
-            ("stretch", "⤢", "Stretch Tool", "#ffd166", "S"),
+            ("stretch", "⤢", "Time Stretch", "#ffd166", "S"),
             ("split", "✂", "Split", "#f1c0e8", "Ctrl+B"),
             ("delete", "⌫", "Delete", "#ffadad", "Delete"),
         ):
             button = self._make_story_button(icon, f"{label} ({shortcut})", color, (self._timeline_split_selected if tool == "split" else self._timeline_delete_selected if tool == "delete" else lambda checked=False, name=tool: self._timeline_set_tool(name)))
             button.setCheckable(tool in {"select", "trim", "stretch"})
             button.setChecked(tool == self.timeline_edit_tool)
-            button.setMinimumHeight(66)
+            button.setMinimumHeight(40)
             edit_layout.addWidget(button)
             if tool in {"select", "trim", "stretch"}:
                 self.timeline_tool_buttons[tool] = button
@@ -8779,7 +9240,7 @@ class WaveToyWindow(QMainWindow):
             ("💾", "Export Last Mix", "#fdffb6", self._timeline_export_last_mix),
         ):
             button = self._make_story_button(icon, label, color, callback)
-            button.setMinimumHeight(66)
+            button.setMinimumHeight(40)
             edit_layout.addWidget(button)
         self.timeline_snap_checkbox = QCheckBox("Snap")
         self.timeline_snap_checkbox.setChecked(self.timeline_snap_enabled)
@@ -8791,6 +9252,14 @@ class WaveToyWindow(QMainWindow):
         self.timeline_snap_combo.setCurrentIndex(3)
         self.timeline_snap_combo.currentIndexChanged.connect(self._timeline_snap_changed)
         edit_layout.addWidget(self.timeline_snap_combo)
+        quality_label = QLabel("Stretch Quality")
+        quality_label.setObjectName("timelineInspectorText")
+        edit_layout.addWidget(quality_label)
+        self.timeline_stretch_quality_combo = QComboBox()
+        self.timeline_stretch_quality_combo.addItems(["Fast", "Balanced", "Best available"])
+        self.timeline_stretch_quality_combo.setCurrentText(self.timeline_stretch_quality)
+        self.timeline_stretch_quality_combo.currentTextChanged.connect(self._timeline_stretch_quality_changed)
+        edit_layout.addWidget(self.timeline_stretch_quality_combo)
         layout.addWidget(edit_bar)
         QShortcut(QKeySequence("V"), self, activated=lambda: self._timeline_set_tool("select"))
         QShortcut(QKeySequence("T"), self, activated=lambda: self._timeline_set_tool("trim"))
@@ -8809,13 +9278,13 @@ class WaveToyWindow(QMainWindow):
         palette_layout = QVBoxLayout(palette)
         palette_layout.setContentsMargins(12, 12, 12, 12)
         palette_layout.setSpacing(10)
-        palette_title = QLabel("🎧 Audio Palette")
+        palette_title = QLabel("Audio Assets")
         palette_title.setObjectName("timelineInspectorTitle")
-        palette_subtitle = QLabel("Import sounds, then drag cards into lanes or tap ➕ Add.")
+        palette_subtitle = QLabel("Import sounds, then drag cards into lanes or use Add.")
         palette_subtitle.setObjectName("timelineInspectorText")
         palette_subtitle.setWordWrap(True)
-        import_button = self._make_story_button("📥", "Import Sounds", "#b8f2e6", self._timeline_import_sounds)
-        import_button.setMinimumHeight(70)
+        import_button = self._make_story_button("Import", "Import Sounds", "#b8f2e6", self._timeline_import_sounds)
+        import_button.setMinimumHeight(42)
         self.timeline_palette_count_label = QLabel("No imported sounds yet.")
         self.timeline_palette_count_label.setObjectName("timelineInspectorText")
         self.timeline_palette_count_label.setWordWrap(True)
@@ -8835,39 +9304,10 @@ class WaveToyWindow(QMainWindow):
         audio_layout.addWidget(import_button)
         audio_layout.addWidget(self.timeline_palette_count_label)
         audio_layout.addWidget(palette_scroll, 1)
-        drawer_tabs.addTab(audio_page, "🎧 Audio")
+        drawer_tabs.addTab(audio_page, "Audio Assets")
 
-        speech_page = QWidget()
-        speech_page_layout = QVBoxLayout(speech_page)
-        speech_page_layout.setContentsMargins(4, 4, 4, 4)
-        speech_page_layout.setSpacing(10)
-        speech_title = QLabel("🗣 Speech Bin")
-        speech_title.setObjectName("timelineInspectorTitle")
-        speech_subtitle = QLabel("Created phonemes, chains, syllables, and words appear here. Drag cards into voice lanes or tap ➕ Add.")
-        speech_subtitle.setObjectName("timelineInspectorText")
-        speech_subtitle.setWordWrap(True)
-        speech_actions = QHBoxLayout()
-        for icon, label, color, callback in (
-            ("📥", "Add Created Word", "#ffd166", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("word")),
-            ("📥", "Add Syllable", "#e7c6ff", lambda checked=False: self._timeline_add_first_speech_type_to_playhead("syllable")),
-            ("🧹", "Clear Bin", "#ffadad", self._timeline_clear_speech_bin),
-        ):
-            button = self._make_story_button(icon, label, color, callback)
-            button.setMinimumHeight(58)
-            speech_actions.addWidget(button)
-        self.timeline_speech_count_label = QLabel("No created speech yet.")
-        self.timeline_speech_count_label.setObjectName("timelineInspectorText")
-        self.timeline_speech_count_label.setWordWrap(True)
-        speech_scroll = WaveToyScrollArea(scroll_speed=0.9)
-        self.timeline_speech_bin_widget = QWidget()
-        self.timeline_speech_bin_widget.setObjectName("timelineSpeechBinList")
-        speech_scroll.setWidget(self.timeline_speech_bin_widget)
-        speech_page_layout.addWidget(speech_title)
-        speech_page_layout.addWidget(speech_subtitle)
-        speech_page_layout.addLayout(speech_actions)
-        speech_page_layout.addWidget(self.timeline_speech_count_label)
-        speech_page_layout.addWidget(speech_scroll, 1)
-        drawer_tabs.addTab(speech_page, "🗣 Speech")
+        speech_page = self._build_speech_assets_panel("timeline")
+        drawer_tabs.addTab(speech_page, "Speech Assets")
         palette_layout.addWidget(drawer_tabs, 1)
         split.addWidget(palette)
         self._timeline_refresh_palette_cards()
@@ -8887,7 +9327,7 @@ class WaveToyWindow(QMainWindow):
         inspector_layout = QVBoxLayout(inspector)
         inspector_layout.setContentsMargins(12, 12, 12, 12)
         inspector_layout.setSpacing(10)
-        inspector_title = QLabel("🔎 Selected Clip")
+        inspector_title = QLabel("Selected Clip Inspector")
         inspector_title.setObjectName("timelineInspectorTitle")
         self.timeline_inspector_label = QLabel("No clip selected. Click a clip, or click empty time to move the playhead.")
         self.timeline_inspector_label.setObjectName("timelineInspectorText")
@@ -8898,13 +9338,13 @@ class WaveToyWindow(QMainWindow):
         inspector_layout.addWidget(inspector_title)
         inspector_layout.addWidget(self.timeline_inspector_label)
         inspector_layout.addStretch(1)
-        inspector_layout.addWidget(QLabel("🐞 Debug"))
+        inspector_layout.addWidget(QLabel("Status"))
         inspector_layout.addWidget(self.timeline_status_label)
         split.addWidget(inspector)
         layout.addLayout(split, 1)
 
         self._timeline_update_inspector()
-        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "🎬 Timeline")
+        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "Timeline")
         self._timeline_debug("Timeline tab constructed")
 
     def _speech_display_sequence_for_chain(self) -> str:
@@ -8949,7 +9389,7 @@ class WaveToyWindow(QMainWindow):
         if audio.ndim == 1:
             audio = np.column_stack([audio, audio]).astype(np.float32)
         if audio.ndim != 2 or audio.size == 0:
-            QMessageBox.warning(self, "Speech Bin", "That speech item did not render any audio, so it was not added to the Speech Bin.")
+            QMessageBox.warning(self, "Speech Assets", "That speech item did not render any audio, so it was not added to Speech Assets.")
             return None
         if audio.shape[1] == 1:
             audio = np.repeat(audio, 2, axis=1)
@@ -8973,7 +9413,7 @@ class WaveToyWindow(QMainWindow):
         self.timeline_speech_bin.append(item)
         self.timeline_selected_speech_item_id = item.id
         self._timeline_refresh_speech_bin_cards()
-        self._timeline_debug(f"Speech Bin item added id={item.id} type={item.item_type} name={item.name} duration={item.duration_seconds:.3f}s cache={item.audio_cache_path}")
+        self._timeline_debug(f"Speech Assets item added id={item.id} type={item.item_type} name={item.name} duration={item.duration_seconds:.3f}s cache={item.audio_cache_path}")
         return item
 
     def _current_phoneme_speech_name(self, phoneme: ArticulationPhoneme) -> str:
@@ -8995,7 +9435,7 @@ class WaveToyWindow(QMainWindow):
 
     def _create_chain_speech_bin_item(self) -> SpeechBinItem | None:
         if not self.articulation_chain_items:
-            QMessageBox.information(self, "Speech Bin", "Add at least one phoneme to the Articulation Chain first.")
+            QMessageBox.information(self, "Speech Assets", "Add at least one phoneme to the Articulation Chain first.")
             return None
         rendered = [self._render_articulation_with_source(item.phoneme_for_render()) for item in self.articulation_chain_items]
         audio = np.vstack([clip for clip in rendered if clip.size]) if rendered else np.zeros((0, 2), dtype=np.float32)
@@ -9011,7 +9451,7 @@ class WaveToyWindow(QMainWindow):
 
     def _create_rendered_speech_bin_item(self, item_type: str, name: str | None = None) -> SpeechBinItem | None:
         if not self.articulation_chain_items:
-            QMessageBox.information(self, "Speech Bin", "Add at least one phoneme to the Articulation Chain first.")
+            QMessageBox.information(self, "Speech Assets", "Add at least one phoneme to the Articulation Chain first.")
             return None
         if self.articulation_word_render_audio.size == 0:
             audio = self._render_word_audio_for_current_chain()
@@ -9051,7 +9491,7 @@ class WaveToyWindow(QMainWindow):
                 return audio
         item = self._create_rendered_speech_bin_item("syllable")
         if item is not None:
-            QMessageBox.information(self, "Create Syllable", f"Syllable ready in Speech Bin: {item.name} ({item.duration_seconds:.2f}s).")
+            QMessageBox.information(self, "Create Syllable", f"Syllable saved to Speech Assets: {item.name} ({item.duration_seconds:.2f}s).")
         return self.articulation_word_render_audio
 
     def _send_articulation_word_to_timeline(self, checked: bool = False) -> None:
@@ -9079,7 +9519,7 @@ class WaveToyWindow(QMainWindow):
                 if widget is not None:
                     widget.deleteLater()
         if not self.timeline_audio_palette:
-            empty = QLabel("📥 Import WAV files to build your toy sound shelf.")
+            empty = QLabel("📥 Import WAV files to build Audio Assets.")
             empty.setObjectName("timelineInspectorText")
             empty.setWordWrap(True)
             empty.setMinimumHeight(92)
@@ -9107,32 +9547,40 @@ class WaveToyWindow(QMainWindow):
         return None
 
     def _timeline_refresh_speech_bin_cards(self) -> None:
-        if self.timeline_speech_bin_widget is None:
+        if not self.speech_asset_list_widgets and self.timeline_speech_bin_widget is None:
             return
-        layout = self.timeline_speech_bin_widget.layout()
-        if layout is None:
-            layout = QVBoxLayout(self.timeline_speech_bin_widget)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(10)
-        else:
-            while layout.count():
-                item = layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
-        if not self.timeline_speech_bin:
-            empty = QLabel("🧩 Create a word, syllable, chain, or phoneme in Articulation Lab to fill this phrase palette.")
-            empty.setObjectName("timelineInspectorText")
-            empty.setWordWrap(True)
-            empty.setMinimumHeight(96)
-            layout.addWidget(empty)
-        else:
-            for item in self.timeline_speech_bin:
-                layout.addWidget(SpeechBinCard(self, item))
-        layout.addStretch(1)
+        targets = list(self.speech_asset_list_widgets)
+        if not targets and self.timeline_speech_bin_widget is not None:
+            targets = [(self.timeline_speech_bin_widget, "all")]
+        for list_widget, item_filter in targets:
+            layout = list_widget.layout()
+            if layout is None:
+                layout = QVBoxLayout(list_widget)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(8)
+            else:
+                while layout.count():
+                    item = layout.takeAt(0)
+                    widget = item.widget()
+                    if widget is not None:
+                        widget.deleteLater()
+            visible_items = [item for item in self.timeline_speech_bin if item_filter == "all" or item.item_type == item_filter or (item_filter == "phrase" and item.item_type == "chain")]
+            if not visible_items:
+                label = "Create a word, syllable, phrase, or phoneme in Articulation Lab to populate Speech Assets."
+                if item_filter != "all":
+                    label = f"No {item_filter} assets yet. Create one in Articulation Lab; it will appear here immediately."
+                empty = QLabel(label)
+                empty.setObjectName("timelineInspectorText")
+                empty.setWordWrap(True)
+                empty.setMinimumHeight(72)
+                layout.addWidget(empty)
+            else:
+                for item in visible_items:
+                    layout.addWidget(SpeechBinCard(self, item))
+            layout.addStretch(1)
         if self.timeline_speech_count_label is not None:
             count = len(self.timeline_speech_bin)
-            self.timeline_speech_count_label.setText(f"{count} speech card{'s' if count != 1 else ''} ready for phrases." if count else "No created speech yet.")
+            self.timeline_speech_count_label.setText(f"{count} Speech Asset{'s' if count != 1 else ''} ready." if count else "No created speech yet.")
 
     def _timeline_select_speech_item(self, item_id: int) -> None:
         item = self._timeline_speech_item_by_id(item_id)
@@ -9151,11 +9599,11 @@ class WaveToyWindow(QMainWindow):
     def _timeline_preview_speech_item(self, item_id: int | None = None) -> None:
         item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
         if item is None:
-            QMessageBox.information(self, "Speech Bin", "Select a speech card to preview.")
+            QMessageBox.information(self, "Speech Assets", "Select a speech card to preview.")
             return
         audio, warning = self._speech_audio_for_item(item)
         if audio.size == 0:
-            QMessageBox.warning(self, "Speech Bin Preview", warning or "That speech card could not render audio.")
+            QMessageBox.warning(self, "Speech Assets Preview", warning or "That speech card could not render audio.")
             return
         self.timeline_selected_speech_item_id = item.id
         self._timeline_refresh_speech_bin_cards()
@@ -9165,14 +9613,14 @@ class WaveToyWindow(QMainWindow):
     def _timeline_rename_speech_item(self, item_id: int | None = None) -> None:
         item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
         if item is None:
-            QMessageBox.information(self, "Speech Bin", "Select a speech card to rename.")
+            QMessageBox.information(self, "Speech Assets", "Select a speech card to rename.")
             return
         name, ok = QInputDialog.getText(self, "Rename Speech Card", "Speech card name:", text=item.name)
         if not ok:
             return
         name = name.strip()
         if not name:
-            QMessageBox.information(self, "Speech Bin", "Speech card names cannot be blank.")
+            QMessageBox.information(self, "Speech Assets", "Speech card names cannot be blank.")
             return
         item.name = name
         self.timeline_selected_speech_item_id = item.id
@@ -9182,11 +9630,11 @@ class WaveToyWindow(QMainWindow):
     def _timeline_duplicate_speech_item(self, item_id: int | None = None) -> None:
         item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
         if item is None:
-            QMessageBox.information(self, "Speech Bin", "Select a speech card to duplicate.")
+            QMessageBox.information(self, "Speech Assets", "Select a speech card to duplicate.")
             return
         audio, warning = self._speech_audio_for_item(item)
         if audio.size == 0:
-            QMessageBox.warning(self, "Speech Bin", warning or "That speech card could not be duplicated because it has no audio.")
+            QMessageBox.warning(self, "Speech Assets", warning or "That speech card could not be duplicated because it has no audio.")
             return
         duplicate = self._add_speech_bin_item(
             name=f"{item.name} Copy",
@@ -9203,12 +9651,12 @@ class WaveToyWindow(QMainWindow):
     def _timeline_delete_speech_item(self, item_id: int | None = None) -> None:
         item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
         if item is None:
-            QMessageBox.information(self, "Speech Bin", "Select a speech card to delete.")
+            QMessageBox.information(self, "Speech Assets", "Select a speech card to delete.")
             return
         response = QMessageBox.question(
             self,
             "Delete Speech Card",
-            f"Delete '{item.name}' from the Speech Bin? Existing Timeline clips stay in the arrangement.",
+            f"Delete '{item.name}' from Speech Assets? Existing Timeline clips stay in the arrangement.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -9223,12 +9671,12 @@ class WaveToyWindow(QMainWindow):
     def _timeline_clear_speech_bin(self, checked: bool = False) -> None:
         del checked
         if not self.timeline_speech_bin:
-            QMessageBox.information(self, "Speech Bin", "The Speech Bin is already empty.")
+            QMessageBox.information(self, "Speech Assets", "Speech Assets is already empty.")
             return
         response = QMessageBox.question(
             self,
-            "Clear Speech Bin",
-            "Clear all Speech Bin source cards? Existing Timeline clips stay in the arrangement.",
+            "Clear Speech Assets",
+            "Clear all Speech Assets source cards? Existing Timeline clips stay in the arrangement.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -9238,7 +9686,7 @@ class WaveToyWindow(QMainWindow):
         self.timeline_speech_bin.clear()
         self.timeline_selected_speech_item_id = None
         self._timeline_refresh_speech_bin_cards()
-        self._timeline_debug(f"Speech Bin cleared count={count}; timeline clips preserved")
+        self._timeline_debug(f"Speech Assets cleared count={count}; timeline clips preserved")
 
     def _rerender_speech_item_from_metadata(self, item: SpeechBinItem) -> np.ndarray:
         metadata = item.articulation_metadata or {}
@@ -9297,7 +9745,7 @@ class WaveToyWindow(QMainWindow):
     def _timeline_add_first_speech_type_to_playhead(self, item_type: str) -> None:
         item = next((candidate for candidate in reversed(self.timeline_speech_bin) if candidate.item_type == item_type), None)
         if item is None:
-            QMessageBox.information(self, "Speech Bin", f"No created {item_type} cards are in the Speech Bin yet.")
+            QMessageBox.information(self, "Speech Assets", f"No created {item_type} cards are in Speech Assets yet.")
             return
         self._timeline_add_speech_item_to_playhead(item.id)
 
@@ -9305,18 +9753,18 @@ class WaveToyWindow(QMainWindow):
         target_id = item_id if item_id is not None else self.timeline_selected_speech_item_id
         item = self._timeline_speech_item_by_id(target_id)
         if item is None:
-            QMessageBox.information(self, "Speech Bin", "Select or create a speech card first.")
+            QMessageBox.information(self, "Speech Assets", "Select or create a speech card first.")
             return
         self._timeline_add_speech_item_to_timeline(item.id, self.timeline_playhead_seconds, self._first_voice_lane_index())
 
     def _timeline_add_speech_item_to_timeline(self, item_id: int, start_time_seconds: float, lane: int) -> None:
         item = self._timeline_speech_item_by_id(item_id)
         if item is None:
-            QMessageBox.warning(self, "Speech Bin", "That speech card is no longer available.")
+            QMessageBox.warning(self, "Speech Assets", "That speech card is no longer available.")
             return
         audio, warning = self._speech_audio_for_item(item)
         if audio.size == 0:
-            QMessageBox.warning(self, "Speech Bin", warning or "That speech card could not render audio.")
+            QMessageBox.warning(self, "Speech Assets", warning or "That speech card could not render audio.")
         clip_id = self.timeline_next_clip_id
         self.timeline_next_clip_id += 1
         clip = TimelineClip(
@@ -9386,7 +9834,7 @@ class WaveToyWindow(QMainWindow):
         self._timeline_refresh_palette_cards()
         if imported:
             self.timeline_selected_palette_item_id = self.timeline_audio_palette[-1].item_id
-        message = f"Imported {imported} sound{'s' if imported != 1 else ''} into the Audio Palette."
+        message = f"Imported {imported} sound{'s' if imported != 1 else ''} into the Audio Assets."
         if failures:
             message += "\n\nSome files could not be imported:\n" + "\n".join(failures[:6])
         if imported and not failures:
@@ -9398,14 +9846,14 @@ class WaveToyWindow(QMainWindow):
         target_id = item_id if item_id is not None else self.timeline_selected_palette_item_id
         item = self._timeline_palette_item_by_id(target_id)
         if item is None:
-            QMessageBox.information(self, "Audio Palette", "Select or import a palette sound first.")
+            QMessageBox.information(self, "Audio Assets", "Select or import a palette sound first.")
             return
         self._timeline_add_palette_item_to_timeline(item.item_id, self.timeline_playhead_seconds, 0)
 
     def _timeline_add_palette_item_to_timeline(self, item_id: int, start_time_seconds: float, lane: int) -> None:
         item = self._timeline_palette_item_by_id(item_id)
         if item is None:
-            QMessageBox.warning(self, "Audio Palette", "That palette sound is no longer available.")
+            QMessageBox.warning(self, "Audio Assets", "That palette sound is no longer available.")
             return
         clip_id = self.timeline_next_clip_id
         self.timeline_next_clip_id += 1
@@ -9507,29 +9955,63 @@ class WaveToyWindow(QMainWindow):
             audio = np.column_stack([audio, audio]).astype(np.float32)
         if audio.ndim != 2 or audio.size == 0:
             return np.zeros((0, 2), dtype=np.float32)
-        if audio.shape[1] == 1:
-            audio = np.repeat(audio, 2, axis=1)
-        if audio.shape[1] > 2:
-            audio = audio[:, :2]
-        if int(clip.sample_rate) != SAMPLE_RATE:
-            audio = _resample_audio(audio, int(clip.sample_rate), SAMPLE_RATE)
-        rate = float(np.clip(clip.playback_rate or 1.0, 0.25, 4.0))
-        if abs(rate - 1.0) > 0.0005 and len(audio) > 1:
-            target_len = max(1, int(round(len(audio) / rate)))
-            x_old = np.linspace(0.0, 1.0, len(audio), endpoint=True)
-            x_new = np.linspace(0.0, 1.0, target_len, endpoint=True)
-            left = np.interp(x_new, x_old, audio[:, 0])
-            right = np.interp(x_new, x_old, audio[:, 1])
-            audio = np.column_stack([left, right]).astype(np.float32)
+        audio = _ensure_stereo_float(audio)
+        source_rate = int(clip.sample_rate or SAMPLE_RATE)
+        if source_rate != SAMPLE_RATE:
+            audio = _resample_audio(audio, source_rate, SAMPLE_RATE)
+        trim_duration = len(audio) / float(SAMPLE_RATE) if audio.size else 0.0
+        target_duration = max(0.0, float(clip.duration_seconds))
+        target_len = max(1, int(round(target_duration * SAMPLE_RATE))) if target_duration > 0 else 0
+        stretch_ratio = target_duration / max(1e-9, trim_duration)
+        pitch_preserve = bool(getattr(self, "timeline_preserve_pitch", True) and clip.pitch_preserve_enabled)
+        algorithm = clip.stretch_algorithm or "numpy_phase_vocoder"
+        if audio.size and target_len > 0 and abs(target_len - len(audio)) > 1:
+            cache_key = (
+                len(audio),
+                target_len,
+                round(float(clip.trim_start_seconds), 6),
+                round(float(clip.trim_end_seconds), 6),
+                round(float(clip.playback_rate), 6),
+                self.timeline_stretch_quality,
+                pitch_preserve,
+                algorithm,
+            )
+            if pitch_preserve:
+                if clip.stretched_audio_cache is not None and clip._stretch_cache_key == cache_key:
+                    audio = np.array(clip.stretched_audio_cache, dtype=np.float32, copy=True)
+                else:
+                    audio = time_stretch_preserve_pitch(audio, SAMPLE_RATE, target_duration, self.timeline_stretch_quality)
+                    clip.stretched_audio_cache = np.array(audio, dtype=np.float32, copy=True)
+                    clip._stretch_cache_key = cache_key
+            else:
+                # Compatibility escape hatch only: default Timeline stretch never uses this pitch-shifting path.
+                target_rate = max(1, int(round(SAMPLE_RATE / max(0.25, float(clip.playback_rate or 1.0)))))
+                audio = _resample_audio(audio, SAMPLE_RATE, target_rate)
+                audio = _fit_audio_length(audio, target_len)
+                algorithm = "legacy_speed_resample"
+        else:
+            audio = _fit_audio_length(audio, target_len) if target_len > 0 else np.zeros((0, 2), dtype=np.float32)
         clip.rendered_duration_seconds = len(audio) / SAMPLE_RATE if audio.size else 0.0
+        self._timeline_stretch_debug(
+            f"clip_id={clip.clip_id} source_duration={clip.source_duration_seconds:.3f}s "
+            f"trim_duration={trim_duration:.3f}s target_duration={target_duration:.3f}s "
+            f"stretch_ratio={stretch_ratio:.3f} algorithm={algorithm} "
+            f"output_duration={clip.rendered_duration_seconds:.3f}s pitch_preserve_enabled={pitch_preserve}"
+        )
         return np.asarray(audio, dtype=np.float32)
+
+    def _timeline_tool_display_name(self, tool: str) -> str:
+        return {"select": "Select", "trim": "Trim", "stretch": "Time Stretch", "split": "Split", "delete": "Delete"}.get(tool, str(tool).title())
 
     def _timeline_set_tool(self, tool: str) -> None:
         self.timeline_edit_tool = tool
         for name, button in getattr(self, "timeline_tool_buttons", {}).items():
             button.setChecked(name == tool)
         if self.timeline_status_label is not None:
-            self.timeline_status_label.setText(f"Tool: {tool.title()} • Snap {'on' if self.timeline_snap_enabled else 'off'} {self.timeline_snap_seconds:.3f}s")
+            self.timeline_status_label.setText(
+                f"Tool: {self._timeline_tool_display_name(tool)} • Snap {'on' if self.timeline_snap_enabled else 'off'} "
+                f"{self.timeline_snap_seconds:.3f}s • Pitch-preserving stretch {self.timeline_stretch_quality}"
+            )
         if self.timeline_canvas is not None:
             self.timeline_canvas.update()
 
@@ -9541,13 +10023,21 @@ class WaveToyWindow(QMainWindow):
             self.timeline_snap_seconds = float(self.timeline_snap_combo.currentData() or 0.05)
         self._timeline_set_tool(self.timeline_edit_tool)
 
+    def _timeline_stretch_quality_changed(self, text: str) -> None:
+        self.timeline_stretch_quality = str(text or "Balanced")
+        for clip in self.timeline_clips:
+            clip.stretched_audio_cache = None
+            clip._stretch_cache_key = None
+        self._timeline_mark_mix_dirty()
+        self._timeline_set_tool(self.timeline_edit_tool)
+
 
     def _drop_story_sound(self, checked: bool = False) -> None:
         self._timeline_debug("Drop Current Sound clicked")
         audio = self._timeline_current_audio(force=True)
         if audio.size == 0 or len(audio) < 8:
             self._timeline_debug("Drop rejected: empty audio")
-            QMessageBox.warning(self, "Timeline drop failed", "Wave Toy could not find a rendered sound to drop. Try Make Sound, then Drop Sound again.")
+            QMessageBox.warning(self, "Timeline drop failed", "WaveToy could not find a rendered sound to drop. Try Make Sound, then Drop Sound again.")
             return
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak <= 1e-6:
@@ -9610,15 +10100,22 @@ class WaveToyWindow(QMainWindow):
         visual_width = None
         if self.timeline_canvas is not None:
             visual_width = clip.duration_seconds / self.timeline_canvas.seconds_per_pixel
+        trimmed_duration = clip.source_visible_duration_seconds
+        rendered_duration = clip.rendered_duration_seconds or clip.duration_seconds
         source_text = (
             f"\nSource type: {clip.source_type}"
             f"\nStart time: {clip.start_time_seconds:.3f}s"
             f"\nEnd time: {clip.end_time_seconds:.3f}s"
             f"\nSource duration: {clip.source_duration_seconds:.3f}s"
-            f"\nVisible duration: {clip.duration_seconds:.3f}s"
+            f"\nTrimmed duration: {trimmed_duration:.3f}s"
+            f"\nStretched duration: {clip.duration_seconds:.3f}s"
+            f"\nRendered duration: {rendered_duration:.3f}s"
             f"\nTrim start: {clip.trim_start_seconds:.3f}s"
             f"\nTrim end: {clip.trim_end_seconds:.3f}s"
-            f"\nPlayback rate: {clip.playback_rate:.2f}x"
+            f"\nStretch ratio: {clip.stretch_ratio:.2f}x duration"
+            f"\nTime-stretched: {'yes' if abs(clip.stretch_ratio - 1.0) > 0.005 else 'no'}"
+            f"\nPitch preserved: {'yes' if clip.pitch_preserve_enabled else 'no'}"
+            f"\nStretch algorithm: {clip.stretch_algorithm}"
             f"\nSample count: {len(clip.audio)}"
             f"\nSample rate: {clip.sample_rate} Hz"
         )
@@ -9627,12 +10124,11 @@ class WaveToyWindow(QMainWindow):
         if clip.speech_metadata:
             cache_path = str(clip.speech_metadata.get("audio_cache_path") or "")
             cache_status = "cached" if cache_path and Path(cache_path).exists() else "missing / will re-render if needed"
-            rendered_duration = clip.duration_seconds
             source_text += (
                 f"\nSpeech type: {clip.speech_metadata.get('item_type', 'speech')}"
                 f"\nPhoneme sequence: {clip.speech_metadata.get('display_sequence', '')}"
                 f"\nIPA: {clip.speech_metadata.get('ipa_sequence', '')}"
-                f"\nRendered duration: {rendered_duration:.3f}s"
+                f"\nSpeech asset visible duration: {clip.duration_seconds:.3f}s"
                 f"\nCache path: {cache_path or 'none'}"
                 f"\nCache status: {cache_status}"
                 f"\nArticulation source mode: {clip.speech_metadata.get('source_mode', 'unknown')}"
@@ -9640,7 +10136,7 @@ class WaveToyWindow(QMainWindow):
         if clip.muted_warning:
             source_text += f"\nWarning: {clip.muted_warning}"
         self.timeline_inspector_label.setText(
-            f"{clip.name}\nID: {clip.clip_id}\nLane: {clip.lane + 1}\nTool: {self.timeline_edit_tool.title()}\nDuration: {clip.duration_seconds:.3f}s{source_text}"
+            f"{clip.name}\nID: {clip.clip_id}\nLane: {clip.lane + 1}\nTool: {self._timeline_tool_display_name(self.timeline_edit_tool)}\nDuration: {clip.duration_seconds:.3f}s{source_text}"
         )
 
     def _timeline_update_duration(self) -> None:
@@ -9681,6 +10177,8 @@ class WaveToyWindow(QMainWindow):
             trim_end_seconds=source.trim_end_seconds,
             playback_rate=source.playback_rate,
             rendered_duration_seconds=source.rendered_duration_seconds,
+            stretch_mode=source.stretch_mode,
+            stretch_algorithm=source.stretch_algorithm,
         )
         self.timeline_clips.append(duplicate)
         self.timeline_selected_clip_id = duplicate.clip_id
@@ -9708,6 +10206,8 @@ class WaveToyWindow(QMainWindow):
         original_trim_end = source.trim_end_seconds
         right_trim_start = source.trim_start_seconds + source_delta
         source.trim_end_seconds = max(0.0, source.source_duration_seconds - source.trim_start_seconds - source_delta)
+        source.stretched_audio_cache = None
+        source._stretch_cache_key = None
         clip_id = self.timeline_next_clip_id
         self.timeline_next_clip_id += 1
         right = TimelineClip(
@@ -9727,6 +10227,8 @@ class WaveToyWindow(QMainWindow):
             trim_start_seconds=right_trim_start,
             trim_end_seconds=original_trim_end,
             playback_rate=source.playback_rate,
+            stretch_mode=source.stretch_mode,
+            stretch_algorithm=source.stretch_algorithm,
         )
         self.timeline_clips.append(right)
         self.timeline_selected_clip_id = right.clip_id
@@ -9760,7 +10262,7 @@ class WaveToyWindow(QMainWindow):
         self._timeline_update_duration()
         if not self.timeline_clips:
             self._timeline_debug("Arrangement mixdown clip_count=0 duration=0.000s peak=0.0000")
-            QMessageBox.warning(self, "Timeline mix", "Drop at least one sound before mixing the story.")
+            QMessageBox.warning(self, "Timeline mix", "Drop at least one sound before rendering the mix.")
             self.timeline_last_mix = np.zeros((0, 2), dtype=np.float32)
             return self.timeline_last_mix
         total_samples = max(1, int(math.ceil(self.timeline_duration_seconds * SAMPLE_RATE)))
@@ -9784,7 +10286,7 @@ class WaveToyWindow(QMainWindow):
         return self.timeline_last_mix
 
     def _timeline_play_story(self, checked: bool = False) -> None:
-        self._timeline_debug("Play Story clicked")
+        self._timeline_debug("Timeline play clicked")
         mix = self._timeline_render_mix(checked=False)
         if mix.size == 0:
             return
@@ -9928,7 +10430,7 @@ class WaveToyWindow(QMainWindow):
                 "time_scale_model": "TimelineCanvas.seconds_per_pixel is the shared timeline scale; clip widths are visible_duration_seconds / seconds_per_pixel.",
                 "snap_enabled": self.timeline_snap_enabled,
                 "snap_seconds": self.timeline_snap_seconds,
-                "edit_model": "Non-destructive trim_start_seconds, trim_end_seconds, and playback_rate metadata are applied during mixdown/export; source audio arrays and source paths remain unchanged.",
+                "edit_model": "Non-destructive trim_start_seconds, trim_end_seconds, and playback_rate duration-scaling metadata are applied during mixdown/export; pitch-preserving time stretch is rendered after trim and source audio arrays/source paths remain unchanged.",
                 "palette_sources": [item.metadata() for item in self.timeline_audio_palette],
                 "speech_bin_sources": [item.metadata() for item in self.timeline_speech_bin],
                 "clip_source_types": [
@@ -9959,10 +10461,10 @@ class WaveToyWindow(QMainWindow):
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
 
-        title = QLabel("🎛 Play")
+        title = QLabel("Synthesis")
         title.setObjectName("title")
         title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel("Fast performance controls. Use Wave Explorer for toy panels or Classic Editor for every fallback control.")
+        subtitle = QLabel("Fast performance controls. Use Wave Explorer for focused panels or Classic Controls for every fallback control.")
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         subtitle.setAlignment(Qt.AlignCenter)
@@ -9979,18 +10481,18 @@ class WaveToyWindow(QMainWindow):
         controls = QHBoxLayout()
         controls.setSpacing(12)
         for label, color, callback in (
-            ("▶ Make Sound!", "#5cdb95", self._play),
-            ("■ Stop!", "#ff6b6b", self._stop),
-            ("💾 Save My Sound", "#ffd166", self._save),
-            ("📂 Load Sound", "#b8f2e6", self._load_sound),
+            ("Play", "#5cdb95", self._play),
+            ("Stop", "#ff6b6b", self._stop),
+            ("Save Audio", "#ffd166", self._save),
+            ("Load Audio", "#b8f2e6", self._load_sound),
         ):
             button = ToyButton(label, color)
-            button.setMinimumHeight(58)
+            button.setMinimumHeight(42)
             button.clicked.connect(callback)
             controls.addWidget(button)
         layout.addLayout(controls)
         layout.addStretch(1)
-        self.tabs.insertTab(0, play, "🎛 Play")
+        self.tabs.insertTab(0, play, "Synthesis")
 
     def _build_wave_explorer_tab(self) -> None:
         if self.tabs is None:
@@ -10006,8 +10508,8 @@ class WaveToyWindow(QMainWindow):
             "shape": ("🎚 Shape Mix", "#5cdb95"),
             "stereo": ("👂 Stereo Space", "#7bdff2"),
             "tuning": ("🎼 Tuning Map", "#b8f2e6"),
-            "pitch": ("🎯 Pitch Toys", "#ffd166"),
-            "effects": ("✨ Sound Magic", "#d7b9ff"),
+            "pitch": ("Pitch Tools", "#ffd166"),
+            "effects": ("Texture / Effects", "#d7b9ff"),
             "presets": ("🌈 Sound Experiment", "#ff99c8"),
         }
         toolbar = QWidget()
@@ -10045,7 +10547,7 @@ class WaveToyWindow(QMainWindow):
         explorer_title = QLabel("🌊 Wave Explorer")
         explorer_title.setObjectName("dashboardExplorerTitle")
         explorer_title.setAlignment(Qt.AlignCenter)
-        explorer_hint = QLabel("Use the compact toolbar above for toy panels; the center stays reserved for the waveform.")
+        explorer_hint = QLabel("Use the compact toolbar above for focused panels; the center stays reserved for the waveform.")
         explorer_hint.setObjectName("symbolHint")
         explorer_hint.setWordWrap(True)
         explorer_hint.setAlignment(Qt.AlignCenter)
@@ -10084,7 +10586,7 @@ class WaveToyWindow(QMainWindow):
         dashboard_layout.addWidget(explorer_panel, 0, 0)
         tab_layout.addLayout(dashboard_layout, 1)
 
-        self.tabs.insertTab(0, tab, "🌊 Wave Explorer")
+        self.tabs.insertTab(1, tab, "Wave Explorer")
 
     def _open_toy_panel(self, panel_key: str) -> None:
         self.active_dashboard_workspace = panel_key
@@ -10138,10 +10640,10 @@ class WaveToyWindow(QMainWindow):
     def _toy_panel_title(self, panel_key: str) -> str:
         return {
             "shape": "🎚 Shape Mix Toy Panel",
-            "pitch": "🎯 Pitch Toys Panel",
+            "pitch": "Pitch Tools Panel",
             "tuning": "🎼 Tuning Map Panel",
             "stereo": "👂 Stereo Space Panel",
-            "effects": "✨ Sound Magic Panel",
+            "effects": "Texture / Effects Panel",
             "presets": "🌈 Sound Experiments Panel",
         }.get(panel_key, "🎛 Toy Panel")
 
@@ -10229,10 +10731,10 @@ class WaveToyWindow(QMainWindow):
 
         specs = {
             "shape": ("🎚 Shape Mix", "#5cdb95"),
-            "pitch": ("🎯 Pitch Toys", "#ffd166"),
+            "pitch": ("Pitch Tools", "#ffd166"),
             "tuning": ("🎼 Tuning Map", "#b8f2e6"),
             "stereo": ("👂 Stereo Space", "#7bdff2"),
-            "effects": ("✨ Sound Magic", "#d7b9ff"),
+            "effects": ("Texture / Effects", "#d7b9ff"),
             "presets": ("🌈 Experiments", "#ff99c8"),
             "save": ("💾 Save Sound", "#ffd166"),
         }
@@ -10431,7 +10933,7 @@ class WaveToyWindow(QMainWindow):
     def _build_effects_workspace(self) -> None:
         if self.dashboard_workspace_layout is None or self.dashboard_workspace_title is None:
             return
-        self.dashboard_workspace_title.setText("✨ Sound Magic Workspace — effect playground around the wave picture.")
+        self.dashboard_workspace_title.setText("Texture / Effects Workspace — signal processors around the waveform.")
         nap = QCheckBox("😴 Paulstretch Nap")
         nap.setChecked(self.paulstretch_enabled.isChecked())
         nap.stateChanged.connect(lambda state: self.paulstretch_enabled.setChecked(bool(state)))
@@ -10586,12 +11088,12 @@ class WaveToyWindow(QMainWindow):
                 border-radius: {SLIDER_GROOVE_RADIUS}px;
             }}
             QSlider::sub-page:horizontal {{
-                background: #7bdff2;
+                background: #eef3f8;
                 border-radius: {SLIDER_GROOVE_RADIUS}px;
             }}
             QSlider::handle:horizontal {{
                 background: #ff4fa3;
-                border: 3px solid white;
+                border: 1px solid white;
                 width: {SLIDER_HANDLE_SIZE}px;
                 height: {SLIDER_HANDLE_SIZE}px;
                 margin: {SLIDER_HANDLE_MARGIN}px 0;
@@ -10605,23 +11107,23 @@ class WaveToyWindow(QMainWindow):
     def _apply_style(self) -> None:
         base_style = """
             QMainWindow {
-                background: #7bdff2;
+                background: #eef3f8;
             }
             QScrollArea {
-                background: #7bdff2;
+                background: #eef3f8;
             }
             QTabWidget#mainTabs::pane {
                 border: 0;
-                background: #7bdff2;
+                background: #eef3f8;
             }
             QTabBar::tab {
                 background: #e9fbff;
-                border: 3px solid rgba(0, 0, 0, 0.12);
+                border: 1px solid rgba(0, 0, 0, 0.12);
                 border-bottom: 0;
                 border-top-left-radius: 14px;
                 border-top-right-radius: 14px;
                 color: #263238;
-                font-size: 18px;
+                font-size: 14px;
                 font-weight: 900;
                 min-height: 42px;
                 padding: 8px 22px;
@@ -10629,13 +11131,13 @@ class WaveToyWindow(QMainWindow):
             QTabBar::tab:selected {
                 background: #ffffff;
             }
-            QWidget#waveExplorerTab, QWidget#playTab, QWidget#timelineStoryboardTab, QScrollArea#graphicalEditorTab, QWidget#graphicalEditorPage {
-                background: #7bdff2;
+            QWidget#waveExplorerTab, QWidget#playTab, QWidget#timelineStoryboardTab, QWidget#libraryTab, QScrollArea#graphicalEditorTab, QWidget#graphicalEditorPage {
+                background: #eef3f8;
             }
             QWidget#graphicalWorkflowCard {
                 background: rgba(255, 255, 255, 0.86);
-                border: 5px solid rgba(255, 153, 200, 0.72);
-                border-radius: 28px;
+                border: 1px solid rgba(255, 153, 200, 0.72);
+                border-radius: 12px;
             }
             QWidget#graphicalLayerList {
                 background: transparent;
@@ -10655,124 +11157,124 @@ class WaveToyWindow(QMainWindow):
                 border-bottom-right-radius: 16px;
             }
             QLabel#graphicalEffectBlock {
-                background: #fff8d9;
+                background: #f7fafc;
                 border: 4px dashed rgba(123, 44, 191, 0.72);
-                border-radius: 22px;
+                border-radius: 10px;
                 color: #263238;
-                font-size: 16px;
+                font-size: 13px;
                 font-weight: 900;
                 padding: 8px;
             }
             QLabel#timelineStoryboardTitle {
-                font-size: 48px;
+                font-size: 28px;
                 font-weight: 900;
                 color: #263238;
             }
             QLabel#timelineStoryboardSubtitle {
-                font-size: 20px;
+                font-size: 15px;
                 font-weight: 900;
                 color: #37474f;
             }
             QWidget#storyTransportBar {
                 background: rgba(255, 255, 255, 0.72);
-                border: 5px solid rgba(255, 153, 200, 0.58);
-                border-radius: 28px;
+                border: 1px solid rgba(255, 153, 200, 0.58);
+                border-radius: 12px;
             }
             QPushButton#storyTransportButton {
-                min-height: 72px;
-                font-size: 22px;
+                min-height: 44px;
+                font-size: 15px;
                 font-weight: 900;
-                border-radius: 24px;
+                border-radius: 10px;
                 padding: 8px 14px;
             }
             QScrollArea#storyboardScroll, QWidget#storyboardLaneRoot {
                 background: transparent;
             }
             QWidget#timelineCanvas {
-                background: #dff8ff;
-                border: 5px solid rgba(0, 0, 0, 0.12);
-                border-radius: 24px;
+                background: #e6f0fb;
+                border: 1px solid rgba(0, 0, 0, 0.12);
+                border-radius: 10px;
             }
-            QWidget#timelineInspector, QWidget#timelineAudioPalette {
-                background: #fff8d9;
-                border: 5px solid rgba(255, 153, 200, 0.72);
-                border-radius: 26px;
+            QWidget#timelineInspector, QWidget#timelineAudioPalette, QWidget#speechAssetsPanel {
+                background: #f7fafc;
+                border: 1px solid rgba(255, 153, 200, 0.72);
+                border-radius: 10px;
             }
             QWidget#timelinePaletteList {
                 background: transparent;
             }
             QLabel#timelineInspectorTitle {
-                font-size: 24px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #263238;
             }
             QLabel#timelineInspectorText {
-                font-size: 16px;
+                font-size: 13px;
                 font-weight: 800;
                 color: #37474f;
             }
             QWidget#storyboardLane {
                 background: #eefbff;
-                border: 5px solid rgba(123, 223, 242, 0.78);
-                border-radius: 28px;
+                border: 1px solid rgba(123, 223, 242, 0.78);
+                border-radius: 12px;
             }
             QLabel#storyboardLaneHeader {
                 background: #ffffff;
-                border: 4px solid rgba(0, 0, 0, 0.14);
-                border-radius: 24px;
+                border: 1px solid rgba(0, 0, 0, 0.14);
+                border-radius: 10px;
                 color: #263238;
-                font-size: 22px;
+                font-size: 15px;
                 font-weight: 900;
                 padding: 8px;
             }
             QWidget#storyboardClipStrip {
                 background: rgba(255, 255, 255, 0.62);
-                border: 3px dashed rgba(0, 0, 0, 0.12);
-                border-radius: 22px;
+                border: 1px dashed rgba(0, 0, 0, 0.12);
+                border-radius: 10px;
             }
             QWidget#storyboardClip {
-                background: #fff8d9;
-                border: 4px solid rgba(255, 153, 200, 0.82);
-                border-radius: 24px;
+                background: #f7fafc;
+                border: 1px solid rgba(255, 153, 200, 0.82);
+                border-radius: 10px;
             }
             QLabel#storyboardClipIcon {
-                font-size: 42px;
+                font-size: 28px;
                 background: #ffffff;
-                border: 3px solid rgba(0, 0, 0, 0.10);
+                border: 1px solid rgba(0, 0, 0, 0.10);
                 border-radius: 18px;
             }
             QLabel#storyboardClipName {
-                font-size: 20px;
+                font-size: 15px;
                 font-weight: 900;
                 color: #263238;
             }
             QLabel#storyboardClipDuration {
-                font-size: 16px;
+                font-size: 13px;
                 font-weight: 900;
                 color: #607d8b;
             }
             QPushButton#storyboardTinyAction {
                 min-width: 48px;
-                min-height: 48px;
+                min-height: 36px;
                 border-radius: 16px;
-                font-size: 20px;
+                font-size: 15px;
                 padding: 0;
             }
             QWidget#toyFloatingPanel {
-                background: #fff8d9;
-                border: 4px solid rgba(255, 153, 200, 0.75);
-                border-radius: 24px;
+                background: #f7fafc;
+                border: 1px solid rgba(255, 153, 200, 0.75);
+                border-radius: 10px;
             }
             QWidget#appShell {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7bdff2, stop:0.55 #fff1d6, stop:1 #ff99c8);
             }
             QWidget#toyTitleBanner {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:0.48 #fff8d9, stop:1 #ffd6e8);
-                border: 5px solid rgba(255, 79, 163, 0.72);
-                border-radius: 30px;
+                border: 1px solid rgba(255, 79, 163, 0.72);
+                border-radius: 12px;
             }
             QLabel#toyTitleText {
-                font-size: 30px;
+                font-size: 26px;
                 font-weight: 900;
                 color: #263238;
                 letter-spacing: 1px;
@@ -10784,29 +11286,29 @@ class WaveToyWindow(QMainWindow):
             }
             QLabel#toyTitleIconRail {
                 background: rgba(255, 255, 255, 0.76);
-                border: 3px solid rgba(0, 0, 0, 0.10);
-                border-radius: 22px;
-                font-size: 24px;
+                border: 1px solid rgba(0, 0, 0, 0.10);
+                border-radius: 10px;
+                font-size: 14px;
                 font-weight: 900;
                 padding: 4px;
             }
             QLabel#title {
-                font-size: 42px;
+                font-size: 28px;
                 font-weight: 900;
                 color: #263238;
             }
             QLabel#subtitle {
-                font-size: 18px;
+                font-size: 14px;
                 font-weight: 700;
                 color: #37474f;
             }
             QGroupBox#toyGroup {
                 background: #ffffff;
-                border: 4px solid rgba(0, 0, 0, 0.16);
-                border-radius: 20px;
+                border: 1px solid rgba(0, 0, 0, 0.16);
+                border-radius: 8px;
                 margin-top: 16px;
                 padding: 10px;
-                font-size: 17px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -10819,11 +11321,11 @@ class WaveToyWindow(QMainWindow):
             }
             QGroupBox#dashboardGroup {
                 background: #ffffff;
-                border: 4px solid rgba(0, 0, 0, 0.18);
-                border-radius: 24px;
+                border: 1px solid rgba(0, 0, 0, 0.18);
+                border-radius: 10px;
                 margin-top: 16px;
                 padding: 10px;
-                font-size: 18px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -10836,12 +11338,12 @@ class WaveToyWindow(QMainWindow):
             }
             QWidget#explorerDashboardPanel {
                 background: #eefbff;
-                border: 5px solid rgba(123, 223, 242, 0.78);
-                border-radius: 28px;
+                border: 1px solid rgba(123, 223, 242, 0.78);
+                border-radius: 12px;
                 padding: 8px;
             }
             QLabel#dashboardExplorerTitle {
-                font-size: 30px;
+                font-size: 26px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -10876,7 +11378,7 @@ class WaveToyWindow(QMainWindow):
             QPushButton#workspaceToolbarButton:checked,
             QPushButton#workspaceToolbarButton[active="true"] {
                 background: #fff7c7;
-                border: 4px solid rgba(92, 219, 149, 0.86);
+                border: 1px solid rgba(92, 219, 149, 0.86);
                 padding: 4px 8px;
             }
             QLabel#workspaceTitle {
@@ -10886,22 +11388,22 @@ class WaveToyWindow(QMainWindow):
             }
             QWidget#waveCard {
                 background: #f9fbff;
-                border: 3px solid rgba(0, 0, 0, 0.10);
+                border: 1px solid rgba(0, 0, 0, 0.10);
                 border-radius: 16px;
             }
             QWidget#waveCardMuted {
                 background: #eef1f4;
-                border: 3px dashed rgba(69, 90, 100, 0.25);
+                border: 1px dashed rgba(69, 90, 100, 0.25);
                 border-radius: 16px;
             }
             QWidget#waveCardSolo {
-                background: #fff8d9;
-                border: 4px solid #ffd166;
+                background: #f7fafc;
+                border: 1px solid #ffd166;
                 border-radius: 16px;
             }
             QWidget#waveCardSelected {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f0fff7, stop:1 #fff7d6);
-                border: 5px solid #5cdb95;
+                border: 1px solid #5cdb95;
                 border-radius: 18px;
             }
             QWidget#sliderCell, QWidget#earPreviewCell, QWidget#signalStage {
@@ -10927,7 +11429,7 @@ class WaveToyWindow(QMainWindow):
                 color: #455a64;
             }
             QLabel#signalFlowArrow {
-                font-size: 22px;
+                font-size: 15px;
                 font-weight: 900;
                 color: #90a4ae;
             }
@@ -10948,28 +11450,28 @@ class WaveToyWindow(QMainWindow):
             }
             QLabel#articulationIpaBadge {
                 background: #ffffff;
-                border: 4px solid rgba(0, 0, 0, 0.14);
-                border-radius: 20px;
-                font-size: 18px;
+                border: 1px solid rgba(0, 0, 0, 0.14);
+                border-radius: 8px;
+                font-size: 14px;
                 font-weight: 900;
                 padding: 7px;
             }
             QLabel#articulationControlLabel {
-                font-size: 20px;
+                font-size: 15px;
                 font-weight: 900;
                 color: #263238;
             }
             QLabel#phonemeCardIpa {
                 background: rgba(255, 255, 255, 0.82);
-                border: 3px solid rgba(0, 0, 0, 0.12);
+                border: 1px solid rgba(0, 0, 0, 0.12);
                 border-radius: 18px;
-                font-size: 24px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #1d1d1d;
                 padding: 8px;
             }
             QLabel#phonemeCardTitle {
-                font-size: 20px;
+                font-size: 15px;
                 font-weight: 900;
                 color: #1d1d1d;
             }
@@ -10983,7 +11485,7 @@ class WaveToyWindow(QMainWindow):
                 font-size: 14px;
                 font-weight: 900;
                 padding: 8px 10px;
-                min-height: 48px;
+                min-height: 36px;
             }
             QPushButton#phonemeCardPrimaryAction {
                 background: #5cdb95;
@@ -10996,11 +11498,11 @@ class WaveToyWindow(QMainWindow):
             }
             QPushButton#articulationPresetButton {
                 border-radius: 18px;
-                border: 3px solid rgba(0, 0, 0, 0.16);
+                border: 1px solid rgba(0, 0, 0, 0.16);
                 background: #fff7e6;
-                font-size: 18px;
+                font-size: 14px;
                 font-weight: 900;
-                min-height: 56px;
+                min-height: 40px;
                 max-height: 64px;
                 padding: 6px 10px;
                 text-align: left;
@@ -11018,11 +11520,11 @@ class WaveToyWindow(QMainWindow):
             }
             QWidget#articulationLabHeader {
                 background: rgba(255, 255, 255, 0.72);
-                border: 3px solid rgba(0, 0, 0, 0.10);
+                border: 1px solid rgba(0, 0, 0, 0.10);
                 border-radius: 18px;
             }
             QLabel#articulationCompactTitle {
-                font-size: 24px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -11044,11 +11546,11 @@ class WaveToyWindow(QMainWindow):
             }
             QWidget#articulationToyControl {
                 background: #fff7e6;
-                border: 3px solid rgba(0, 0, 0, 0.10);
+                border: 1px solid rgba(0, 0, 0, 0.10);
                 border-radius: 18px;
             }
             QLabel#articulationToyLabel {
-                font-size: 17px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -11075,12 +11577,12 @@ class WaveToyWindow(QMainWindow):
             }
             QWidget#phonemeDrawerShell {
                 background: rgba(255, 255, 255, 0.60);
-                border: 4px solid rgba(0, 0, 0, 0.12);
-                border-radius: 24px;
+                border: 1px solid rgba(0, 0, 0, 0.12);
+                border-radius: 10px;
             }
             QWidget#phonemeIconRail {
                 background: #eefbff;
-                border-radius: 20px;
+                border-radius: 8px;
             }
             QWidget#articulationStatusStrip {
                 background: transparent;
@@ -11088,7 +11590,7 @@ class WaveToyWindow(QMainWindow):
             }
             QLabel#articulationFormantStrip, QLabel#articulationSummaryStrip {
                 background: rgba(255, 255, 255, 0.80);
-                border: 3px solid rgba(0, 0, 0, 0.10);
+                border: 1px solid rgba(0, 0, 0, 0.10);
                 border-radius: 16px;
                 color: #263238;
                 font-size: 13px;
@@ -11110,16 +11612,16 @@ class WaveToyWindow(QMainWindow):
             }
             QPushButton#phonemeRailButton {
                 background: #ffffff;
-                border: 3px solid rgba(0, 0, 0, 0.12);
+                border: 1px solid rgba(0, 0, 0, 0.12);
                 border-radius: 18px;
                 color: #263238;
-                font-size: 24px;
+                font-size: 14px;
                 font-weight: 900;
                 padding: 4px;
             }
             QPushButton#phonemeRailButton:checked {
                 background: #ffd166;
-                border: 4px solid #ff4fa3;
+                border: 1px solid #ff4fa3;
             }
             QWidget#phonemeDrawerPage, QWidget#phonemeDrawerBody {
                 background: transparent;
@@ -11130,7 +11632,7 @@ class WaveToyWindow(QMainWindow):
                 border-bottom: 3px solid rgba(0, 0, 0, 0.08);
             }
             QLabel#phonemeDrawerTitle {
-                font-size: 24px;
+                font-size: 14px;
                 font-weight: 900;
                 color: #263238;
             }
@@ -11141,28 +11643,28 @@ class WaveToyWindow(QMainWindow):
                 color: #263238;
             }
             QLabel#explain {
-                font-size: 17px;
+                font-size: 14px;
                 font-weight: 700;
                 color: #263238;
                 padding: 10px;
             }
             QLabel#loopStatus {
-                font-size: 16px;
+                font-size: 13px;
                 font-weight: 900;
                 color: #263238;
                 background: #ffffff;
-                border: 3px solid rgba(0, 0, 0, 0.14);
+                border: 1px solid rgba(0, 0, 0, 0.14);
                 border-radius: 16px;
                 padding: 10px;
             }
             QCheckBox {
-                font-size: 16px;
+                font-size: 13px;
                 font-weight: 800;
                 color: #263238;
             }
             QComboBox, QSpinBox, QDoubleSpinBox {
                 min-height: 38px;
-                border: 3px solid rgba(0, 0, 0, 0.18);
+                border: 1px solid rgba(0, 0, 0, 0.18);
                 border-radius: 12px;
                 padding: 4px 8px;
                 font-size: 14px;
@@ -11171,7 +11673,7 @@ class WaveToyWindow(QMainWindow):
             QPushButton {
                 min-height: 34px;
                 border-radius: 14px;
-                border: 3px solid rgba(0, 0, 0, 0.12);
+                border: 1px solid rgba(0, 0, 0, 0.12);
                 background: #f1f7ff;
                 font-size: 14px;
                 font-weight: 800;
@@ -11186,17 +11688,17 @@ class WaveToyWindow(QMainWindow):
             }
             QToolButton#collapsibleHeader {
                 background: #ffffff;
-                border: 4px solid rgba(255, 153, 200, 0.62);
-                border-radius: 20px;
+                border: 1px solid rgba(255, 153, 200, 0.62);
+                border-radius: 8px;
                 color: #263238;
-                font-size: 20px;
+                font-size: 15px;
                 font-weight: 900;
-                min-height: 56px;
+                min-height: 40px;
                 padding: 10px 14px;
                 text-align: left;
             }
             QToolButton#collapsibleHeader:hover {
-                background: #fff8d9;
+                background: #f7fafc;
             }
             """
         self.setStyleSheet(base_style + self._slider_style_sheet() + WaveToyTheme.global_control_style() + WaveToyTheme.scroll_area_style())
@@ -12074,7 +12576,7 @@ class WaveToyWindow(QMainWindow):
 
     def _show_playback_warning(self, message: str) -> None:
         warning_text = (
-            "Wave Toy could generate the sound, but could not find an audio player.\n\n"
+            "WaveToy could generate the sound, but could not find an audio player.\n\n"
             "Try one of these on OpenMandriva/Linux:\n\n"
             "sudo dnf install portaudio sounddevice\n"
             "pip install sounddevice\n\n"
@@ -12521,13 +13023,13 @@ class WaveToyWindow(QMainWindow):
 
 
     def _load_sound(self) -> None:
-        """Load a Wave Toy recipe or audio file."""
+        """Load a WaveToy recipe or audio file."""
         filename, selected_filter = QFileDialog.getOpenFileName(
             self,
             "Load Sound or Recipe",
             "",
             (
-                "Wave Toy Recipe (*.json *.wave-toy.json);;"
+                "WaveToy Recipe (*.json *.wave-toy.json);;"
                 "Audio Files (*.wav *.mp3 *.ogg *.flac);;"
                 "All Files (*)"
             ),
@@ -12547,7 +13049,7 @@ class WaveToyWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "Recipe Loaded",
-                    f"Loaded Wave Toy recipe:\n{path.name}"
+                    f"Loaded WaveToy recipe:\n{path.name}"
                 )
             except Exception as exc:
                 QMessageBox.warning(
@@ -12593,8 +13095,8 @@ class WaveToyWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.information(
             self,
-            "About Wave Toy",
-            "Wave Toy teaches sound waves with playful controls.\n\n"
+            "About WaveToy",
+            "WaveToy is a visual sound and articulation lab for waveform synthesis, stereo visualization, and speech assets.\n\n"
             "Kid words: pitch, loudness, wave shape, left ear, right ear.\n"
             "Grown-up words: frequency, amplitude, waveform, envelope, stereo field.",
         )
@@ -12868,7 +13370,7 @@ class WaveToyWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Wave Toy")
+    app.setApplicationName("WaveToy")
 
     window = WaveToyWindow()
     window.show()
