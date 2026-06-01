@@ -3882,6 +3882,8 @@ class NoteWheelDialog(QDialog):
 class VocalTractCanvas(QWidget):
     """Cartoon vocal tract display driven by articulation values, not DSP knobs."""
 
+    articulationEdited = Signal(str, float)
+
     def __init__(self) -> None:
         super().__init__()
         self.phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
@@ -3892,9 +3894,24 @@ class VocalTractCanvas(QWidget):
         self.motion_in_transition = False
         self.motion_playhead_fraction: float | None = None
         self.motion_timeline_blocks: List[Tuple[str, float, float, str]] = []
+        self.editable = False
+        self._drag_target: str | None = None
+        self._last_mouth_rect = QRectF()
+        self._last_face_rect = QRectF()
+        self._last_nose_rect = QRectF()
+        self._last_throat_rect = QRectF()
         self.setMinimumSize(QSize(560, 360))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setToolTip("Toy vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels.")
+
+    def set_editable(self, editable: bool) -> None:
+        self.editable = bool(editable)
+        self.setCursor(Qt.CrossCursor if self.editable else Qt.ArrowCursor)
+        self.setToolTip(
+            "Direct vocal editor: drag tongue, mouth, lips, airflow, nose, or voice to update Articulation Lab sliders."
+            if self.editable
+            else "Toy vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels."
+        )
 
     def set_phoneme(self, phoneme: ArticulationPhoneme) -> None:
         self.phoneme = phoneme.clamped()
@@ -3969,6 +3986,9 @@ class VocalTractCanvas(QWidget):
         mouth_cy = face_rect.top() + face_rect.height() * 0.64
         mouth_rect = QRectF(mouth_cx - mouth_w / 2, mouth_cy - mouth_h / 2, mouth_w, mouth_h)
         mouth_rect = mouth_rect.intersected(face_rect.adjusted(48, 86, -48, -28))
+        self._last_face_rect = QRectF(face_rect)
+        self._last_mouth_rect = QRectF(mouth_rect)
+        self._last_nose_rect = QRectF(nose_rect)
         painter.setPen(QPen(QColor("#8c2f39"), 8 + int(rounding * 9)))
         painter.setBrush(QColor("#301018"))
         painter.drawEllipse(mouth_rect)
@@ -4013,6 +4033,7 @@ class VocalTractCanvas(QWidget):
 
         voice_strength = float(np.clip(p.voice_strength if p.voiced else 0.0, 0.0, 1.0))
         throat = QRectF(face_rect.left() + 42, face_rect.bottom() - 94, 64, 58)
+        self._last_throat_rect = QRectF(throat)
         voice_color = QColor(40, 167, 69, 60 + int(voice_strength * 150)) if p.voiced else QColor(108, 117, 125, 80)
         painter.setPen(QPen(QColor("#28a745") if p.voiced else QColor("#6c757d"), 3))
         painter.setBrush(voice_color)
@@ -4052,7 +4073,67 @@ class VocalTractCanvas(QWidget):
             painter.setPen(QPen(QColor("#e63946"), 4, Qt.SolidLine, Qt.RoundCap))
             painter.drawLine(QPointF(x, timeline_rect.top() - 7), QPointF(x, timeline_rect.bottom() + 7))
 
+        if self.editable:
+            painter.setPen(QPen(QColor("#e63946"), 2, Qt.DashLine))
+            painter.setBrush(QColor(255, 255, 255, 120))
+            tongue_handle = QPointF(tongue_x, tongue_y)
+            painter.drawEllipse(tongue_handle, 12, 12)
+            painter.drawText(QRectF(tongue_handle.x() - 58, tongue_handle.y() - 34, 116, 24), Qt.AlignCenter, "drag tongue")
+            painter.drawText(QRectF(mouth_rect.right() + 8, mouth_rect.center().y() - 12, 112, 24), Qt.AlignLeft, "mouth / air")
+            painter.drawText(QRectF(lip_rect.left(), lip_rect.bottom() + 4, lip_rect.width(), 24), Qt.AlignCenter, "drag lips")
+            painter.drawText(QRectF(nose_rect.left() - 38, nose_rect.top() - 24, 124, 24), Qt.AlignCenter, "click nose")
+            painter.drawText(QRectF(throat.left() - 22, throat.top() - 24, 116, 24), Qt.AlignCenter, "click voice")
+
         painter.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self.editable:
+            return super().mousePressEvent(event)
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        if self._last_nose_rect.adjusted(-12, -12, 12, 12).contains(pos):
+            next_value = 0.0 if self.phoneme.nasal_open >= 0.5 else 1.0
+            self.articulationEdited.emit("nasal_open", next_value)
+            return
+        if self._last_throat_rect.adjusted(-14, -14, 14, 14).contains(pos):
+            self.articulationEdited.emit("voiced", 0.0 if self.phoneme.voiced else 1.0)
+            return
+        self._drag_target = "tongue" if self._last_mouth_rect.contains(pos) else "air_pressure"
+        self._emit_drag_value(pos)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self.editable or not self._drag_target:
+            return super().mouseMoveEvent(event)
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        self._emit_drag_value(pos)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._drag_target = None
+        return super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self.editable:
+            return super().wheelEvent(event)
+        delta = 0.06 if event.angleDelta().y() > 0 else -0.06
+        self.articulationEdited.emit("air_pressure", float(np.clip(self.phoneme.air_pressure + delta, 0.0, 1.0)))
+        event.accept()
+
+    def _emit_drag_value(self, pos: QPointF) -> None:
+        mouth = self._last_mouth_rect
+        face = self._last_face_rect
+        if not mouth.isValid() or not face.isValid():
+            return
+        if self._drag_target == "tongue":
+            tongue_frontness = (pos.x() - mouth.left()) / max(1.0, mouth.width())
+            tongue_height = (mouth.bottom() - pos.y()) / max(1.0, mouth.height() * 0.72)
+            self.articulationEdited.emit("tongue_frontness", float(np.clip(tongue_frontness, 0.0, 1.0)))
+            self.articulationEdited.emit("tongue_height", float(np.clip(tongue_height, 0.0, 1.0)))
+            mouth_open = (mouth.height() - 56.0) / 150.0
+            self.articulationEdited.emit("mouth_open", float(np.clip(mouth_open + (pos.y() - mouth.center().y()) / max(90.0, face.height()), 0.0, 1.0)))
+            rounding = 1.0 - ((mouth.width() / max(1.0, face.width())) - 0.32) / 0.24
+            self.articulationEdited.emit("lip_rounding", float(np.clip(rounding + (mouth.center().x() - pos.x()) / max(180.0, mouth.width() * 2.0), 0.0, 1.0)))
+        else:
+            pressure = 1.0 - ((pos.y() - face.top()) / max(1.0, face.height()))
+            self.articulationEdited.emit("air_pressure", float(np.clip(pressure, 0.0, 1.0)))
 
 
 class ArticulationTimelineCanvas(QWidget):
@@ -4298,6 +4379,301 @@ class ArticulationTrackCanvas(QWidget):
         painter.end()
 
 
+class GraphicalWaveLayerCanvas(QWidget):
+    """Compact direct-manipulation editor for one mix layer's level envelope."""
+
+    levelEdited = Signal(str, float, float)
+    waveSelected = Signal(str)
+
+    def __init__(self, wave_id: str) -> None:
+        super().__init__()
+        self.wave_id = wave_id
+        self.label = wave_id
+        self.shape_name = "sine"
+        self.start_db = -20.0
+        self.end_db = -20.0
+        self.muted = False
+        self.soloed = False
+        self._drag_handle: str | None = None
+        self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.CrossCursor)
+        self.setToolTip("Drag the left or right loudness handles to update this Mix Wave Shapes layer.")
+
+    def set_state(self, label: str, shape_name: str, start_db: float, end_db: float, muted: bool, soloed: bool) -> None:
+        self.label = label
+        self.shape_name = shape_name
+        self.start_db = float(np.clip(start_db, -20.0, 0.0))
+        self.end_db = float(np.clip(end_db, -20.0, 0.0))
+        self.muted = bool(muted)
+        self.soloed = bool(soloed)
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(18, 28, -18, -20)
+
+    def _y_for_db(self, db: float) -> float:
+        plot = self._plot_rect()
+        return plot.bottom() - ((float(db) + 20.0) / 20.0) * plot.height()
+
+    def _db_for_y(self, y: float) -> float:
+        plot = self._plot_rect()
+        ratio = 1.0 - ((float(y) - plot.top()) / max(1.0, plot.height()))
+        return float(np.clip(-20.0 + ratio * 20.0, -20.0, 0.0))
+
+    def _handle_pos(self, handle: str) -> QPointF:
+        plot = self._plot_rect()
+        x = plot.left() if handle == "start" else plot.right()
+        y = self._y_for_db(self.start_db if handle == "start" else self.end_db)
+        return QPointF(x, y)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        self.waveSelected.emit(self.wave_id)
+        start_dist = (pos - self._handle_pos("start")).manhattanLength()
+        end_dist = (pos - self._handle_pos("end")).manhattanLength()
+        self._drag_handle = "start" if start_dist <= end_dist else "end"
+        self._emit_level(pos)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self._drag_handle:
+            return
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        self._emit_level(pos)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        self._drag_handle = None
+
+    def _emit_level(self, pos: QPointF) -> None:
+        db = self._db_for_y(pos.y())
+        if self._drag_handle == "start":
+            self.levelEdited.emit(self.wave_id, db, self.end_db)
+        elif self._drag_handle == "end":
+            self.levelEdited.emit(self.wave_id, self.start_db, db)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        bg = QColor("#fff8d9") if self.soloed else QColor("#f8f9fa")
+        if self.muted:
+            bg = QColor("#eceff1")
+        painter.fillRect(self.rect(), bg)
+        plot = self._plot_rect()
+        painter.setPen(QPen(QColor("#90a4ae"), 1, Qt.DashLine))
+        for frac in (0.0, 0.5, 1.0):
+            y = plot.top() + plot.height() * frac
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+        painter.setPen(QPen(QColor("#1d3557"), 2))
+        painter.drawRoundedRect(plot, 10, 10)
+        path = QPainterPath()
+        path.moveTo(self._handle_pos("start"))
+        path.cubicTo(QPointF(plot.left() + plot.width() * 0.32, self._y_for_db(self.start_db)), QPointF(plot.left() + plot.width() * 0.68, self._y_for_db(self.end_db)), self._handle_pos("end"))
+        painter.setPen(QPen(QColor("#5cdb95") if not self.muted else QColor("#78909c"), 4, Qt.SolidLine, Qt.RoundCap))
+        painter.drawPath(path)
+        for handle, color in (("start", "#ff6b6b"), ("end", "#4ecdc4")):
+            pt = self._handle_pos(handle)
+            painter.setBrush(QColor(color))
+            painter.setPen(QPen(QColor("#1d3557"), 2))
+            painter.drawEllipse(pt, 9, 9)
+        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        painter.setPen(QPen(QColor("#1d3557"), 1))
+        state = " • muted" if self.muted else (" • solo" if self.soloed else "")
+        painter.drawText(QRectF(12, 4, self.width() - 24, 22), Qt.AlignLeft, f"{self.label} • {self.shape_name} • {self.start_db:.1f}→{self.end_db:.1f} dB{state}")
+        painter.end()
+
+
+class GraphicalStereoFieldCanvas(QWidget):
+    panEdited = Signal(float, float)
+    widthEdited = Signal(float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pan_start = 0.0
+        self.pan_end = 0.0
+        self.width_value = 0.45
+        self.auto_depth = 0.0
+        self._drag_target: str | None = None
+        self.setMinimumSize(QSize(420, 220))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.CrossCursor)
+
+    def set_state(self, pan_start: float, pan_end: float, width_value: float, auto_depth: float) -> None:
+        self.pan_start = float(np.clip(pan_start, -1.0, 1.0))
+        self.pan_end = float(np.clip(pan_end, -1.0, 1.0))
+        self.width_value = float(np.clip(width_value, 0.0, 1.0))
+        self.auto_depth = float(np.clip(auto_depth, 0.0, 1.0))
+        self.update()
+
+    def _field_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(34, 42, -34, -34)
+
+    def _x_for_pan(self, pan: float) -> float:
+        field = self._field_rect()
+        return field.left() + ((float(pan) + 1.0) / 2.0) * field.width()
+
+    def _pan_for_x(self, x: float) -> float:
+        field = self._field_rect()
+        return float(np.clip(((x - field.left()) / max(1.0, field.width())) * 2.0 - 1.0, -1.0, 1.0))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        center_y = self._field_rect().center().y()
+        start_pt = QPointF(self._x_for_pan(self.pan_start), center_y + 28)
+        end_pt = QPointF(self._x_for_pan(self.pan_end), center_y - 28)
+        self._drag_target = "start" if (pos - start_pt).manhattanLength() <= (pos - end_pt).manhattanLength() else "end"
+        self._emit_pan(pos.x())
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self._drag_target:
+            return
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        self._emit_pan(pos.x())
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        self._drag_target = None
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override
+        delta = 0.05 if event.angleDelta().y() > 0 else -0.05
+        self.widthEdited.emit(float(np.clip(self.width_value + delta, 0.0, 1.0)))
+        event.accept()
+
+    def _emit_pan(self, x: float) -> None:
+        pan = self._pan_for_x(x)
+        if self._drag_target == "start":
+            self.panEdited.emit(pan, self.pan_end)
+        elif self._drag_target == "end":
+            self.panEdited.emit(self.pan_start, pan)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#f0fbff"))
+        field = self._field_rect()
+        painter.setPen(QPen(QColor("#1d3557"), 3))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRoundedRect(field, 22, 22)
+        painter.setFont(QFont("Arial", 13, QFont.Bold))
+        painter.drawText(QRectF(field.left() - 24, field.top() - 32, 96, 28), Qt.AlignLeft, "👂 Left")
+        painter.drawText(QRectF(field.right() - 78, field.top() - 32, 112, 28), Qt.AlignRight, "Right 👂")
+        center_y = field.center().y()
+        start = QPointF(self._x_for_pan(self.pan_start), center_y + 28)
+        end = QPointF(self._x_for_pan(self.pan_end), center_y - 28)
+        painter.setPen(QPen(QColor("#7b2cbf"), 4, Qt.DashLine, Qt.RoundCap))
+        painter.drawLine(start, end)
+        if self.auto_depth > 0.01:
+            painter.setPen(QPen(QColor(255, 193, 7, 120), 3, Qt.DotLine, Qt.RoundCap))
+            painter.drawEllipse(QRectF(field.center().x() - field.width() * self.auto_depth / 2, field.center().y() - 44, field.width() * self.auto_depth, 88))
+        for pt, label, color in ((start, "Start", "#ff6b6b"), (end, "End", "#4ecdc4")):
+            painter.setPen(QPen(QColor("#1d3557"), 2))
+            painter.setBrush(QColor(color))
+            painter.drawEllipse(pt, 13, 13)
+            painter.drawText(QRectF(pt.x() - 42, pt.y() + 14, 84, 24), Qt.AlignCenter, label)
+        painter.setPen(QPen(QColor("#1d3557"), 2))
+        painter.drawText(QRectF(12, 8, self.width() - 24, 26), Qt.AlignCenter, f"Drag dots to place sound • width {self.width_value:.2f} • auto-pan {self.auto_depth:.2f}")
+        painter.end()
+
+
+class GraphicalPitchCurveCanvas(QWidget):
+    pitchEdited = Signal(int, int)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_value = 69 * MIDI_SLIDER_SCALE
+        self.end_value = 69 * MIDI_SLIDER_SCALE
+        self.vibrato_depth = 0.0
+        self._drag_target: str | None = None
+        self.setMinimumSize(QSize(420, 220))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.CrossCursor)
+
+    def set_state(self, start_value: int, end_value: int, vibrato_depth: float) -> None:
+        self.start_value = int(np.clip(start_value, 36 * MIDI_SLIDER_SCALE, 84 * MIDI_SLIDER_SCALE))
+        self.end_value = int(np.clip(end_value, 36 * MIDI_SLIDER_SCALE, 84 * MIDI_SLIDER_SCALE))
+        self.vibrato_depth = float(np.clip(vibrato_depth, 0.0, 1.0))
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(36, 34, -28, -38)
+
+    def _y_for_value(self, value: int) -> float:
+        plot = self._plot_rect()
+        ratio = (float(value) - 36 * MIDI_SLIDER_SCALE) / (48 * MIDI_SLIDER_SCALE)
+        return plot.bottom() - ratio * plot.height()
+
+    def _value_for_y(self, y: float) -> int:
+        plot = self._plot_rect()
+        ratio = 1.0 - ((float(y) - plot.top()) / max(1.0, plot.height()))
+        return int(np.clip(round((36 + ratio * 48) * MIDI_SLIDER_SCALE), 36 * MIDI_SLIDER_SCALE, 84 * MIDI_SLIDER_SCALE))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        plot = self._plot_rect()
+        start = QPointF(plot.left(), self._y_for_value(self.start_value))
+        end = QPointF(plot.right(), self._y_for_value(self.end_value))
+        self._drag_target = "start" if (pos - start).manhattanLength() <= (pos - end).manhattanLength() else "end"
+        self._emit_pitch(pos.y())
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self._drag_target:
+            return
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        self._emit_pitch(pos.y())
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        self._drag_target = None
+
+    def _emit_pitch(self, y: float) -> None:
+        value = self._value_for_y(y)
+        if self._drag_target == "start":
+            self.pitchEdited.emit(value, self.end_value)
+        elif self._drag_target == "end":
+            self.pitchEdited.emit(self.start_value, value)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#fff7e6"))
+        plot = self._plot_rect()
+        painter.setPen(QPen(QColor("#90a4ae"), 1, Qt.DashLine))
+        for midi in range(36, 85, 12):
+            y = self._y_for_value(midi * MIDI_SLIDER_SCALE)
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+            painter.drawText(QRectF(4, y - 10, 30, 20), Qt.AlignRight, f"{midi}")
+        painter.setPen(QPen(QColor("#1d3557"), 2))
+        painter.drawRoundedRect(plot, 10, 10)
+        start = QPointF(plot.left(), self._y_for_value(self.start_value))
+        end = QPointF(plot.right(), self._y_for_value(self.end_value))
+        path = QPainterPath(start)
+        path.cubicTo(QPointF(plot.left() + plot.width() * 0.33, start.y()), QPointF(plot.left() + plot.width() * 0.66, end.y()), end)
+        painter.setPen(QPen(QColor("#7b2cbf"), 4, Qt.SolidLine, Qt.RoundCap))
+        painter.drawPath(path)
+        if self.vibrato_depth > 0.01:
+            painter.setPen(QPen(QColor(255, 193, 7, 130), 2, Qt.DotLine))
+            last = None
+            for i in range(80):
+                t = i / 79.0
+                x = plot.left() + plot.width() * t
+                base_y = start.y() * (1.0 - t) + end.y() * t
+                y = base_y + math.sin(t * math.pi * 16.0) * self.vibrato_depth * 18.0
+                if last is not None:
+                    painter.drawLine(last, QPointF(x, y))
+                last = QPointF(x, y)
+        for pt, label, color in ((start, "Start", "#ff6b6b"), (end, "End", "#4ecdc4")):
+            painter.setBrush(QColor(color))
+            painter.setPen(QPen(QColor("#1d3557"), 2))
+            painter.drawEllipse(pt, 11, 11)
+            painter.drawText(QRectF(pt.x() - 44, pt.y() + 12, 88, 22), Qt.AlignCenter, label)
+        painter.setPen(QPen(QColor("#1d3557"), 2))
+        painter.drawText(QRectF(10, 6, self.width() - 20, 24), Qt.AlignCenter, "Drag pitch points • octave grid • wiggle shows pitch motion")
+        painter.end()
+
+
 class WaveToyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -4480,6 +4856,15 @@ class WaveToyWindow(QMainWindow):
         self.phoneme_loop_enabled = False
         self.phoneme_loop_timer = QTimer(self)
         self.phoneme_loop_timer.timeout.connect(self._articulation_loop_tick)
+
+        self.graphical_wave_canvases: Dict[str, GraphicalWaveLayerCanvas] = {}
+        self.graphical_wave_layer_list: QWidget | None = None
+        self.graphical_stereo_canvas: GraphicalStereoFieldCanvas | None = None
+        self.graphical_pitch_canvas: GraphicalPitchCurveCanvas | None = None
+        self.graphical_vocal_canvas: VocalTractCanvas | None = None
+        self.graphical_chain_canvas: ArticulationTimelineCanvas | None = None
+        self.graphical_chain_mouth_canvas: VocalTractCanvas | None = None
+        self.graphical_status_label: QLabel | None = None
 
         self._build_actions()
         self._build_ui()
@@ -5245,6 +5630,7 @@ class WaveToyWindow(QMainWindow):
         self._build_wave_explorer_tab()
         self._build_play_tab()
         self._build_articulation_tab()
+        self._build_graphical_editor_tab()
         self._build_timeline_tab()
         if self.tabs is not None:
             self.tabs.setCurrentIndex(0)
@@ -5859,6 +6245,8 @@ class WaveToyWindow(QMainWindow):
             self.articulation_ipa_label.setText(f"IPA /{p.ipa}/")
         if self.articulation_canvas is not None:
             self.articulation_canvas.set_phoneme(p)
+        if self.graphical_vocal_canvas is not None:
+            self.graphical_vocal_canvas.set_phoneme(p)
         summary = articulation_summary(p)
         f1, f2, f3 = formants_from_articulation(p)
         if self.articulation_formant_label is not None:
@@ -6408,6 +6796,7 @@ class WaveToyWindow(QMainWindow):
             self.articulation_boundary_curve_combo.blockSignals(True)
             self.articulation_boundary_curve_combo.setCurrentText(curve if curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE)
             self.articulation_boundary_curve_combo.blockSignals(False)
+        self._refresh_graphical_chain_editor()
 
     def _motion_state_at_ms(self, elapsed_ms: float) -> Tuple[ArticulationPhoneme, str, str, float, float, int, bool]:
         segments, total_ms = self._articulation_motion_timeline()
@@ -7377,6 +7766,428 @@ class WaveToyWindow(QMainWindow):
         if getattr(self, "timeline_status_label", None) is not None:
             self.timeline_status_label.setText(message)
 
+
+    def _build_graphical_editor_tab(self) -> None:
+        if self.tabs is None:
+            return
+        tab = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
+        tab.setObjectName("graphicalEditorTab")
+        tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page = QWidget()
+        page.setObjectName("graphicalEditorPage")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(16, 12, 16, 18)
+        outer.setSpacing(12)
+
+        title = QLabel("🧩 Graphical Editor")
+        title.setObjectName("title")
+        subtitle = QLabel("Visual-first sound building: drag wave layers, stereo dots, pitch points, and the mouth model. Sliders stay available as advanced fallback controls.")
+        subtitle.setObjectName("subtitle")
+        subtitle.setWordWrap(True)
+        self.graphical_status_label = QLabel("Graphical Editor shares the same controls as Classic Editor, Wave Explorer, and Articulation Lab — no duplicate recipe state.")
+        self.graphical_status_label.setObjectName("dashboardSummary")
+        self.graphical_status_label.setWordWrap(True)
+        self.graphical_status_label.setAlignment(Qt.AlignCenter)
+        outer.addWidget(title)
+        outer.addWidget(subtitle)
+        outer.addWidget(self.graphical_status_label)
+
+        outer.addWidget(self._graphical_workflow_section(
+            "1. Shape Source Wave",
+            "Drag loudness handles on each layer card. Add, duplicate, mute, solo, and remove waves here; Classic Editor mix sliders update immediately.",
+            self._build_graphical_wave_section(),
+            "🧰 Advanced: Classic wave mix",
+            lambda checked=False: self._show_named_tab("🧰 Classic Editor"),
+            expanded=True,
+        ))
+        outer.addWidget(self._graphical_workflow_section(
+            "2. Place Sound in Stereo Space",
+            "Drag start/end dots across the ears to update whole-mix Stereo Placement. Use the mouse wheel over the field for stereo width.",
+            self._build_graphical_stereo_section(),
+            "🌊 Advanced: Wave Explorer stereo",
+            lambda checked=False: self._show_named_tab("🌊 Wave Explorer"),
+            expanded=True,
+        ))
+        outer.addWidget(self._graphical_workflow_section(
+            "3. Tune Pitch Motion",
+            "Drag pitch start/end points on an octave grid. The curve writes to the same pitch sliders used by Classic Editor and the tuning map.",
+            self._build_graphical_pitch_section(),
+            "🧰 Advanced: Classic pitch toys",
+            lambda checked=False: self._show_named_tab("🧰 Classic Editor"),
+            expanded=True,
+        ))
+        outer.addWidget(self._graphical_workflow_section(
+            "4. Add Sound Magic",
+            "Preview-only blocks show the signal order for this phase. Toggle and intensity controls still use existing Sound Modules sliders.",
+            self._build_graphical_sound_magic_section(),
+            "🧰 Advanced: Sound Modules",
+            lambda checked=False: self._show_named_tab("🧰 Classic Editor"),
+            expanded=False,
+        ))
+        outer.addWidget(self._graphical_workflow_section(
+            "5. Shape Mouth / Articulation",
+            "Drag tongue, mouth/lips, airflow, click the nose, or click the voice bubble. Articulation Lab sliders and phoneme preview stay synchronized.",
+            self._build_graphical_vocal_section(),
+            "🗣 Advanced: Articulation Lab",
+            lambda checked=False: self._show_named_tab("🗣 Articulation Lab"),
+            expanded=True,
+        ))
+        outer.addWidget(self._graphical_workflow_section(
+            "6. Build Speech Motion",
+            "Drag phoneme block edges and transition zones, scrub the playhead, and preview the mouth motion. Create Word uses these edited chain values.",
+            self._build_graphical_chain_section(),
+            "🗣 Advanced: Articulation Chain",
+            lambda checked=False: self._show_named_tab("🗣 Articulation Lab"),
+            expanded=True,
+        ))
+        outer.addWidget(self._graphical_workflow_section(
+            "7. Send to Timeline",
+            "Preview-only handoff panel: use existing Speech Bin, Audio Palette, and Timeline buttons to place rendered sounds without changing those workflows.",
+            self._build_graphical_timeline_section(),
+            "🎬 Open Timeline",
+            lambda checked=False: self._show_named_tab("🎬 Timeline"),
+            expanded=False,
+        ))
+        outer.addStretch(1)
+        tab.setWidget(page)
+        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "🧩 Graphical Editor")
+        self._refresh_graphical_editor()
+
+    def _graphical_workflow_section(self, title: str, body: str, content: QWidget, button_text: str, callback, *, expanded: bool) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("graphicalWorkflowCard")
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        header = QLabel(title)
+        header.setObjectName("dashboardExplorerTitle")
+        header.setWordWrap(True)
+        hint = QLabel(body)
+        hint.setObjectName("symbolHint")
+        hint.setWordWrap(True)
+        shortcut = QPushButton(button_text)
+        shortcut.setObjectName("workspaceToolbarButton")
+        shortcut.setMinimumHeight(38)
+        shortcut.clicked.connect(callback)
+        top = QHBoxLayout()
+        top.addWidget(header, 1)
+        top.addWidget(shortcut, 0)
+        box = QWidget()
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(0, 0, 0, 0)
+        box_layout.setSpacing(8)
+        box_layout.addWidget(hint)
+        box_layout.addWidget(content)
+        layout.addLayout(top)
+        layout.addWidget(CollapsibleSection("Show / hide direct controls", box, expanded=expanded))
+        return wrapper
+
+    def _build_graphical_wave_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        button_row = QHBoxLayout()
+        add_button = QPushButton("➕ Add Wave Layer")
+        duplicate_button = QPushButton("⧉ Duplicate Loudest Layer")
+        all_button = QPushButton("🌈 Clear Solo")
+        for button in (add_button, duplicate_button, all_button):
+            button.setMinimumHeight(42)
+            button_row.addWidget(button)
+        add_button.clicked.connect(self._graphical_add_wave_layer)
+        duplicate_button.clicked.connect(self._graphical_duplicate_loudest_wave)
+        all_button.clicked.connect(self._clear_solo)
+        layout.addLayout(button_row)
+        self.graphical_wave_layer_list = QWidget()
+        self.graphical_wave_layer_list.setObjectName("graphicalLayerList")
+        self.graphical_wave_layer_list.setLayout(QVBoxLayout())
+        self.graphical_wave_layer_list.layout().setContentsMargins(0, 0, 0, 0)
+        self.graphical_wave_layer_list.layout().setSpacing(8)
+        layout.addWidget(self.graphical_wave_layer_list)
+        return panel
+
+    def _build_graphical_stereo_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.graphical_stereo_canvas = GraphicalStereoFieldCanvas()
+        self.graphical_stereo_canvas.panEdited.connect(self._graphical_set_stereo_pan)
+        self.graphical_stereo_canvas.widthEdited.connect(self._graphical_set_stereo_width)
+        layout.addWidget(self.graphical_stereo_canvas)
+        return panel
+
+    def _build_graphical_pitch_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.graphical_pitch_canvas = GraphicalPitchCurveCanvas()
+        self.graphical_pitch_canvas.pitchEdited.connect(self._graphical_set_pitch_values)
+        layout.addWidget(self.graphical_pitch_canvas)
+        return panel
+
+    def _build_graphical_sound_magic_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        blocks = [
+            ("🌫 Noise Texture", "preview-only: articulation/noise sources"),
+            ("✨ Shimmer", "preview-only roadmap block"),
+            ("😴 Stretch", "editable via existing Effect Nap sliders"),
+            ("🎚 Filter / Magic", "preview-only roadmap block"),
+        ]
+        for index, (name, note) in enumerate(blocks):
+            block = QLabel(f"{name}\n{note}")
+            block.setObjectName("graphicalEffectBlock")
+            block.setWordWrap(True)
+            block.setAlignment(Qt.AlignCenter)
+            block.setMinimumHeight(86)
+            layout.addWidget(block, 0, index)
+        return panel
+
+    def _build_graphical_vocal_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.graphical_vocal_canvas = VocalTractCanvas()
+        self.graphical_vocal_canvas.setMinimumHeight(430)
+        self.graphical_vocal_canvas.set_editable(True)
+        self.graphical_vocal_canvas.articulationEdited.connect(self._graphical_set_articulation_value)
+        layout.addWidget(self.graphical_vocal_canvas)
+        return panel
+
+    def _build_graphical_chain_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.graphical_chain_canvas = ArticulationTimelineCanvas()
+        self.graphical_chain_canvas.durationEdited.connect(self._graphical_set_chain_duration)
+        self.graphical_chain_canvas.transitionEdited.connect(self._graphical_set_chain_transition)
+        self.graphical_chain_canvas.scrubbed.connect(self._graphical_scrub_chain)
+        self.graphical_chain_canvas.blockSelected.connect(self._select_articulation_chain_item)
+        layout.addWidget(self.graphical_chain_canvas)
+        curve_row = QHBoxLayout()
+        curve_row.addWidget(QLabel("Transition curve:"))
+        for curve in ARTICULATION_TRANSITION_CURVES:
+            button = QPushButton(curve)
+            button.setMinimumHeight(36)
+            button.clicked.connect(lambda checked=False, curve_name=curve: self._graphical_set_selected_chain_curve(curve_name))
+            curve_row.addWidget(button)
+        layout.addLayout(curve_row)
+        self.graphical_chain_mouth_canvas = VocalTractCanvas()
+        self.graphical_chain_mouth_canvas.setMinimumHeight(310)
+        layout.addWidget(self.graphical_chain_mouth_canvas)
+        return panel
+
+    def _build_graphical_timeline_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        for text, callback in (
+            ("🎬 Open Timeline Storyboard", lambda checked=False: self._show_named_tab("🎬 Timeline")),
+            ("➕ Send Current Phoneme", self._send_current_phoneme_to_timeline),
+            ("➕ Send Chain", self._send_articulation_chain_to_timeline),
+        ):
+            button = QPushButton(text)
+            button.setMinimumHeight(46)
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+        return panel
+
+    def _show_named_tab(self, tab_text: str) -> None:
+        if self.tabs is None:
+            return
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == tab_text:
+                self.tabs.setCurrentIndex(index)
+                return
+
+    def _refresh_graphical_editor(self) -> None:
+        self._refresh_graphical_wave_layers()
+        if self.graphical_stereo_canvas is not None and hasattr(self, "pan_start_slider"):
+            self.graphical_stereo_canvas.set_state(
+                self.pan_start_slider.value() / (100.0 * PERCENT_SLIDER_SCALE),
+                self.pan_end_slider.value() / (100.0 * PERCENT_SLIDER_SCALE),
+                self.width_slider.value() / (100.0 * PERCENT_SLIDER_SCALE),
+                self.auto_pan_depth_slider.value() / (100.0 * PERCENT_SLIDER_SCALE),
+            )
+        if self.graphical_pitch_canvas is not None and hasattr(self, "pitch_start"):
+            self.graphical_pitch_canvas.set_state(self.pitch_start.value(), self.pitch_end.value(), abs(self.pitch_end.value() - self.pitch_start.value()) / float(48 * MIDI_SLIDER_SCALE))
+        if self.graphical_vocal_canvas is not None and hasattr(self, "current_phoneme"):
+            self.graphical_vocal_canvas.set_phoneme(self.current_phoneme)
+        self._refresh_graphical_chain_editor()
+        if self.graphical_status_label is not None:
+            self.graphical_status_label.setText("Two-way sync active: graphical edits write sliders/model; slider, preset, recipe, and chain refreshes repaint this tab.")
+
+    def _refresh_graphical_wave_layers(self) -> None:
+        if self.graphical_wave_layer_list is None or self.graphical_wave_layer_list.layout() is None:
+            return
+        layout = self.graphical_wave_layer_list.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.graphical_wave_canvases.clear()
+        solo_wave = self._solo_wave_from_ui() if hasattr(self, "wave_solo_buttons") else None
+        for wave_id in list(self.wave_row_order):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            canvas = GraphicalWaveLayerCanvas(wave_id)
+            canvas.levelEdited.connect(self._graphical_set_wave_levels)
+            canvas.waveSelected.connect(self._graphical_select_wave)
+            label = wave_label_for(self._settings_from_ui(), wave_id) if hasattr(self, "note_combo") else wave_id
+            shape = wave_shape_for(self._settings_from_ui(), wave_id) if hasattr(self, "note_combo") else wave_id
+            start_db = self.wave_start_sliders[wave_id].value() / DB_SLIDER_SCALE
+            end_db = self.wave_end_sliders[wave_id].value() / DB_SLIDER_SCALE
+            muted = self.wave_mute_buttons.get(wave_id).isChecked() if wave_id in self.wave_mute_buttons else False
+            canvas.set_state(label, shape, start_db, end_db, muted, solo_wave == wave_id)
+            self.graphical_wave_canvases[wave_id] = canvas
+            row_layout.addWidget(canvas, 1)
+            actions = QVBoxLayout()
+            mute = QPushButton("🤫" if muted else "🎵")
+            solo = QPushButton("👑" if solo_wave == wave_id else "⭐")
+            duplicate = QPushButton("⧉")
+            remove = QPushButton("➖")
+            for button in (mute, solo, duplicate, remove):
+                button.setMinimumSize(QSize(46, 32))
+                actions.addWidget(button)
+            mute.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_toggle_wave_mute(wt))
+            solo.clicked.connect(lambda checked=False, wt=wave_id: self._set_wave_solo(wt, True))
+            duplicate.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_duplicate_wave(wt))
+            remove.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_remove_wave(wt))
+            row_layout.addLayout(actions)
+            layout.addWidget(row)
+
+    def _refresh_graphical_chain_editor(self) -> None:
+        if self.graphical_chain_canvas is not None:
+            selected = self.articulation_selected_chain_index if 0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items) else None
+            self.graphical_chain_canvas.set_items(self.articulation_chain_items, selected)
+        if self.graphical_chain_mouth_canvas is not None:
+            if 0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items):
+                p = self.articulation_chain_items[self.articulation_selected_chain_index].phoneme_for_render()
+                name = p.name
+            else:
+                p = self.current_phoneme
+                name = p.name
+            self.graphical_chain_mouth_canvas.set_motion_state(p, name, playhead_fraction=0.0)
+
+    def _graphical_set_wave_levels(self, wave_id: str, start_db: float, end_db: float) -> None:
+        if wave_id not in self.wave_start_sliders or wave_id not in self.wave_end_sliders:
+            return
+        self.wave_start_sliders[wave_id].setValue(int(round(float(start_db) * DB_SLIDER_SCALE)))
+        self.wave_end_sliders[wave_id].setValue(int(round(float(end_db) * DB_SLIDER_SCALE)))
+        self._update_wave_envelope_labels(wave_id)
+        self._schedule_generate("graphical_wave_level")
+        self._refresh_graphical_editor()
+
+    def _graphical_add_wave_layer(self, checked: bool = False) -> None:
+        del checked
+        self._add_user_wave_row()
+        self._refresh_graphical_editor()
+
+    def _graphical_duplicate_loudest_wave(self, checked: bool = False) -> None:
+        del checked
+        if not self.wave_row_order:
+            return
+        loudest = max(self.wave_row_order, key=lambda wt: max(self.wave_start_sliders[wt].value(), self.wave_end_sliders[wt].value()))
+        self._graphical_duplicate_wave(loudest)
+
+    def _graphical_duplicate_wave(self, wave_id: str) -> None:
+        if len(self.wave_row_order) >= MAX_WAVE_ROWS or wave_id not in self.wave_start_sliders:
+            return
+        before = set(self.wave_row_order)
+        self._add_user_wave_row()
+        new_ids = [wt for wt in self.wave_row_order if wt not in before]
+        if not new_ids:
+            return
+        new_id = new_ids[-1]
+        for src, dst in ((self.wave_start_sliders, self.wave_start_sliders), (self.wave_end_sliders, self.wave_end_sliders), (self.wave_time_sliders, self.wave_time_sliders), (self.wave_pan_sliders, self.wave_pan_sliders), (self.wave_width_sliders, self.wave_width_sliders), (self.wave_dance_sliders, self.wave_dance_sliders)):
+            dst[new_id].setValue(src[wave_id].value())
+        if wave_id in self.wave_shape_combos and new_id in self.wave_shape_combos:
+            shape_index = self.wave_shape_combos[new_id].findData(wave_shape_for(self._settings_from_ui(), wave_id))
+            self.wave_shape_combos[new_id].setCurrentIndex(max(0, shape_index))
+        self._schedule_generate("graphical_duplicate_wave")
+        self._refresh_graphical_editor()
+
+    def _graphical_select_wave(self, wave_id: str) -> None:
+        if self.graphical_status_label is not None:
+            self.graphical_status_label.setText(f"Selected wave layer: {wave_label_for(self._settings_from_ui(), wave_id)}")
+
+    def _graphical_toggle_wave_mute(self, wave_id: str) -> None:
+        button = self.wave_mute_buttons.get(wave_id)
+        if button is None:
+            return
+        self._set_wave_muted(wave_id, not button.isChecked())
+        self._refresh_graphical_editor()
+
+    def _graphical_remove_wave(self, wave_id: str) -> None:
+        if wave_id in self.user_wave_ids:
+            self._remove_user_wave_row(wave_id)
+            self._refresh_graphical_editor()
+        elif self.graphical_status_label is not None:
+            self.graphical_status_label.setText("Default wave layers are kept for compatibility; mute them instead of removing them.")
+
+    def _graphical_set_stereo_pan(self, pan_start: float, pan_end: float) -> None:
+        self.pan_start_slider.setValue(int(round(float(pan_start) * 100 * PERCENT_SLIDER_SCALE)))
+        self.pan_end_slider.setValue(int(round(float(pan_end) * 100 * PERCENT_SLIDER_SCALE)))
+        self._schedule_generate("graphical_stereo_pan")
+        self._refresh_graphical_editor()
+
+    def _graphical_set_stereo_width(self, width_value: float) -> None:
+        self.width_slider.setValue(int(round(float(width_value) * 100 * PERCENT_SLIDER_SCALE)))
+        self._schedule_generate("graphical_stereo_width")
+        self._refresh_graphical_editor()
+
+    def _graphical_set_pitch_values(self, start_value: int, end_value: int) -> None:
+        self.pitch_start.setValue(int(start_value))
+        self.pitch_end.setValue(int(end_value))
+        self._schedule_generate("graphical_pitch_curve")
+        self._refresh_graphical_editor()
+
+    def _graphical_set_articulation_value(self, key: str, value: float) -> None:
+        if key == "voiced":
+            if self.articulation_voiced_checkbox is not None:
+                self.articulation_voiced_checkbox.setChecked(bool(value >= 0.5))
+            self._articulation_slider_changed(key)
+            self._refresh_graphical_editor()
+            return
+        slider = self.articulation_sliders.get(key)
+        if slider is None:
+            return
+        raw = int(round(float(value))) if key == "voice_pitch" else int(round(float(value) * 100.0))
+        slider.setValue(max(slider.minimum(), min(slider.maximum(), raw)))
+        self._articulation_slider_changed(key)
+        self._refresh_graphical_editor()
+
+    def _graphical_set_chain_duration(self, index: int, duration_ms: int) -> None:
+        if 0 <= index < len(self.articulation_chain_items):
+            self.articulation_chain_items[index].duration_ms = int(np.clip(duration_ms, 80, 5000))
+            self._refresh_articulation_chain_cards()
+            self._refresh_graphical_editor()
+
+    def _graphical_set_chain_transition(self, index: int, transition_ms: int) -> None:
+        if 0 <= index < len(self.articulation_chain_items):
+            self.articulation_chain_items[index].transition_ms = int(np.clip(transition_ms, 0, 250))
+            self._refresh_articulation_chain_cards()
+            self._refresh_graphical_editor()
+
+    def _graphical_set_selected_chain_curve(self, curve: str) -> None:
+        if curve not in ARTICULATION_TRANSITION_CURVES:
+            return
+        if 0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items):
+            self.articulation_chain_items[self.articulation_selected_chain_index].transition_curve = curve
+            self._refresh_articulation_chain_cards()
+            self._refresh_graphical_editor()
+
+    def _graphical_scrub_chain(self, playhead_ms: float) -> None:
+        if self.graphical_chain_mouth_canvas is None:
+            return
+        self.articulation_playhead_ms = float(max(0.0, playhead_ms))
+        phoneme, current_name, next_name, transition_progress, playhead, transition_ms, in_transition = self._motion_state_at_ms(self.articulation_playhead_ms)
+        self.graphical_chain_mouth_canvas.set_motion_state(phoneme, current_name, next_name, transition_progress, playhead, transition_ms, in_transition)
+
     def _build_timeline_tab(self) -> None:
         if self.tabs is None:
             return
@@ -7536,7 +8347,7 @@ class WaveToyWindow(QMainWindow):
         layout.addLayout(split, 1)
 
         self._timeline_update_inspector()
-        self.tabs.insertTab(min(3, self.tabs.count()), tab, "🎬 Timeline")
+        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "🎬 Timeline")
         self._timeline_debug("Timeline tab constructed")
 
     def _speech_display_sequence_for_chain(self) -> str:
@@ -9129,8 +9940,25 @@ class WaveToyWindow(QMainWindow):
             QTabBar::tab:selected {
                 background: #ffffff;
             }
-            QWidget#waveExplorerTab, QWidget#playTab, QWidget#timelineStoryboardTab {
+            QWidget#waveExplorerTab, QWidget#playTab, QWidget#timelineStoryboardTab, QScrollArea#graphicalEditorTab, QWidget#graphicalEditorPage {
                 background: #7bdff2;
+            }
+            QWidget#graphicalWorkflowCard {
+                background: rgba(255, 255, 255, 0.86);
+                border: 5px solid rgba(255, 153, 200, 0.72);
+                border-radius: 28px;
+            }
+            QWidget#graphicalLayerList {
+                background: transparent;
+            }
+            QLabel#graphicalEffectBlock {
+                background: #fff8d9;
+                border: 4px dashed rgba(123, 44, 191, 0.72);
+                border-radius: 22px;
+                color: #263238;
+                font-size: 16px;
+                font-weight: 900;
+                padding: 8px;
             }
             QLabel#timelineStoryboardTitle {
                 font-size: 48px;
@@ -10348,6 +11176,7 @@ class WaveToyWindow(QMainWindow):
         self._update_symbolic_labels()
         self.current_settings = self._settings_from_ui()
         self._update_all_wave_previews()
+        self._refresh_graphical_editor()
         audio, time_axis, freq_env, loud_env = generate_audio(self.current_settings)
 
         self.current_audio = audio
