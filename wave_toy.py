@@ -494,18 +494,59 @@ class TimelineClip:
     source_type: str = "generated_wavetoy_sound"
     speech_metadata: Dict[str, object] | None = None
     muted_warning: str | None = None
+    source_audio_full_length_samples: int = 0
+    trim_start_seconds: float = 0.0
+    trim_end_seconds: float = 0.0
+    playback_rate: float = 1.0
+    rendered_duration_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.source_audio_full_length_samples <= 0:
+            self.source_audio_full_length_samples = int(len(self.audio))
+        source_duration = self.source_duration_seconds
+        self.trim_start_seconds = float(np.clip(float(self.trim_start_seconds), 0.0, source_duration))
+        self.trim_end_seconds = float(np.clip(float(self.trim_end_seconds), 0.0, max(0.0, source_duration - self.trim_start_seconds)))
+        self.playback_rate = float(np.clip(float(self.playback_rate or 1.0), 0.25, 4.0))
+        self.rendered_duration_seconds = self.duration_seconds
+
+    @property
+    def source_duration_seconds(self) -> float:
+        return max(0.0, float(self.source_audio_full_length_samples or len(self.audio)) / float(self.sample_rate))
+
+    @property
+    def source_visible_duration_seconds(self) -> float:
+        return max(0.0, self.source_duration_seconds - self.trim_start_seconds - self.trim_end_seconds)
 
     @property
     def duration_seconds(self) -> float:
-        return max(0.0, float(len(self.audio)) / float(self.sample_rate))
+        return max(0.0, self.source_visible_duration_seconds / max(0.25, float(self.playback_rate or 1.0)))
+
+    @property
+    def end_time_seconds(self) -> float:
+        return self.start_time_seconds + self.duration_seconds
+
+    def visible_audio(self) -> np.ndarray:
+        audio = np.asarray(self.audio, dtype=np.float32)
+        start = int(round(self.trim_start_seconds * self.sample_rate))
+        end_trim = int(round(self.trim_end_seconds * self.sample_rate))
+        end = max(start, len(audio) - end_trim)
+        return np.array(audio[start:end], dtype=np.float32, copy=True)
 
     def metadata(self) -> Dict[str, object]:
+        self.rendered_duration_seconds = self.duration_seconds
         data = {
             "id": self.clip_id,
             "name": self.name,
             "start_time_seconds": self.start_time_seconds,
             "lane": self.lane,
             "duration_seconds": self.duration_seconds,
+            "source_duration_seconds": self.source_duration_seconds,
+            "visible_duration_seconds": self.duration_seconds,
+            "source_audio_full_length_samples": self.source_audio_full_length_samples,
+            "trim_start_seconds": self.trim_start_seconds,
+            "trim_end_seconds": self.trim_end_seconds,
+            "playback_rate": self.playback_rate,
+            "rendered_duration_seconds": self.rendered_duration_seconds,
             "sample_rate": self.sample_rate,
             "source_type": self.source_type,
             "recipe": self.recipe or {},
@@ -2935,6 +2976,12 @@ class TimelineCanvas(QWidget):
         self.drag_clip_id: int | None = None
         self.drag_offset_seconds = 0.0
         self.drag_started = False
+        self.drag_operation: str | None = None
+        self.drag_start_time_seconds = 0.0
+        self.drag_start_trim_start_seconds = 0.0
+        self.drag_start_trim_end_seconds = 0.0
+        self.drag_start_duration_seconds = 0.0
+        self.drag_start_playback_rate = 1.0
         self.drop_highlight_lane: int | None = None
         self.setAcceptDrops(True)
         self._clip_rect_debug_cache: set[tuple] = set()
@@ -2942,7 +2989,7 @@ class TimelineCanvas(QWidget):
     def _refresh_size(self) -> None:
         arrangement = self.owner.timeline_clips if hasattr(self.owner, "timeline_clips") else []
         lane_count = max(1, getattr(self.owner, "timeline_lane_count", 4))
-        end_time = max([clip.start_time_seconds + clip.duration_seconds for clip in arrangement] or [8.0])
+        end_time = max([clip.end_time_seconds for clip in arrangement] or [8.0])
         width = int(self.header_width + max(8.0, end_time + 2.0) / self.seconds_per_pixel + 80)
         height = int(self.top_pad * 2 + lane_count * self.lane_height + 34)
         self.setMinimumSize(QSize(max(980, width), max(520, height)))
@@ -3010,6 +3057,16 @@ class TimelineCanvas(QWidget):
                 return clip
         return None
 
+    def _edge_at(self, clip: TimelineClip, pos: QPoint) -> str | None:
+        rect = self._clip_hit_rect(clip)
+        x = float(pos.x())
+        handle = 12.0
+        if abs(x - rect.left()) <= handle:
+            return "left"
+        if abs(x - rect.right()) <= handle:
+            return "right"
+        return None
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -3039,8 +3096,17 @@ class TimelineCanvas(QWidget):
         painter.setPen(QPen(QColor("#78909c"), 2))
         painter.setFont(QFont("Arial", 11, QFont.Bold))
         max_seconds = self._x_to_time(self.width())
+        snap = float(getattr(self.owner, "timeline_snap_seconds", 0.05))
+        if getattr(self.owner, "timeline_snap_enabled", True) and snap >= 0.005:
+            painter.setPen(QPen(QColor(123, 44, 191, 35), 1, Qt.DotLine))
+            mark = 0.0
+            while mark <= max_seconds + snap:
+                x = self._time_to_x(mark)
+                painter.drawLine(QPointF(x, 20), QPointF(x, self.height() - 10))
+                mark += snap
         for second in range(0, int(max_seconds) + 2):
             x = self._time_to_x(float(second))
+            painter.setPen(QPen(QColor("#78909c"), 2))
             painter.drawLine(QPointF(x, 4), QPointF(x, self.height() - 10))
             painter.drawText(QRectF(x + 4, 0, 70, 18), Qt.AlignLeft | Qt.AlignVCenter, f"{second}s")
 
@@ -3060,6 +3126,18 @@ class TimelineCanvas(QWidget):
             painter.setPen(QPen(QColor("#ff4fa3" if selected else ("#7b2cbf" if is_speech else "#5c6bc0")), 5 if selected else 4))
             painter.setBrush(gradient)
             painter.drawRoundedRect(rect, min(22.0, max(1.0, rect.width() / 2.0)), 22)
+            painter.setBrush(QColor(255, 255, 255, 210))
+            painter.setPen(QPen(QColor("#1d3557"), 2))
+            painter.drawRect(QRectF(rect.left() - 2, rect.top() + 16, 5, rect.height() - 32))
+            painter.drawRect(QRectF(rect.right() - 3, rect.top() + 16, 5, rect.height() - 32))
+            if abs(float(clip.playback_rate or 1.0) - 1.0) > 0.005:
+                painter.setBrush(QColor("#7b2cbf"))
+                painter.setPen(Qt.NoPen)
+                rate_rect = QRectF(rect.right() - 58, rect.top() + 8, 52, 20)
+                painter.drawRoundedRect(rate_rect, 7, 7)
+                painter.setPen(QColor("#ffffff"))
+                painter.setFont(QFont("Arial", 9, QFont.Bold))
+                painter.drawText(rate_rect, Qt.AlignCenter, f"{clip.playback_rate:.2f}x")
 
             narrow = rect.width() < 72.0
             very_narrow = rect.width() < 24.0
@@ -3092,12 +3170,12 @@ class TimelineCanvas(QWidget):
                 painter.setPen(QColor("#7b2cbf" if is_speech else "#607d8b"))
                 badge = f" • {speech_type}" if is_speech else ""
                 warning = " • muted" if clip.muted_warning else ""
-                painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, max(0.0, rect.width() - 80), 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • Lane {clip.lane + 1}{badge}{warning}")
+                painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, max(0.0, rect.width() - 80), 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • {clip.playback_rate:.2f}x • Lane {clip.lane + 1}{badge}{warning}")
                 painter.restore()
 
             wave_rect = rect.adjusted(14 if not very_narrow else 1, 62, -14 if not very_narrow else -1, -12)
             painter.setPen(QPen(QColor("#7b2cbf" if is_speech else "#00a8cc"), 3 if not very_narrow else 2, Qt.SolidLine, Qt.RoundCap))
-            audio = np.asarray(clip.audio)
+            audio = clip.visible_audio()
             if audio.ndim == 2 and len(audio) > 1 and wave_rect.width() >= 2:
                 mono = audio.mean(axis=1)
                 steps = max(2, min(90, int(max(2.0, wave_rect.width()) // 4)))
@@ -3115,33 +3193,74 @@ class TimelineCanvas(QWidget):
             return super().mousePressEvent(event)
         clip = self._clip_at(event.pos())
         if clip is not None:
+            tool = getattr(self.owner, "timeline_edit_tool", "select")
+            edge = self._edge_at(clip, event.pos())
             self.selected_clip_id = clip.clip_id
             self.drag_clip_id = clip.clip_id
+            self.drag_operation = "move"
+            if tool == "trim" and edge is not None:
+                self.drag_operation = f"trim_{edge}"
+            elif tool == "stretch" and edge is not None:
+                self.drag_operation = f"stretch_{edge}"
             self.drag_offset_seconds = self._x_to_time(event.position().x()) - clip.start_time_seconds
+            self.drag_start_time_seconds = clip.start_time_seconds
+            self.drag_start_trim_start_seconds = clip.trim_start_seconds
+            self.drag_start_trim_end_seconds = clip.trim_end_seconds
+            self.drag_start_duration_seconds = clip.duration_seconds
+            self.drag_start_playback_rate = clip.playback_rate
             self.drag_started = False
-            self.setCursor(Qt.ClosedHandCursor)
+            self.setCursor(Qt.SizeHorCursor if self.drag_operation != "move" else Qt.ClosedHandCursor)
             self.owner._timeline_select_clip(clip.clip_id)
         else:
             self.selected_clip_id = None
             self.drag_clip_id = None
-            self.owner._timeline_clear_selection(move_playhead_to=self._x_to_time(event.position().x()))
+            self.drag_operation = None
+            self.owner._timeline_clear_selection(move_playhead_to=self.owner._timeline_snap_time(self._x_to_time(event.position().x())))
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
         if self.drag_clip_id is None:
-            self.setCursor(Qt.OpenHandCursor if self._clip_at(event.pos()) is not None else Qt.ArrowCursor)
+            hover = self._clip_at(event.pos())
+            if hover is not None and self._edge_at(hover, event.pos()) is not None and getattr(self.owner, "timeline_edit_tool", "select") in {"trim", "stretch"}:
+                self.setCursor(Qt.SizeHorCursor)
+            else:
+                self.setCursor(Qt.OpenHandCursor if hover is not None else Qt.ArrowCursor)
             return
         clip = self.owner._timeline_clip_by_id(self.drag_clip_id)
         if clip is None:
             return
         old_start, old_lane = clip.start_time_seconds, clip.lane
-        clip.start_time_seconds = max(0.0, round((self._x_to_time(event.position().x()) - self.drag_offset_seconds) / TIMELINE_TIME_STEP_SECONDS) * TIMELINE_TIME_STEP_SECONDS)
-        clip.lane = self._lane_from_y(event.position().y())
+        target_time = self.owner._timeline_snap_time(self._x_to_time(event.position().x()))
+        minimum = 0.005
+        op = self.drag_operation or "move"
+        if op == "move":
+            clip.start_time_seconds = self.owner._timeline_snap_time(self._x_to_time(event.position().x()) - self.drag_offset_seconds)
+            clip.lane = self._lane_from_y(event.position().y())
+        elif op == "trim_left":
+            right_edge = self.drag_start_time_seconds + self.drag_start_duration_seconds
+            new_start = min(max(0.0, target_time), right_edge - minimum)
+            delta_visible = max(0.0, (new_start - self.drag_start_time_seconds) * clip.playback_rate)
+            max_trim = max(0.0, clip.source_duration_seconds - self.drag_start_trim_end_seconds - minimum * clip.playback_rate)
+            clip.trim_start_seconds = min(max_trim, self.drag_start_trim_start_seconds + delta_visible)
+            clip.start_time_seconds = new_start
+        elif op == "trim_right":
+            new_end = max(clip.start_time_seconds + minimum, target_time)
+            wanted_source_visible = max(minimum * clip.playback_rate, (new_end - clip.start_time_seconds) * clip.playback_rate)
+            clip.trim_end_seconds = max(0.0, clip.source_duration_seconds - clip.trim_start_seconds - wanted_source_visible)
+        elif op.startswith("stretch"):
+            anchor = self.drag_start_time_seconds if op == "stretch_right" else self.drag_start_time_seconds + self.drag_start_duration_seconds
+            new_duration = abs(target_time - anchor)
+            new_duration = max(minimum, new_duration)
+            new_duration = self.owner._timeline_snap_time(new_duration) if getattr(self.owner, "timeline_snap_enabled", True) else new_duration
+            visible_source = max(minimum, clip.source_visible_duration_seconds)
+            clip.playback_rate = float(np.clip(visible_source / max(minimum, new_duration), 0.25, 4.0))
+            if op == "stretch_left":
+                clip.start_time_seconds = max(0.0, anchor - clip.duration_seconds)
         self.drag_started = True
         self.owner._timeline_update_duration()
         self.owner._timeline_update_inspector()
         if abs(old_start - clip.start_time_seconds) > 0.001 or old_lane != clip.lane:
-            self.owner._timeline_debug(f"Clip moved id={clip.clip_id} start={clip.start_time_seconds:.3f}s lane={clip.lane}")
+            self.owner._timeline_debug(f"Clip edited id={clip.clip_id} op={op} start={clip.start_time_seconds:.3f}s lane={clip.lane} duration={clip.duration_seconds:.3f}s rate={clip.playback_rate:.2f}x")
         self._refresh_size()
         self.update()
 
@@ -3150,6 +3269,7 @@ class TimelineCanvas(QWidget):
             self.owner._timeline_update_duration()
             self.owner._timeline_mark_mix_dirty()
         self.drag_clip_id = None
+        self.drag_operation = None
         self.drag_started = False
         self.setCursor(Qt.OpenHandCursor)
         self.update()
@@ -4448,12 +4568,12 @@ class ArticulationTimelineCanvas(QWidget):
         cursor = lane.left()
         px = self._px_per_ms()
         for index, item in enumerate(self.items):
-            width = max(18.0, int(item.duration_ms or item.phoneme.duration_ms) * px)
+            width = max(1.0, int(item.duration_ms or item.phoneme.duration_ms) * px)
             rects.append(("block", index, QRectF(cursor, lane.top(), width, lane.height())))
             cursor += width
             if index < len(self.items) - 1:
                 transition = max(0, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS))
-                trans_width = max(10.0, transition * px)
+                trans_width = max(1.0, transition * px)
                 rects.append(("transition", index, QRectF(cursor, lane.top() + 10, trans_width, lane.height() - 20)))
                 cursor += trans_width
         return rects
@@ -4471,7 +4591,8 @@ class ArticulationTimelineCanvas(QWidget):
         self.drag_index = None
         playhead_x = self._lane_rect().left() + self.playhead_ms * self._px_per_ms()
         for kind, index, rect in self._segment_rects():
-            if rect.contains(pos):
+            hit_rect = rect.adjusted(-8, -10, 8, 10)
+            if hit_rect.contains(pos):
                 self.drag_index = index
                 if kind == "transition":
                     self.drag_mode = "transition"
@@ -4552,12 +4673,17 @@ class ArticulationTimelineCanvas(QWidget):
                 painter.setPen(QPen(QColor("#7b2cbf"), 2, Qt.DashLine))
                 painter.drawRoundedRect(rect, 10, 10)
                 painter.setPen(QPen(QColor("#7b2cbf"), 2))
-                painter.drawText(rect, Qt.AlignCenter, f"↔\n{curve.split()[0]}")
+                transition = max(0, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS))
+                painter.drawText(rect.adjusted(2, 0, -2, 0), Qt.AlignCenter, f"↔ {transition} ms\n{curve.split()[0]}")
                 continue
             painter.setBrush(QColor(phoneme.preview_color))
             selected = index == self.selected_index
             painter.setPen(QPen(QColor("#ff4fa3" if selected else "#1d3557"), 5 if selected else 3))
-            painter.drawRoundedRect(rect, 16, 16)
+            painter.drawRoundedRect(rect, min(16.0, max(1.0, rect.width() / 2.0)), 16)
+            if rect.width() < 18.0:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(255, 79, 163, 120), 2, Qt.DashLine))
+                painter.drawRoundedRect(rect.adjusted(-8, 6, 8, -6), 8, 8)
             family_icon = {"vowel": "●", "fricative": "≋", "affricate": "≋!", "stop": "■", "nasal": "∩", "glide": "~", "liquid": "ℓ"}.get(phoneme.phoneme_family, "●")
             badge = articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)
             label = f"{family_icon} {phoneme.name} /{phoneme.ipa}/\n{int(item.duration_ms or phoneme.duration_ms)} ms • {badge}"
@@ -5076,6 +5202,12 @@ class WaveToyWindow(QMainWindow):
         self.timeline_canvas: TimelineCanvas | None = None
         self.timeline_status_label: QLabel | None = None
         self.timeline_inspector_label: QLabel | None = None
+        self.timeline_edit_tool = "select"
+        self.timeline_snap_enabled = True
+        self.timeline_snap_seconds = 0.05
+        self.timeline_tool_buttons: Dict[str, QPushButton] = {}
+        self.timeline_snap_checkbox: QCheckBox | None = None
+        self.timeline_snap_combo: QComboBox | None = None
 
         self.phonemes_dir = Path("phonemes")
         self.current_phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
@@ -8627,15 +8759,45 @@ class WaveToyWindow(QMainWindow):
         edit_layout = QHBoxLayout(edit_bar)
         edit_layout.setContentsMargins(0, 0, 0, 0)
         edit_layout.setSpacing(10)
+        self.timeline_tool_buttons = {}
+        for tool, icon, label, color, shortcut in (
+            ("select", "➤", "Select/Move", "#b8f2e6", "V"),
+            ("trim", "↔", "Trim Tool", "#caffbf", "T"),
+            ("stretch", "⤢", "Stretch Tool", "#ffd166", "S"),
+            ("split", "✂", "Split", "#f1c0e8", "Ctrl+B"),
+            ("delete", "⌫", "Delete", "#ffadad", "Delete"),
+        ):
+            button = self._make_story_button(icon, f"{label} ({shortcut})", color, (self._timeline_split_selected if tool == "split" else self._timeline_delete_selected if tool == "delete" else lambda checked=False, name=tool: self._timeline_set_tool(name)))
+            button.setCheckable(tool in {"select", "trim", "stretch"})
+            button.setChecked(tool == self.timeline_edit_tool)
+            button.setMinimumHeight(66)
+            edit_layout.addWidget(button)
+            if tool in {"select", "trim", "stretch"}:
+                self.timeline_tool_buttons[tool] = button
         for icon, label, color, callback in (
-            ("⧉", "Duplicate Clip", "#f1c0e8", self._timeline_duplicate_selected),
-            ("🗑️", "Delete Clip", "#ffadad", self._timeline_delete_selected),
+            ("⧉", "Duplicate Clip (Ctrl+D)", "#f1c0e8", self._timeline_duplicate_selected),
             ("💾", "Export Last Mix", "#fdffb6", self._timeline_export_last_mix),
         ):
             button = self._make_story_button(icon, label, color, callback)
             button.setMinimumHeight(66)
             edit_layout.addWidget(button)
+        self.timeline_snap_checkbox = QCheckBox("Snap")
+        self.timeline_snap_checkbox.setChecked(self.timeline_snap_enabled)
+        self.timeline_snap_checkbox.stateChanged.connect(self._timeline_snap_changed)
+        edit_layout.addWidget(self.timeline_snap_checkbox)
+        self.timeline_snap_combo = QComboBox()
+        for value in (0.005, 0.01, 0.02, 0.05, 0.10, 0.25, 0.50, 1.00):
+            self.timeline_snap_combo.addItem(f"{value:.3f}s" if value < 0.1 else f"{value:.2f}s", value)
+        self.timeline_snap_combo.setCurrentIndex(3)
+        self.timeline_snap_combo.currentIndexChanged.connect(self._timeline_snap_changed)
+        edit_layout.addWidget(self.timeline_snap_combo)
         layout.addWidget(edit_bar)
+        QShortcut(QKeySequence("V"), self, activated=lambda: self._timeline_set_tool("select"))
+        QShortcut(QKeySequence("T"), self, activated=lambda: self._timeline_set_tool("trim"))
+        QShortcut(QKeySequence("S"), self, activated=lambda: self._timeline_set_tool("stretch"))
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=self._timeline_split_selected)
+        QShortcut(QKeySequence("Delete"), self, activated=self._timeline_delete_selected)
+        QShortcut(QKeySequence("Ctrl+D"), self, activated=self._timeline_duplicate_selected)
 
         split = QHBoxLayout()
         split.setSpacing(12)
@@ -9161,7 +9323,7 @@ class WaveToyWindow(QMainWindow):
             clip_id=clip_id,
             name=f"{item.icon} {item.name}",
             audio=np.array(audio, dtype=np.float32, copy=True),
-            start_time_seconds=max(0.0, round(start_time_seconds / TIMELINE_TIME_STEP_SECONDS) * TIMELINE_TIME_STEP_SECONDS),
+            start_time_seconds=self._timeline_snap_time(start_time_seconds),
             lane=max(0, min(self.timeline_lane_count - 1, lane)),
             sample_rate=SAMPLE_RATE,
             recipe=None,
@@ -9251,7 +9413,7 @@ class WaveToyWindow(QMainWindow):
             clip_id=clip_id,
             name=item.name,
             audio=np.array(item.audio_data, dtype=np.float32, copy=True),
-            start_time_seconds=max(0.0, round(start_time_seconds / TIMELINE_TIME_STEP_SECONDS) * TIMELINE_TIME_STEP_SECONDS),
+            start_time_seconds=self._timeline_snap_time(start_time_seconds),
             lane=max(0, min(self.timeline_lane_count - 1, lane)),
             sample_rate=item.sample_rate,
             recipe=None,
@@ -9332,6 +9494,54 @@ class WaveToyWindow(QMainWindow):
             self._timeline_debug(f"Recipe snapshot failed: {exc}")
             return {"name": "Timeline Clip", "error": str(exc)}
 
+    def _timeline_snap_time(self, seconds: float) -> float:
+        seconds = max(0.0, float(seconds))
+        if not getattr(self, "timeline_snap_enabled", True):
+            return seconds
+        grid = max(0.001, float(getattr(self, "timeline_snap_seconds", 0.05)))
+        return max(0.0, round(seconds / grid) * grid)
+
+    def _timeline_render_clip_audio(self, clip: TimelineClip) -> np.ndarray:
+        audio = clip.visible_audio()
+        if audio.ndim == 1 and audio.size:
+            audio = np.column_stack([audio, audio]).astype(np.float32)
+        if audio.ndim != 2 or audio.size == 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        if audio.shape[1] == 1:
+            audio = np.repeat(audio, 2, axis=1)
+        if audio.shape[1] > 2:
+            audio = audio[:, :2]
+        if int(clip.sample_rate) != SAMPLE_RATE:
+            audio = _resample_audio(audio, int(clip.sample_rate), SAMPLE_RATE)
+        rate = float(np.clip(clip.playback_rate or 1.0, 0.25, 4.0))
+        if abs(rate - 1.0) > 0.0005 and len(audio) > 1:
+            target_len = max(1, int(round(len(audio) / rate)))
+            x_old = np.linspace(0.0, 1.0, len(audio), endpoint=True)
+            x_new = np.linspace(0.0, 1.0, target_len, endpoint=True)
+            left = np.interp(x_new, x_old, audio[:, 0])
+            right = np.interp(x_new, x_old, audio[:, 1])
+            audio = np.column_stack([left, right]).astype(np.float32)
+        clip.rendered_duration_seconds = len(audio) / SAMPLE_RATE if audio.size else 0.0
+        return np.asarray(audio, dtype=np.float32)
+
+    def _timeline_set_tool(self, tool: str) -> None:
+        self.timeline_edit_tool = tool
+        for name, button in getattr(self, "timeline_tool_buttons", {}).items():
+            button.setChecked(name == tool)
+        if self.timeline_status_label is not None:
+            self.timeline_status_label.setText(f"Tool: {tool.title()} • Snap {'on' if self.timeline_snap_enabled else 'off'} {self.timeline_snap_seconds:.3f}s")
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.update()
+
+    def _timeline_snap_changed(self, *args) -> None:
+        del args
+        if self.timeline_snap_checkbox is not None:
+            self.timeline_snap_enabled = self.timeline_snap_checkbox.isChecked()
+        if self.timeline_snap_combo is not None:
+            self.timeline_snap_seconds = float(self.timeline_snap_combo.currentData() or 0.05)
+        self._timeline_set_tool(self.timeline_edit_tool)
+
+
     def _drop_story_sound(self, checked: bool = False) -> None:
         self._timeline_debug("Drop Current Sound clicked")
         audio = self._timeline_current_audio(force=True)
@@ -9350,7 +9560,7 @@ class WaveToyWindow(QMainWindow):
             clip_id=clip_id,
             name=f"Sound {clip_id}",
             audio=audio,
-            start_time_seconds=max(0.0, self.timeline_playhead_seconds),
+            start_time_seconds=self._timeline_snap_time(self.timeline_playhead_seconds),
             lane=0,
             recipe=self._timeline_recipe_snapshot(),
         )
@@ -9401,9 +9611,16 @@ class WaveToyWindow(QMainWindow):
         if self.timeline_canvas is not None:
             visual_width = clip.duration_seconds / self.timeline_canvas.seconds_per_pixel
         source_text = (
-            f"\nSource: {clip.source_type}"
+            f"\nSource type: {clip.source_type}"
+            f"\nStart time: {clip.start_time_seconds:.3f}s"
+            f"\nEnd time: {clip.end_time_seconds:.3f}s"
+            f"\nSource duration: {clip.source_duration_seconds:.3f}s"
+            f"\nVisible duration: {clip.duration_seconds:.3f}s"
+            f"\nTrim start: {clip.trim_start_seconds:.3f}s"
+            f"\nTrim end: {clip.trim_end_seconds:.3f}s"
+            f"\nPlayback rate: {clip.playback_rate:.2f}x"
+            f"\nSample count: {len(clip.audio)}"
             f"\nSample rate: {clip.sample_rate} Hz"
-            f"\nAudio samples: {len(clip.audio)}"
         )
         if visual_width is not None:
             source_text += f"\nVisual width: {visual_width:.1f}px"
@@ -9423,7 +9640,7 @@ class WaveToyWindow(QMainWindow):
         if clip.muted_warning:
             source_text += f"\nWarning: {clip.muted_warning}"
         self.timeline_inspector_label.setText(
-            f"{clip.name}\nID: {clip.clip_id}\nStart: {clip.start_time_seconds:.2f}s\nLane: {clip.lane + 1}\nDuration: {clip.duration_seconds:.3f}s{source_text}"
+            f"{clip.name}\nID: {clip.clip_id}\nLane: {clip.lane + 1}\nTool: {self.timeline_edit_tool.title()}\nDuration: {clip.duration_seconds:.3f}s{source_text}"
         )
 
     def _timeline_update_duration(self) -> None:
@@ -9459,6 +9676,11 @@ class WaveToyWindow(QMainWindow):
             source_type=source.source_type,
             speech_metadata=source.speech_metadata,
             muted_warning=source.muted_warning,
+            source_audio_full_length_samples=source.source_audio_full_length_samples,
+            trim_start_seconds=source.trim_start_seconds,
+            trim_end_seconds=source.trim_end_seconds,
+            playback_rate=source.playback_rate,
+            rendered_duration_seconds=source.rendered_duration_seconds,
         )
         self.timeline_clips.append(duplicate)
         self.timeline_selected_clip_id = duplicate.clip_id
@@ -9470,6 +9692,53 @@ class WaveToyWindow(QMainWindow):
             self.timeline_canvas.update()
         self._timeline_update_inspector()
         self._timeline_debug(f"Clip created id={duplicate.clip_id} start={duplicate.start_time_seconds:.3f}s lane={duplicate.lane} duration={duplicate.duration_seconds:.3f}s duplicate_of={source.clip_id}")
+
+    def _timeline_split_selected(self, checked: bool = False) -> None:
+        del checked
+        source = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if source is None:
+            QMessageBox.information(self, "Split Clip", "Select a timeline clip first.")
+            return
+        split_time = float(self.timeline_playhead_seconds)
+        if not (source.start_time_seconds + 0.005 < split_time < source.end_time_seconds - 0.005):
+            QMessageBox.information(self, "Split Clip", "Move the playhead inside the selected clip before splitting.")
+            return
+        left_duration = split_time - source.start_time_seconds
+        source_delta = left_duration * source.playback_rate
+        original_trim_end = source.trim_end_seconds
+        right_trim_start = source.trim_start_seconds + source_delta
+        source.trim_end_seconds = max(0.0, source.source_duration_seconds - source.trim_start_seconds - source_delta)
+        clip_id = self.timeline_next_clip_id
+        self.timeline_next_clip_id += 1
+        right = TimelineClip(
+            clip_id=clip_id,
+            name=f"{source.name} Split",
+            audio=np.array(source.audio, dtype=np.float32, copy=True),
+            start_time_seconds=split_time,
+            lane=source.lane,
+            sample_rate=source.sample_rate,
+            recipe=source.recipe,
+            source_path=source.source_path,
+            import_metadata=source.import_metadata,
+            source_type=source.source_type,
+            speech_metadata=source.speech_metadata,
+            muted_warning=source.muted_warning,
+            source_audio_full_length_samples=source.source_audio_full_length_samples,
+            trim_start_seconds=right_trim_start,
+            trim_end_seconds=original_trim_end,
+            playback_rate=source.playback_rate,
+        )
+        self.timeline_clips.append(right)
+        self.timeline_selected_clip_id = right.clip_id
+        self._timeline_update_duration()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = right.clip_id
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Clip split id={source.clip_id} right_id={right.clip_id} at={split_time:.3f}s")
+
 
     def _timeline_delete_selected(self, checked: bool = False) -> None:
         clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
@@ -9498,17 +9767,9 @@ class WaveToyWindow(QMainWindow):
         mix = np.zeros((total_samples, 2), dtype=np.float32)
         for clip in self.timeline_clips:
             start = max(0, int(round(clip.start_time_seconds * SAMPLE_RATE)))
-            clip_audio = np.asarray(clip.audio, dtype=np.float32)
-            if clip_audio.ndim == 1:
-                clip_audio = np.column_stack([clip_audio, clip_audio]).astype(np.float32)
-            if clip_audio.ndim != 2 or clip_audio.size == 0:
+            clip_audio = self._timeline_render_clip_audio(clip)
+            if clip_audio.size == 0:
                 continue
-            if clip_audio.shape[1] == 1:
-                clip_audio = np.repeat(clip_audio, 2, axis=1)
-            if clip_audio.shape[1] > 2:
-                clip_audio = clip_audio[:, :2]
-            if int(clip.sample_rate) != SAMPLE_RATE:
-                clip_audio = _resample_audio(clip_audio, int(clip.sample_rate), SAMPLE_RATE)
             end = min(total_samples, start + len(clip_audio))
             if end <= start:
                 continue
@@ -9664,6 +9925,10 @@ class WaveToyWindow(QMainWindow):
                 "sample_rate": SAMPLE_RATE,
                 "duration_seconds": len(mix) / SAMPLE_RATE,
                 "clip_count": len(self.timeline_clips),
+                "time_scale_model": "TimelineCanvas.seconds_per_pixel is the shared timeline scale; clip widths are visible_duration_seconds / seconds_per_pixel.",
+                "snap_enabled": self.timeline_snap_enabled,
+                "snap_seconds": self.timeline_snap_seconds,
+                "edit_model": "Non-destructive trim_start_seconds, trim_end_seconds, and playback_rate metadata are applied during mixdown/export; source audio arrays and source paths remain unchanged.",
                 "palette_sources": [item.metadata() for item in self.timeline_audio_palette],
                 "speech_bin_sources": [item.metadata() for item in self.timeline_speech_bin],
                 "clip_source_types": [
