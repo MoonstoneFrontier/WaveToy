@@ -49,7 +49,7 @@ try:
 except Exception:
     sd = None
 
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QDrag, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -57,11 +57,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QInputDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -79,6 +81,78 @@ from PySide6.QtWidgets import (
 )
 
 SAMPLE_RATE = 44_100
+
+
+class FlowLayout(QLayout):
+    """Small wrapping layout for button toolbars."""
+
+    def __init__(self, parent: QWidget | None = None, margin: int = 0, spacing: int = 8) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientations:
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        size += QSize(left + right, top + bottom)
+        return size
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective = rect.adjusted(left, top, -right, -bottom)
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        for item in self._items:
+            space_x = self.spacing()
+            space_y = self.spacing()
+            item_size = item.sizeHint()
+            next_x = x + item_size.width() + space_x
+            if next_x - space_x > effective.right() and line_height > 0:
+                x = effective.x()
+                y = y + line_height + space_y
+                next_x = x + item_size.width() + space_x
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item_size))
+            x = next_x
+            line_height = max(line_height, item_size.height())
+        return y + line_height - rect.y() + bottom
 
 ARTICULATION_SOURCE_DEFAULT = "default_voice"
 ARTICULATION_SOURCE_CURRENT = "current_wavetoy_sound"
@@ -4878,6 +4952,21 @@ class GraphicalPitchCurveCanvas(QWidget):
         painter.end()
 
 
+class GraphicalWaveCard(QWidget):
+    """Selectable card surface for graphical wave layers."""
+
+    waveSelected = Signal(str)
+
+    def __init__(self, wave_id: str) -> None:
+        super().__init__()
+        self.wave_id = wave_id
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.waveSelected.emit(self.wave_id)
+        super().mousePressEvent(event)
+
+
 class WaveToyWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -5063,6 +5152,8 @@ class WaveToyWindow(QMainWindow):
 
         self.graphical_wave_canvases: Dict[str, GraphicalWaveLayerCanvas] = {}
         self.graphical_wave_layer_list: QWidget | None = None
+        self.graphical_wave_cards: Dict[str, GraphicalWaveCard] = {}
+        self.graphical_selected_wave_id: str | None = None
         self.graphical_stereo_canvas: GraphicalStereoFieldCanvas | None = None
         self.graphical_pitch_canvas: GraphicalPitchCurveCanvas | None = None
         self.graphical_vocal_canvas: VocalTractCanvas | None = None
@@ -8122,17 +8213,22 @@ class WaveToyWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        button_row = QHBoxLayout()
+        toolbar = QWidget()
+        toolbar.setObjectName("graphicalWaveToolbar")
+        toolbar_layout = FlowLayout(toolbar, margin=0, spacing=8)
         add_button = QPushButton("➕ Add Wave Layer")
         duplicate_button = QPushButton("⧉ Duplicate Loudest Layer")
         all_button = QPushButton("🌈 Clear Solo")
         for button in (add_button, duplicate_button, all_button):
-            button.setMinimumHeight(42)
-            button_row.addWidget(button)
+            button.setObjectName("workspaceToolbarButton")
+            button.setMinimumHeight(52)
+            button.setMinimumWidth(156)
+            button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            toolbar_layout.addWidget(button)
         add_button.clicked.connect(self._graphical_add_wave_layer)
         duplicate_button.clicked.connect(self._graphical_duplicate_loudest_wave)
         all_button.clicked.connect(self._clear_solo)
-        layout.addLayout(button_row)
+        layout.addWidget(toolbar)
         self.graphical_wave_layer_list = QWidget()
         self.graphical_wave_layer_list.setObjectName("graphicalLayerList")
         self.graphical_wave_layer_list.setLayout(QVBoxLayout())
@@ -8263,12 +8359,49 @@ class WaveToyWindow(QMainWindow):
             if widget is not None:
                 widget.deleteLater()
         self.graphical_wave_canvases.clear()
+        self.graphical_wave_cards.clear()
+        if self.graphical_selected_wave_id not in self.wave_row_order:
+            self.graphical_selected_wave_id = self.wave_row_order[0] if self.wave_row_order else None
         solo_wave = self._solo_wave_from_ui() if hasattr(self, "wave_solo_buttons") else None
         for wave_id in list(self.wave_row_order):
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
+            row = GraphicalWaveCard(wave_id)
+            row.waveSelected.connect(self._graphical_select_wave)
+            muted = self.wave_mute_buttons.get(wave_id).isChecked() if wave_id in self.wave_mute_buttons else False
+            soloed = solo_wave == wave_id
+            self._set_graphical_wave_card_visuals(row, wave_id, muted, soloed)
+            row_layout = QVBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(8)
+            row_layout.setSpacing(0)
+
+            actions = GraphicalWaveCard(wave_id)
+            actions.setObjectName("graphicalWaveCardHeader")
+            actions.waveSelected.connect(self._graphical_select_wave)
+            actions_layout = FlowLayout(actions, margin=10, spacing=8)
+            mute = QPushButton("🎵 Mute")
+            solo = QPushButton("⭐ Solo")
+            duplicate = QPushButton("📄 Copy")
+            remove = QPushButton("🗑 Remove")
+            for button in (mute, solo, duplicate, remove):
+                button.setObjectName("workspaceToolbarButton")
+                button.setMinimumSize(QSize(96, 48))
+                button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+                actions_layout.addWidget(button)
+            mute.setCheckable(True)
+            mute.setChecked(muted)
+            solo.setCheckable(True)
+            solo.setChecked(soloed)
+            mute.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_toggle_wave_mute(wt))
+            solo.clicked.connect(lambda checked=False, wt=wave_id: self._set_wave_solo(wt, True))
+            duplicate.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_duplicate_wave(wt))
+            remove.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_remove_wave(wt))
+            row_layout.addWidget(actions)
+
+            body = GraphicalWaveCard(wave_id)
+            body.setObjectName("graphicalWaveCardBody")
+            body.waveSelected.connect(self._graphical_select_wave)
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(10, 10, 10, 10)
+            body_layout.setSpacing(0)
             canvas = GraphicalWaveLayerCanvas(wave_id)
             canvas.levelEdited.connect(self._graphical_set_wave_levels)
             canvas.waveSelected.connect(self._graphical_select_wave)
@@ -8276,23 +8409,11 @@ class WaveToyWindow(QMainWindow):
             shape = wave_shape_for(self._settings_from_ui(), wave_id) if hasattr(self, "note_combo") else wave_id
             start_db = self.wave_start_sliders[wave_id].value() / DB_SLIDER_SCALE
             end_db = self.wave_end_sliders[wave_id].value() / DB_SLIDER_SCALE
-            muted = self.wave_mute_buttons.get(wave_id).isChecked() if wave_id in self.wave_mute_buttons else False
-            canvas.set_state(label, shape, start_db, end_db, muted, solo_wave == wave_id)
+            canvas.set_state(label, shape, start_db, end_db, muted, soloed)
             self.graphical_wave_canvases[wave_id] = canvas
-            row_layout.addWidget(canvas, 1)
-            actions = QVBoxLayout()
-            mute = QPushButton("🤫" if muted else "🎵")
-            solo = QPushButton("👑" if solo_wave == wave_id else "⭐")
-            duplicate = QPushButton("⧉")
-            remove = QPushButton("➖")
-            for button in (mute, solo, duplicate, remove):
-                button.setMinimumSize(QSize(46, 32))
-                actions.addWidget(button)
-            mute.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_toggle_wave_mute(wt))
-            solo.clicked.connect(lambda checked=False, wt=wave_id: self._set_wave_solo(wt, True))
-            duplicate.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_duplicate_wave(wt))
-            remove.clicked.connect(lambda checked=False, wt=wave_id: self._graphical_remove_wave(wt))
-            row_layout.addLayout(actions)
+            self.graphical_wave_cards[wave_id] = row
+            body_layout.addWidget(canvas, 1)
+            row_layout.addWidget(body, 1)
             layout.addWidget(row)
 
     def _refresh_graphical_chain_editor(self) -> None:
@@ -8350,7 +8471,41 @@ class WaveToyWindow(QMainWindow):
         self._schedule_generate("graphical_duplicate_wave")
         self._refresh_graphical_editor()
 
+    def _graphical_wave_card_object_name(self, wave_id: str, muted: bool, soloed: bool) -> str:
+        if wave_id == self.graphical_selected_wave_id:
+            return "waveCardSelected"
+        if soloed:
+            return "waveCardSolo"
+        if muted:
+            return "waveCardMuted"
+        return "waveCard"
+
+    def _set_graphical_wave_card_visuals(self, card: QWidget, wave_id: str, muted: bool, soloed: bool) -> None:
+        selected = wave_id == self.graphical_selected_wave_id
+        card.setObjectName(self._graphical_wave_card_object_name(wave_id, muted, soloed))
+        if selected:
+            glow = QGraphicsDropShadowEffect(card)
+            glow.setBlurRadius(24)
+            glow.setColor(QColor(92, 219, 149, 150))
+            glow.setOffset(0, 0)
+            card.setGraphicsEffect(glow)
+        else:
+            card.setGraphicsEffect(None)
+        card.style().unpolish(card)
+        card.style().polish(card)
+        card.update()
+
+    def _refresh_graphical_wave_card_styles(self) -> None:
+        solo_wave = self._solo_wave_from_ui() if hasattr(self, "wave_solo_buttons") else None
+        for wave_id, card in self.graphical_wave_cards.items():
+            muted = self.wave_mute_buttons.get(wave_id).isChecked() if wave_id in self.wave_mute_buttons else False
+            self._set_graphical_wave_card_visuals(card, wave_id, muted, solo_wave == wave_id)
+
     def _graphical_select_wave(self, wave_id: str) -> None:
+        if wave_id not in self.wave_row_order:
+            return
+        self.graphical_selected_wave_id = wave_id
+        self._refresh_graphical_wave_card_styles()
         if self.graphical_status_label is not None:
             self.graphical_status_label.setText(f"Selected wave layer: {wave_label_for(self._settings_from_ui(), wave_id)}")
 
@@ -10220,6 +10375,20 @@ class WaveToyWindow(QMainWindow):
             QWidget#graphicalLayerList {
                 background: transparent;
             }
+            QWidget#graphicalWaveToolbar {
+                background: transparent;
+            }
+            QWidget#graphicalWaveCardHeader {
+                background: rgba(255, 255, 255, 0.54);
+                border-top-left-radius: 16px;
+                border-top-right-radius: 16px;
+                border-bottom: 2px solid rgba(38, 50, 56, 0.10);
+            }
+            QWidget#graphicalWaveCardBody {
+                background: transparent;
+                border-bottom-left-radius: 16px;
+                border-bottom-right-radius: 16px;
+            }
             QLabel#graphicalEffectBlock {
                 background: #fff8d9;
                 border: 4px dashed rgba(123, 44, 191, 0.72);
@@ -10464,6 +10633,11 @@ class WaveToyWindow(QMainWindow):
                 background: #fff8d9;
                 border: 4px solid #ffd166;
                 border-radius: 16px;
+            }
+            QWidget#waveCardSelected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f0fff7, stop:1 #fff7d6);
+                border: 5px solid #5cdb95;
+                border-radius: 18px;
             }
             QWidget#sliderCell, QWidget#earPreviewCell, QWidget#signalStage {
                 background: transparent;
