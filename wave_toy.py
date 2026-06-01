@@ -505,13 +505,18 @@ class TimelineClip:
     trim_start_seconds: float = 0.0
     trim_end_seconds: float = 0.0
     playback_rate: float = 1.0
+    gain: float = 1.0
+    fade_in_seconds: float = 0.0
+    fade_out_seconds: float = 0.0
     rendered_duration_seconds: float = 0.0
     stretch_mode: str = "preserve_pitch"
     stretch_algorithm: str = "numpy_phase_vocoder"
     stretched_audio_cache: np.ndarray | None = field(default=None, repr=False, compare=False)
+    preview_waveform_cache: List[float] = field(default_factory=list, repr=False, compare=False)
     expression_metadata: Dict[str, object] = field(default_factory=dict)
     svg_visual_metadata: Dict[str, object] = field(default_factory=dict)
     _stretch_cache_key: tuple | None = field(default=None, repr=False, compare=False)
+    _preview_waveform_cache_key: tuple | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.source_audio_full_length_samples <= 0:
@@ -520,6 +525,9 @@ class TimelineClip:
         self.trim_start_seconds = float(np.clip(float(self.trim_start_seconds), 0.0, source_duration))
         self.trim_end_seconds = float(np.clip(float(self.trim_end_seconds), 0.0, max(0.0, source_duration - self.trim_start_seconds)))
         self.playback_rate = float(np.clip(float(self.playback_rate or 1.0), 0.25, 4.0))
+        self.gain = float(np.clip(float(self.gain if self.gain is not None else 1.0), 0.0, 4.0))
+        self.fade_in_seconds = float(np.clip(float(self.fade_in_seconds or 0.0), 0.0, self.duration_seconds))
+        self.fade_out_seconds = float(np.clip(float(self.fade_out_seconds or 0.0), 0.0, self.duration_seconds))
         self.stretch_mode = str(self.stretch_mode or "preserve_pitch")
         self.stretch_algorithm = str(self.stretch_algorithm or "numpy_phase_vocoder")
         self.rendered_duration_seconds = self.duration_seconds
@@ -531,6 +539,14 @@ class TimelineClip:
     @property
     def source_duration_seconds(self) -> float:
         return max(0.0, float(self.source_audio_full_length_samples or len(self.audio)) / float(self.sample_rate))
+
+    @property
+    def trim_start(self) -> float:
+        return self.trim_start_seconds
+
+    @property
+    def trim_end(self) -> float:
+        return self.trim_end_seconds
 
     @property
     def source_visible_duration_seconds(self) -> float:
@@ -577,7 +593,14 @@ class TimelineClip:
             "source_audio_full_length_samples": self.source_audio_full_length_samples,
             "trim_start_seconds": self.trim_start_seconds,
             "trim_end_seconds": self.trim_end_seconds,
+            "trim_start": self.trim_start_seconds,
+            "trim_end": self.trim_end_seconds,
             "playback_rate": self.playback_rate,
+            "gain": self.gain,
+            "fade_in": self.fade_in_seconds,
+            "fade_out": self.fade_out_seconds,
+            "fade_in_seconds": self.fade_in_seconds,
+            "fade_out_seconds": self.fade_out_seconds,
             "stretch_ratio": self.stretch_ratio,
             "stretch_mode": self.stretch_mode,
             "stretch_algorithm": self.stretch_algorithm,
@@ -2113,6 +2136,69 @@ def time_stretch_preserve_pitch(audio: np.ndarray, source_rate: int, target_dura
     return np.clip(stretched_audio, -1.0, 1.0).astype(np.float32, copy=False)
 
 
+class TimelineWaveformRenderer:
+    """Renderer abstraction for timeline clip waveforms and future SVG output."""
+
+    renderer_name = "base"
+
+    def preview_peaks(self, clip: TimelineClip, bins: int) -> List[float]:
+        cache_key = (
+            self.renderer_name,
+            int(bins),
+            len(clip.audio),
+            int(clip.sample_rate or SAMPLE_RATE),
+            round(float(clip.trim_start_seconds), 6),
+            round(float(clip.trim_end_seconds), 6),
+            round(float(clip.playback_rate), 6),
+            round(float(clip.gain), 6),
+            round(float(clip.fade_in_seconds), 6),
+            round(float(clip.fade_out_seconds), 6),
+            str(clip.source_path or ""),
+            json.dumps((clip.speech_metadata or {}).get("articulation_metadata", {}), sort_keys=True, default=str),
+        )
+        if clip.preview_waveform_cache and clip._preview_waveform_cache_key == cache_key:
+            return list(clip.preview_waveform_cache)
+        peaks = compute_waveform_peaks(clip.visible_audio(), bins=bins)
+        clip.preview_waveform_cache = list(peaks)
+        clip._preview_waveform_cache_key = cache_key
+        return peaks
+
+    def draw_waveform(self, painter: QPainter, rect: QRectF, clip: TimelineClip, color: QColor) -> None:
+        raise NotImplementedError
+
+
+class RasterTimelineWaveformRenderer(TimelineWaveformRenderer):
+    """Default QWidget/QPainter waveform renderer for timeline clips."""
+
+    renderer_name = "raster"
+
+    def draw_waveform(self, painter: QPainter, rect: QRectF, clip: TimelineClip, color: QColor) -> None:
+        if rect.width() < 2 or rect.height() < 2:
+            return
+        bins = max(8, min(180, int(max(2.0, rect.width()) // 3)))
+        peaks = self.preview_peaks(clip, bins)
+        if not peaks:
+            return
+        painter.save()
+        painter.setPen(QPen(color, 2, Qt.SolidLine, Qt.RoundCap))
+        step = rect.width() / max(1, len(peaks))
+        center = rect.center().y()
+        for index, peak in enumerate(peaks):
+            x = rect.left() + index * step + step * 0.5
+            height = max(1.5, float(peak) * rect.height() * 0.92)
+            painter.drawLine(QPointF(x, center - height / 2.0), QPointF(x, center + height / 2.0))
+        painter.restore()
+
+
+class SvgTimelineWaveformRenderer(TimelineWaveformRenderer):
+    """Placeholder adapter for future SVG waveform serialization."""
+
+    renderer_name = "svg"
+
+    def draw_waveform(self, painter: QPainter, rect: QRectF, clip: TimelineClip, color: QColor) -> None:
+        RasterTimelineWaveformRenderer().draw_waveform(painter, rect, clip, color)
+
+
 def compute_waveform_peaks(audio: np.ndarray, bins: int = 36) -> List[float]:
     audio = _ensure_stereo_float(audio)
     if audio.size == 0:
@@ -3226,6 +3312,7 @@ class TimelineCanvas(QWidget):
         self.drag_press_pos: QPoint | None = None
         self.drag_original_snapshot: Dict[str, object] | None = None
         self.drop_highlight_lane: int | None = None
+        self.waveform_renderer: TimelineWaveformRenderer = RasterTimelineWaveformRenderer()
         self.setAcceptDrops(True)
         self._clip_rect_debug_cache: set[tuple] = set()
 
@@ -3341,6 +3428,11 @@ class TimelineCanvas(QWidget):
             "duration_seconds": clip.duration_seconds,
             "stretched_audio_cache": np.array(clip.stretched_audio_cache, dtype=np.float32, copy=True) if clip.stretched_audio_cache is not None else None,
             "stretch_cache_key": clip._stretch_cache_key,
+            "preview_waveform_cache": list(clip.preview_waveform_cache),
+            "preview_waveform_cache_key": clip._preview_waveform_cache_key,
+            "gain": clip.gain,
+            "fade_in_seconds": clip.fade_in_seconds,
+            "fade_out_seconds": clip.fade_out_seconds,
         }
 
     def _restore_timeline_drag_snapshot(self) -> None:
@@ -3354,6 +3446,11 @@ class TimelineCanvas(QWidget):
         clip.trim_start_seconds = float(snapshot.get("trim_start_seconds", clip.trim_start_seconds))
         clip.trim_end_seconds = float(snapshot.get("trim_end_seconds", clip.trim_end_seconds))
         clip.playback_rate = float(snapshot.get("playback_rate", clip.playback_rate))
+        clip.gain = float(snapshot.get("gain", clip.gain))
+        clip.fade_in_seconds = float(snapshot.get("fade_in_seconds", clip.fade_in_seconds))
+        clip.fade_out_seconds = float(snapshot.get("fade_out_seconds", clip.fade_out_seconds))
+        clip.preview_waveform_cache = list(snapshot.get("preview_waveform_cache", clip.preview_waveform_cache) or [])
+        clip._preview_waveform_cache_key = snapshot.get("preview_waveform_cache_key", clip._preview_waveform_cache_key)
         cache = snapshot.get("stretched_audio_cache")
         clip.stretched_audio_cache = np.array(cache, dtype=np.float32, copy=True) if isinstance(cache, np.ndarray) else None
         clip._stretch_cache_key = snapshot.get("stretch_cache_key")
@@ -3445,6 +3542,8 @@ class TimelineCanvas(QWidget):
             clip.trim_start_seconds = min(max_trim, self.drag_start_trim_start_seconds + delta_visible)
             clip.stretched_audio_cache = None
             clip._stretch_cache_key = None
+            clip.preview_waveform_cache = []
+            clip._preview_waveform_cache_key = None
             clip.start_time_seconds = new_start
         elif op == "trim_right":
             new_end = max(clip.start_time_seconds + minimum, target_time)
@@ -3452,6 +3551,8 @@ class TimelineCanvas(QWidget):
             clip.trim_end_seconds = max(0.0, clip.source_duration_seconds - clip.trim_start_seconds - wanted_source_visible)
             clip.stretched_audio_cache = None
             clip._stretch_cache_key = None
+            clip.preview_waveform_cache = []
+            clip._preview_waveform_cache_key = None
         elif op.startswith("stretch"):
             anchor = self.drag_start_time_seconds if op == "stretch_right" else self.drag_start_time_seconds + self.drag_start_duration_seconds
             new_duration = abs(target_time - anchor)
@@ -3461,6 +3562,8 @@ class TimelineCanvas(QWidget):
             clip.playback_rate = float(np.clip(visible_source / max(minimum, new_duration), 0.25, 4.0))
             clip.stretched_audio_cache = None
             clip._stretch_cache_key = None
+            clip.preview_waveform_cache = []
+            clip._preview_waveform_cache_key = None
             if op == "stretch_left":
                 clip.start_time_seconds = max(0.0, anchor - clip.duration_seconds)
         self.owner._timeline_update_duration()
@@ -3574,20 +3677,48 @@ class TimelineCanvas(QWidget):
                 painter.drawText(QRectF(rect.left() + 66, rect.top() + 36, max(0.0, rect.width() - 80), 22), Qt.AlignLeft | Qt.AlignVCenter, f"{clip.duration_seconds:.2f}s • {clip.stretch_badge} • Pitch preserved • Lane {clip.lane + 1}{badge}{warning}")
                 painter.restore()
 
+            if not very_narrow:
+                fade_in_width = min(rect.width() * 0.48, max(0.0, clip.fade_in_seconds / max(clip.duration_seconds, 1e-9) * rect.width()))
+                fade_out_width = min(rect.width() * 0.48, max(0.0, clip.fade_out_seconds / max(clip.duration_seconds, 1e-9) * rect.width()))
+                if fade_in_width > 2.0:
+                    fade_path = QPainterPath(QPointF(rect.left(), rect.bottom()))
+                    fade_path.lineTo(QPointF(rect.left(), rect.top()))
+                    fade_path.lineTo(QPointF(rect.left() + fade_in_width, rect.bottom()))
+                    fade_path.closeSubpath()
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor(123, 44, 191, 54))
+                    painter.drawPath(fade_path)
+                if fade_out_width > 2.0:
+                    fade_path = QPainterPath(QPointF(rect.right(), rect.bottom()))
+                    fade_path.lineTo(QPointF(rect.right(), rect.top()))
+                    fade_path.lineTo(QPointF(rect.right() - fade_out_width, rect.bottom()))
+                    fade_path.closeSubpath()
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QColor(255, 79, 163, 54))
+                    painter.drawPath(fade_path)
+                painter.setBrush(QColor("#ffffff"))
+                painter.setPen(QPen(QColor("#263238"), 2))
+                for x, label in ((rect.left() + 10, "F"), (rect.right() - 10, "F")):
+                    painter.drawEllipse(QPointF(x, rect.top() + 12), 6, 6)
+                    painter.setFont(QFont("Arial", 7, QFont.Bold))
+                    painter.drawText(QRectF(x - 5, rect.top() + 6, 10, 12), Qt.AlignCenter, label)
+                painter.setBrush(QColor("#7b2cbf"))
+                painter.setPen(QPen(QColor("#ffffff"), 1))
+                for x, label in ((rect.left() + 4, "T"), (rect.right() - 4, "T")):
+                    painter.drawRect(QRectF(x - 4, rect.center().y() - 10, 8, 20))
+                    painter.drawText(QRectF(x - 5, rect.center().y() - 7, 10, 14), Qt.AlignCenter, label)
+                painter.setBrush(QColor("#ffb703"))
+                painter.setPen(QPen(QColor("#7b2cbf"), 1))
+                for x in (rect.left() + 20, rect.right() - 20):
+                    diamond = QPainterPath(QPointF(x, rect.bottom() - 9))
+                    diamond.lineTo(QPointF(x + 6, rect.bottom() - 15))
+                    diamond.lineTo(QPointF(x, rect.bottom() - 21))
+                    diamond.lineTo(QPointF(x - 6, rect.bottom() - 15))
+                    diamond.closeSubpath()
+                    painter.drawPath(diamond)
+
             wave_rect = rect.adjusted(14 if not very_narrow else 1, 62, -14 if not very_narrow else -1, -12)
-            painter.setPen(QPen(QColor("#7b2cbf" if is_speech else "#00a8cc"), 3 if not very_narrow else 2, Qt.SolidLine, Qt.RoundCap))
-            audio = clip.visible_audio()
-            if audio.ndim == 2 and len(audio) > 1 and wave_rect.width() >= 2:
-                mono = audio.mean(axis=1)
-                steps = max(2, min(90, int(max(2.0, wave_rect.width()) // 4)))
-                points = []
-                for i in range(steps):
-                    sample_index = min(len(mono) - 1, int(i * len(mono) / steps))
-                    x = wave_rect.left() + (wave_rect.width() * i / max(1, steps - 1))
-                    y = wave_rect.center().y() - float(mono[sample_index]) * wave_rect.height() * 0.42
-                    points.append(QPointF(x, y))
-                for a, b in zip(points, points[1:]):
-                    painter.drawLine(a, b)
+            self.waveform_renderer.draw_waveform(painter, wave_rect, clip, QColor("#7b2cbf" if is_speech else "#00a8cc"))
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
@@ -10555,6 +10686,9 @@ class WaveToyWindow(QMainWindow):
                 self.timeline_stretch_quality,
                 pitch_preserve,
                 algorithm,
+                str(clip.source_path or ""),
+                str(clip.source_type or ""),
+                json.dumps((clip.speech_metadata or {}).get("articulation_metadata", {}), sort_keys=True, default=str),
             )
             if pitch_preserve:
                 if clip.stretched_audio_cache is not None and clip._stretch_cache_key == cache_key:
@@ -10571,12 +10705,27 @@ class WaveToyWindow(QMainWindow):
                 algorithm = "legacy_speed_resample"
         else:
             audio = _fit_audio_length(audio, target_len) if target_len > 0 else np.zeros((0, 2), dtype=np.float32)
+        if audio.size:
+            audio = np.asarray(audio, dtype=np.float32, copy=True)
+            duration = len(audio) / float(SAMPLE_RATE)
+            fade_in = min(duration, max(0.0, float(clip.fade_in_seconds or 0.0)))
+            fade_out = min(duration, max(0.0, float(clip.fade_out_seconds or 0.0)))
+            if fade_in > 0.0:
+                fade_len = min(len(audio), max(1, int(round(fade_in * SAMPLE_RATE))))
+                audio[:fade_len] *= np.linspace(0.0, 1.0, fade_len, dtype=np.float32)[:, None]
+            if fade_out > 0.0:
+                fade_len = min(len(audio), max(1, int(round(fade_out * SAMPLE_RATE))))
+                audio[-fade_len:] *= np.linspace(1.0, 0.0, fade_len, dtype=np.float32)[:, None]
+            gain = float(np.clip(float(clip.gain if clip.gain is not None else 1.0), 0.0, 4.0))
+            if abs(gain - 1.0) > 1e-6:
+                audio *= gain
         clip.rendered_duration_seconds = len(audio) / SAMPLE_RATE if audio.size else 0.0
         self._timeline_stretch_debug(
             f"clip_id={clip.clip_id} source_duration={clip.source_duration_seconds:.3f}s "
             f"trim_duration={trim_duration:.3f}s target_duration={target_duration:.3f}s "
             f"stretch_ratio={stretch_ratio:.3f} algorithm={algorithm} "
-            f"output_duration={clip.rendered_duration_seconds:.3f}s pitch_preserve_enabled={pitch_preserve}"
+            f"output_duration={clip.rendered_duration_seconds:.3f}s pitch_preserve_enabled={pitch_preserve} "
+            f"gain={clip.gain:.2f} fade_in={clip.fade_in_seconds:.3f}s fade_out={clip.fade_out_seconds:.3f}s"
         )
         return np.asarray(audio, dtype=np.float32)
 
@@ -10693,6 +10842,8 @@ class WaveToyWindow(QMainWindow):
             f"\nTrim start: {clip.trim_start_seconds:.3f}s"
             f"\nTrim end: {clip.trim_end_seconds:.3f}s"
             f"\nStretch ratio: {clip.stretch_ratio:.2f}x duration"
+            f"\nGain: {clip.gain:.2f}x"
+            f"\nFade in/out: {clip.fade_in_seconds:.3f}s / {clip.fade_out_seconds:.3f}s"
             f"\nTime-stretched: {'yes' if abs(clip.stretch_ratio - 1.0) > 0.005 else 'no'}"
             f"\nPitch preserved: {'yes' if clip.pitch_preserve_enabled else 'no'}"
             f"\nStretch algorithm: {clip.stretch_algorithm}"
@@ -10756,6 +10907,9 @@ class WaveToyWindow(QMainWindow):
             trim_start_seconds=source.trim_start_seconds,
             trim_end_seconds=source.trim_end_seconds,
             playback_rate=source.playback_rate,
+            gain=source.gain,
+            fade_in_seconds=source.fade_in_seconds,
+            fade_out_seconds=source.fade_out_seconds,
             rendered_duration_seconds=source.rendered_duration_seconds,
             stretch_mode=source.stretch_mode,
             stretch_algorithm=source.stretch_algorithm,
@@ -10790,6 +10944,8 @@ class WaveToyWindow(QMainWindow):
         source.trim_end_seconds = max(0.0, source.source_duration_seconds - source.trim_start_seconds - source_delta)
         source.stretched_audio_cache = None
         source._stretch_cache_key = None
+        source.preview_waveform_cache = []
+        source._preview_waveform_cache_key = None
         clip_id = self.timeline_next_clip_id
         self.timeline_next_clip_id += 1
         right = TimelineClip(
@@ -10809,6 +10965,9 @@ class WaveToyWindow(QMainWindow):
             trim_start_seconds=right_trim_start,
             trim_end_seconds=original_trim_end,
             playback_rate=source.playback_rate,
+            gain=source.gain,
+            fade_in_seconds=source.fade_in_seconds,
+            fade_out_seconds=source.fade_out_seconds,
             stretch_mode=source.stretch_mode,
             stretch_algorithm=source.stretch_algorithm,
             expression_metadata=dict(source.expression_metadata or {}),
@@ -11025,7 +11184,7 @@ class WaveToyWindow(QMainWindow):
                 "time_scale_model": "TimelineCanvas.seconds_per_pixel is the shared timeline scale; clip widths are visible_duration_seconds / seconds_per_pixel.",
                 "snap_enabled": self.timeline_snap_enabled,
                 "snap_seconds": self.timeline_snap_seconds,
-                "edit_model": "Non-destructive trim_start_seconds, trim_end_seconds, and playback_rate duration-scaling metadata are applied during mixdown/export; pitch-preserving time stretch is rendered after trim and source audio arrays/source paths remain unchanged.",
+                "edit_model": "Non-destructive trim_start_seconds, trim_end_seconds, playback_rate, gain, fade_in, and fade_out metadata are applied during mixdown/export; pitch-preserving time stretch is rendered after trim and source audio arrays/source paths remain unchanged.",
                 "palette_sources": [item.metadata() for item in self.timeline_audio_palette],
                 "speech_bin_sources": [item.metadata() for item in self.timeline_speech_bin],
                 "clip_source_types": [
