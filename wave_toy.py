@@ -931,6 +931,11 @@ class PhonemeCombinationPreset:
     transition_curve: str
     crossfade_ms: int
     recommended_render_mode: str
+    coarticulation_weight: float = 0.55
+    airflow_blend: float = 0.50
+    voicing_blend: float = 0.60
+    tongue_blend: float = 0.60
+    lip_blend: float = 0.55
     notes: str = ""
 
 @dataclass
@@ -956,17 +961,26 @@ class ArticulationChain:
 
 
 VOWEL_PRESETS: Dict[str, Dict[str, object]] = {
-    "EE": {"emoji": "😀", "ipa": "i", "tongue_height": 0.95, "tongue_frontness": 0.95, "mouth_open": 0.20, "lip_rounding": 0.05, "preview_color": "#b8f2e6"},
-    "EH": {"emoji": "🙂", "ipa": "e", "tongue_height": 0.70, "tongue_frontness": 0.85, "mouth_open": 0.40, "lip_rounding": 0.05, "preview_color": "#caffbf"},
-    "AH": {"emoji": "😮", "ipa": "a", "tongue_height": 0.20, "tongue_frontness": 0.40, "mouth_open": 0.95, "lip_rounding": 0.00, "preview_color": "#ffadad"},
-    "AA": {"emoji": "😲", "ipa": "ɑ", "tongue_height": 0.18, "tongue_frontness": 0.22, "mouth_open": 0.94, "lip_rounding": 0.08, "preview_color": "#ffb4a2"},
-    "OH": {"emoji": "😯", "ipa": "o", "tongue_height": 0.50, "tongue_frontness": 0.20, "mouth_open": 0.55, "lip_rounding": 0.60, "preview_color": "#ffd6a5"},
-    "OO": {"emoji": "😗", "ipa": "u", "tongue_height": 0.90, "tongue_frontness": 0.10, "mouth_open": 0.15, "lip_rounding": 1.00, "preview_color": "#a0c4ff"},
-    "UH": {"emoji": "😐", "ipa": "ʌ", "tongue_height": 0.38, "tongue_frontness": 0.42, "mouth_open": 0.55, "lip_rounding": 0.12, "preview_color": "#d7b9ff"},
-    "AE": {"emoji": "😺", "ipa": "æ", "tongue_height": 0.32, "tongue_frontness": 0.86, "mouth_open": 0.78, "lip_rounding": 0.02, "preview_color": "#ffb3c6"},
-    "IH": {"emoji": "🙂", "ipa": "ɪ", "tongue_height": 0.78, "tongue_frontness": 0.82, "mouth_open": 0.30, "lip_rounding": 0.04, "preview_color": "#b9fbc0"},
-    "IY": {"emoji": "😁", "ipa": "i", "tongue_height": 0.96, "tongue_frontness": 0.96, "mouth_open": 0.18, "lip_rounding": 0.03, "preview_color": "#98f5e1"},
-    "ER": {"emoji": "🌀", "ipa": "ɝ", "tongue_height": 0.56, "tongue_frontness": 0.36, "mouth_open": 0.42, "lip_rounding": 0.32, "voice_pitch": 210.0, "preview_color": "#cdb4db"},
+    # Legacy aliases remain for saved chains and validation prompts.
+    "EE": {"emoji": "😀", "ipa": "i", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.95, "tongue_frontness": 0.95, "mouth_open": 0.20, "lip_rounding": 0.05, "duration_ms": 500, "preview_color": "#b8f2e6"},
+    "OH": {"emoji": "😯", "ipa": "oʊ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.50, "tongue_frontness": 0.20, "mouth_open": 0.55, "lip_rounding": 0.60, "duration_ms": 520, "preview_color": "#ffd6a5"},
+    "OO": {"emoji": "😗", "ipa": "u", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.90, "tongue_frontness": 0.10, "mouth_open": 0.15, "lip_rounding": 1.00, "duration_ms": 520, "preview_color": "#a0c4ff"},
+    "IY": {"emoji": "😁", "ipa": "i", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.96, "tongue_frontness": 0.96, "mouth_open": 0.18, "lip_rounding": 0.03, "duration_ms": 500, "preview_color": "#98f5e1"},
+    "IH": {"emoji": "🙂", "ipa": "ɪ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.78, "tongue_frontness": 0.82, "mouth_open": 0.30, "lip_rounding": 0.04, "duration_ms": 480, "preview_color": "#b9fbc0"},
+    "EH": {"emoji": "🙂", "ipa": "ɛ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.62, "tongue_frontness": 0.84, "mouth_open": 0.46, "lip_rounding": 0.04, "duration_ms": 500, "preview_color": "#caffbf"},
+    "AE": {"emoji": "😺", "ipa": "æ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.32, "tongue_frontness": 0.86, "mouth_open": 0.78, "lip_rounding": 0.02, "duration_ms": 520, "preview_color": "#ffb3c6"},
+    "AA": {"emoji": "😲", "ipa": "ɑ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.18, "tongue_frontness": 0.22, "mouth_open": 0.94, "lip_rounding": 0.08, "duration_ms": 540, "preview_color": "#ffb4a2"},
+    "AH": {"emoji": "😮", "ipa": "ʌ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.38, "tongue_frontness": 0.42, "mouth_open": 0.70, "lip_rounding": 0.08, "duration_ms": 500, "preview_color": "#ffadad"},
+    "AO": {"emoji": "😯", "ipa": "ɔ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.34, "tongue_frontness": 0.18, "mouth_open": 0.76, "lip_rounding": 0.55, "duration_ms": 520, "preview_color": "#ffd6a5"},
+    "OW": {"emoji": "😯", "ipa": "oʊ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.56, "tongue_frontness": 0.18, "mouth_open": 0.46, "lip_rounding": 0.72, "duration_ms": 540, "preview_color": "#ffe5b4"},
+    "UH": {"emoji": "😐", "ipa": "ʊ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.68, "tongue_frontness": 0.24, "mouth_open": 0.34, "lip_rounding": 0.56, "duration_ms": 480, "preview_color": "#d7b9ff"},
+    "UW": {"emoji": "😗", "ipa": "u", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.92, "tongue_frontness": 0.10, "mouth_open": 0.14, "lip_rounding": 0.98, "duration_ms": 520, "preview_color": "#a0c4ff"},
+    "ER": {"emoji": "🌀", "ipa": "ɝ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.56, "tongue_frontness": 0.36, "mouth_open": 0.42, "lip_rounding": 0.32, "voice_pitch": 210.0, "duration_ms": 520, "preview_color": "#cdb4db"},
+    "AX": {"emoji": "😶", "ipa": "ə", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.50, "tongue_frontness": 0.50, "mouth_open": 0.44, "lip_rounding": 0.10, "voice_strength": 0.55, "duration_ms": 360, "preview_color": "#e9ecef"},
+    "AY": {"emoji": "😮", "ipa": "aɪ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.30, "tongue_frontness": 0.58, "mouth_open": 0.82, "lip_rounding": 0.03, "duration_ms": 560, "preview_color": "#ffccd5"},
+    "AW": {"emoji": "😮", "ipa": "aʊ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.30, "tongue_frontness": 0.34, "mouth_open": 0.84, "lip_rounding": 0.38, "duration_ms": 560, "preview_color": "#ffd6a5"},
+    "OY": {"emoji": "😯", "ipa": "ɔɪ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.42, "tongue_frontness": 0.32, "mouth_open": 0.64, "lip_rounding": 0.62, "duration_ms": 560, "preview_color": "#cdb4db"},
+    "EY": {"emoji": "🙂", "ipa": "eɪ", "phoneme_family": "vowel", "voiced": True, "tongue_height": 0.66, "tongue_frontness": 0.86, "mouth_open": 0.38, "lip_rounding": 0.04, "duration_ms": 540, "preview_color": "#b8f2e6"},
 }
 
 FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
@@ -1045,9 +1059,22 @@ VOICE_FONT_ANALYSIS_FEATURES = (
     "phoneme_duration_estimate",
     "coarticulation_transition_timing",
 )
-CV_VC_CONSONANTS = ("B", "CH", "D", "DH", "F", "G", "H", "JH", "K", "L", "M", "N", "NG", "P", "R", "S", "SH", "T", "TH", "V", "W", "Y", "Z", "ZH")
-CV_VC_VOWELS = ("AH", "AE", "EE", "EH", "IH", "IY", "OH", "OO", "UH", "ER")
+CV_VC_CONSONANTS = ("P", "B", "T", "D", "K", "G", "CH", "JH", "F", "V", "TH", "DH", "S", "Z", "SH", "ZH", "H", "M", "N", "NG", "L", "R", "W", "Y")
+CV_VC_VOWELS = ("IY", "IH", "EH", "AE", "AA", "AH", "AO", "OW", "UH", "UW", "ER", "AX", "AY", "AW", "OY", "EY")
 
+
+
+def _phoneme_from_preset_symbol(symbol: str, *, pitch: float = 220.0) -> ArticulationPhoneme:
+    """Build a fresh phoneme from the built-in inventory without touching UI state."""
+    for preset_map in (VOWEL_PRESETS, FRICATIVE_PRESETS, STOP_PRESETS, NASAL_PRESETS, GLIDE_PRESETS, LIQUID_PRESETS, AFFRICATE_PRESETS, EXTRA_FRICATIVE_PRESETS):
+        if symbol in preset_map:
+            data = {**preset_map[symbol], "name": symbol, "voice_pitch": pitch}
+            if preset_map is VOWEL_PRESETS:
+                data.setdefault("phoneme_family", "vowel")
+                data.setdefault("voiced", True)
+                data.setdefault("voice_strength", 0.65)
+            return ArticulationPhoneme.from_json_dict(data)
+    raise KeyError(f"Unknown built-in phoneme preset: {symbol}")
 
 def _phoneme_ipa(symbol: str) -> str:
     for preset_map in (VOWEL_PRESETS, FRICATIVE_PRESETS, STOP_PRESETS, NASAL_PRESETS, GLIDE_PRESETS, LIQUID_PRESETS, AFFRICATE_PRESETS, EXTRA_FRICATIVE_PRESETS):
@@ -1078,7 +1105,12 @@ def build_cv_vc_combination_library() -> List[PhonemeCombinationPreset]:
                         transition_ms=transition_ms,
                         transition_curve=ARTICULATION_DEFAULT_TRANSITION_CURVE,
                         crossfade_ms=ARTICULATION_DEFAULT_WORD_CROSSFADE_MS,
-                        recommended_render_mode=ARTICULATION_WORD_RENDER_CONTINUOUS,
+                        recommended_render_mode=ARTICULATION_WORD_RENDER_CLIP_CROSSFADE,
+                        coarticulation_weight=0.62 if pattern_type == "CV" else 0.54,
+                        airflow_blend=0.58 if first in FRICATIVE_PRESETS or second in FRICATIVE_PRESETS else 0.46,
+                        voicing_blend=0.66 if first in VOWEL_PRESETS or second in VOWEL_PRESETS else 0.52,
+                        tongue_blend=0.64,
+                        lip_blend=0.60 if first in {"W", "OW", "UW", "OO"} or second in {"W", "OW", "UW", "OO"} else 0.50,
                         notes="Foundation preset for future CV/VC library export and audition workflows.",
                     )
                 )
@@ -5732,7 +5764,7 @@ class GraphicalStereoFieldCanvas(QWidget):
         self.width_value = 0.45
         self.auto_depth = 0.0
         self._drag_target: str | None = None
-        self.setMinimumSize(QSize(420, 220))
+        self.setMinimumSize(QSize(320, 180))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.CrossCursor)
 
@@ -5823,7 +5855,7 @@ class GraphicalPitchCurveCanvas(QWidget):
         self.end_value = 69 * MIDI_SLIDER_SCALE
         self.vibrato_depth = 0.0
         self._drag_target: str | None = None
-        self.setMinimumSize(QSize(420, 220))
+        self.setMinimumSize(QSize(320, 180))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.CrossCursor)
 
@@ -6083,6 +6115,10 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_status_label: QLabel | None = None
         self.articulation_smooth_transitions_checkbox: QCheckBox | None = None
         self.articulation_word_render_mode_combo: QComboBox | None = None
+        self.continuous_diagnostics_latest: Dict[str, object] = {}
+        self.continuous_diagnostics_status_label: QLabel | None = None
+        self.continuous_diagnostics_metrics_label: QLabel | None = None
+        self.continuous_validation_results_label: QLabel | None = None
         self.articulation_motion_timer = QTimer(self)
         self.articulation_motion_timer.timeout.connect(self._articulation_motion_tick)
         self.articulation_motion_started_at: float | None = None
@@ -6222,7 +6258,7 @@ class WaveToyWindow(QMainWindow):
             button = QPushButton(f"{icon}  {label}")
             button.setObjectName("globalActionButton")
             button.setStyleSheet(f"QPushButton#globalActionButton {{ border-left: 4px solid {color}; }}")
-            button.setMinimumHeight(36)
+            button.setMinimumHeight(32)
             button.setCursor(Qt.PointingHandCursor)
             button.setToolTip(label)
             if key == "loop":
@@ -7340,17 +7376,17 @@ class WaveToyWindow(QMainWindow):
         phoneme_actions_hint.setObjectName("symbolHint")
         phoneme_actions_hint.setWordWrap(True)
         phoneme_actions_layout.addWidget(phoneme_actions_hint)
-        phoneme_actions_row = QHBoxLayout()
-        phoneme_actions_row.setSpacing(8)
+        phoneme_actions_column = QVBoxLayout()
+        phoneme_actions_column.setSpacing(6)
         for icon, label, color, callback, tooltip in (
-            ("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme, "Store the current vocal-tract design as a reusable phoneme."),
-            ("➕", "Add to Articulation Timeline", "#5cdb95", self._add_current_phoneme_to_chain, "Append the current phoneme to the shared chain in the Articulation Timeline tab."),
+            ("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme, "Save the current shaped phoneme as a reusable preset."),
+            ("➕", "Add to Articulation Timeline", "#5cdb95", self._add_current_phoneme_to_chain, "Append the current phoneme to the Articulation Timeline chain."),
         ):
             button = self._make_story_button(icon, label, color, callback)
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             button.setToolTip(tooltip)
-            phoneme_actions_row.addWidget(button)
-        phoneme_actions_layout.addLayout(phoneme_actions_row)
+            phoneme_actions_column.addWidget(button)
+        phoneme_actions_layout.addLayout(phoneme_actions_column)
         left.addWidget(phoneme_actions)
 
         drawer_shell = QWidget()
@@ -7515,9 +7551,34 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_mode_combo.setCurrentText(current_mode)
         self.articulation_word_render_mode_combo.setToolTip("Compare the Task 032 clip-overlap fallback with the prototype continuous articulator-envelope renderer.")
         self.articulation_word_render_mode_combo.currentTextChanged.connect(self._set_articulation_word_render_mode)
+        validate_button = QPushButton("Validate Continuous")
+        validate_button.setObjectName("phonemeCardPrimaryAction")
+        validate_button.setCursor(Qt.PointingHandCursor)
+        validate_button.setToolTip("Render known test chains with Continuous Mouth Motion and report whether audio, voicing, noise, and duration are present.")
+        validate_button.clicked.connect(self._validate_continuous_render_chains)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.articulation_word_render_mode_combo, 1)
+        mode_row.addWidget(validate_button)
         chain_layout.addLayout(mode_row)
+
+        diagnostics_card = self._toy_group("Continuous Mouth Motion Diagnostics")
+        diagnostics_layout = QVBoxLayout(diagnostics_card)
+        diagnostics_layout.setContentsMargins(10, 16, 10, 10)
+        diagnostics_layout.setSpacing(6)
+        self.continuous_diagnostics_status_label = QLabel("Status: not rendered")
+        self.continuous_diagnostics_status_label.setObjectName("symbolHint")
+        self.continuous_diagnostics_status_label.setWordWrap(True)
+        self.continuous_diagnostics_metrics_label = QLabel("Render with Continuous Mouth Motion to populate active mode, duration, peak, RMS buses, transitions, buffer length, and voiced count.")
+        self.continuous_diagnostics_metrics_label.setObjectName("symbolHint")
+        self.continuous_diagnostics_metrics_label.setWordWrap(True)
+        self.continuous_validation_results_label = QLabel("Validation results: not run")
+        self.continuous_validation_results_label.setObjectName("symbolHint")
+        self.continuous_validation_results_label.setWordWrap(True)
+        diagnostics_layout.addWidget(self.continuous_diagnostics_status_label)
+        diagnostics_layout.addWidget(self.continuous_diagnostics_metrics_label)
+        diagnostics_layout.addWidget(self.continuous_validation_results_label)
+        chain_layout.addWidget(diagnostics_card)
+
         continuous_tests = ", ".join(" ".join(chain) for chain in CONTINUOUS_RENDER_TEST_CHAINS)
         continuous_test_label = QLabel(f"Continuous validation chains: {continuous_tests}")
         continuous_test_label.setObjectName("symbolHint")
@@ -7558,13 +7619,13 @@ class WaveToyWindow(QMainWindow):
         cv_vc_layout.addLayout(picker_row)
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
-        for icon, label_text, color in (
-            ("▶", "Preview Combination", "#b8f2e6"),
-            ("➕", "Add to Chain", "#caffbf"),
-            ("➕", "Add to Speech Assets", "#ffc6ff"),
-            ("💾", "Export Library JSON", "#fdffb6"),
+        for icon, label_text, color, callback in (
+            ("▶", "Preview Combination", "#b8f2e6", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Preview Combination is planned as a future CV/VC-library workflow.")),
+            ("➕", "Add to Chain", "#caffbf", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Add to Chain is planned as a future CV/VC-library workflow.")),
+            ("➕", "Add to Speech Assets", "#ffc6ff", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Add to Speech Assets is planned as a future CV/VC-library workflow.")),
+            ("💾", "Export Library JSON", "#fdffb6", self._export_cv_vc_library_json),
         ):
-            button = self._make_story_button(icon, label_text, color, lambda checked=False, lt=label_text: self._show_future_workflow_notice("CV / VC Library", f"{lt} is planned as a future CV/VC-library workflow."))
+            button = self._make_story_button(icon, label_text, color, callback)
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             action_row.addWidget(button)
         cv_vc_layout.addLayout(action_row)
@@ -8371,6 +8432,30 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 
+
+    def _export_cv_vc_library_json(self, checked: bool = False) -> None:
+        del checked
+        filename, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export CV/VC Library JSON",
+            "cv_vc_combination_library.json",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        payload = {
+            "consonants": list(CV_VC_CONSONANTS),
+            "vowels": list(CV_VC_VOWELS),
+            "expected_count": len(CV_VC_CONSONANTS) * len(CV_VC_VOWELS) * 2,
+            "actual_count": len(CV_VC_COMBINATION_LIBRARY),
+            "recommended_render_mode": ARTICULATION_WORD_RENDER_CLIP_CROSSFADE,
+            "continuous_renderer_role": "primary development renderer under validation",
+            "combinations": [asdict(preset) for preset in CV_VC_COMBINATION_LIBRARY],
+        }
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        QMessageBox.information(self, "CV / VC Library", f"Exported {len(CV_VC_COMBINATION_LIBRARY)} JSON-only CV/VC entries to {path}.")
+
     def _set_articulation_word_render_mode(self, mode: str) -> None:
         if mode not in ARTICULATION_WORD_RENDER_MODES:
             mode = ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
@@ -9017,7 +9102,55 @@ class WaveToyWindow(QMainWindow):
             return float(np.clip(phoneme.voice_strength, 0.0, 1.0))
         return 0.0
 
+    def _continuous_status_for_metrics(self, metrics: Dict[str, object]) -> Tuple[str, str]:
+        if metrics.get("exception"):
+            return "EXCEPTION", "#b00020"
+        output_peak = float(metrics.get("output_peak", 0.0) or 0.0)
+        final_buffer_length = int(metrics.get("final_buffer_length", 0) or 0)
+        voiced_rms = float(metrics.get("voiced_rms", 0.0) or 0.0)
+        voiced_phoneme_count = int(metrics.get("voiced_phoneme_count", 0) or 0)
+        if final_buffer_length == 0:
+            return "EMPTY RENDER", "#b00020"
+        if final_buffer_length > 0 and output_peak <= 0.000001:
+            return "SILENT BUFFER", "#b00020"
+        if voiced_phoneme_count > 0 and voiced_rms <= 0.000001:
+            return "VOICED PATH MISSING", "#b00020"
+        if output_peak > 0.001 and final_buffer_length > 0:
+            return "PASS", "#0b7a2a"
+        return "LOW OUTPUT", "#b36b00"
+
+    def _update_continuous_diagnostics_panel(self) -> None:
+        metrics = dict(self.continuous_diagnostics_latest or {})
+        if not metrics:
+            return
+        status = str(metrics.get("status") or self._continuous_status_for_metrics(metrics)[0])
+        _status, color = self._continuous_status_for_metrics(metrics)
+        if self.continuous_diagnostics_status_label is not None:
+            self.continuous_diagnostics_status_label.setText(f"Status: {status}")
+            self.continuous_diagnostics_status_label.setStyleSheet(f"color: {color}; font-weight: 700;")
+        ordered_keys = (
+            "active_render_mode",
+            "output_duration",
+            "output_peak",
+            "voiced_rms",
+            "noise_rms",
+            "source_rms",
+            "transition_count",
+            "transition_duration_total",
+            "final_buffer_length",
+            "voiced_phoneme_count",
+        )
+        text = " • ".join(f"{key}: {metrics.get(key)}" for key in ordered_keys)
+        if metrics.get("exception"):
+            text += f" • exception: {metrics.get('exception')}"
+        if self.continuous_diagnostics_metrics_label is not None:
+            self.continuous_diagnostics_metrics_label.setText(text)
+
     def _report_continuous_render_debug(self, metrics: Dict[str, object]) -> None:
+        status, _color = self._continuous_status_for_metrics(metrics)
+        metrics = dict(metrics)
+        metrics["status"] = status
+        self.continuous_diagnostics_latest = metrics
         ordered_keys = (
             "active_render_mode",
             "chain_length",
@@ -9030,20 +9163,107 @@ class WaveToyWindow(QMainWindow):
             "transition_count",
             "transition_duration_total",
             "final_buffer_length",
+            "voiced_phoneme_count",
+            "status",
         )
         payload = " ".join(f"{key}={metrics.get(key)}" for key in ordered_keys)
         print(f"[WaveToy Continuous Debug] {payload}")
-        output_duration = float(metrics.get("output_duration", 0.0) or 0.0)
         output_peak = float(metrics.get("output_peak", 0.0) or 0.0)
         final_buffer_length = int(metrics.get("final_buffer_length", 0) or 0)
         voiced_rms = float(metrics.get("voiced_rms", 0.0) or 0.0)
         voiced_phoneme_count = int(metrics.get("voiced_phoneme_count", 0) or 0)
-        if final_buffer_length > 0 and output_peak == 0.0:
+        if final_buffer_length > 0 and output_peak <= 0.000001:
             print('[WaveToy Continuous Validation] silent buffer')
-        if output_duration > 0.0 and final_buffer_length == 0:
+        if final_buffer_length == 0:
             print('[WaveToy Continuous Validation] empty render')
-        if voiced_phoneme_count > 0 and voiced_rms == 0.0:
+        if voiced_phoneme_count > 0 and voiced_rms <= 0.000001:
             print('[WaveToy Continuous Validation] voiced path missing')
+        self._update_continuous_diagnostics_panel()
+
+    def _validate_continuous_render_chains(self, checked: bool = False) -> None:
+        del checked
+        saved_items = [ArticulationChainItem.from_json_dict(item.to_json_dict()) for item in self.articulation_chain_items]
+        saved_selected = self.articulation_selected_chain_index
+        saved_settings = dict(self.articulation_word_render_settings)
+        saved_mode = self._articulation_word_render_mode()
+        saved_audio = self.articulation_word_render_audio.copy()
+        saved_signature = self.articulation_word_render_signature
+        saved_path = self.articulation_last_word_render_path
+        saved_created = self.articulation_last_word_render_created_at
+        rows: List[Dict[str, object]] = []
+        print("[WaveToy Continuous Validation] starting built-in test chains")
+        try:
+            self.articulation_word_render_settings["word_render_mode"] = ARTICULATION_WORD_RENDER_CONTINUOUS
+            if self.articulation_word_render_mode_combo is not None:
+                self.articulation_word_render_mode_combo.blockSignals(True)
+                self.articulation_word_render_mode_combo.setCurrentText(ARTICULATION_WORD_RENDER_CONTINUOUS)
+                self.articulation_word_render_mode_combo.blockSignals(False)
+            for chain in CONTINUOUS_RENDER_TEST_CHAINS:
+                label = " ".join(chain)
+                self.articulation_chain_items = [
+                    ArticulationChainItem(phoneme=_phoneme_from_preset_symbol(symbol), duration_ms=_phoneme_from_preset_symbol(symbol).duration_ms)
+                    for symbol in chain
+                ]
+                print(f"[WaveToy Continuous Validation] render chain={label}")
+                audio = self._render_articulation_word_continuous()
+                metrics = dict(self.continuous_diagnostics_latest or {})
+                status = str(metrics.get("status") or self._continuous_status_for_metrics(metrics)[0])
+                notes = []
+                if float(metrics.get("voiced_rms", 0.0) or 0.0) <= 0.000001 and int(metrics.get("voiced_phoneme_count", 0) or 0) > 0:
+                    notes.append("voicing absent")
+                if float(metrics.get("noise_rms", 0.0) or 0.0) <= 0.000001:
+                    notes.append("noise low")
+                if float(metrics.get("output_duration", 0.0) or 0.0) <= 0.0:
+                    notes.append("duration absent")
+                row = {
+                    "chain_label": label,
+                    "rendered_duration": round(len(audio) / SAMPLE_RATE, 4) if audio.size else 0.0,
+                    "output_peak": metrics.get("output_peak", 0.0),
+                    "voiced_rms": metrics.get("voiced_rms", 0.0),
+                    "noise_rms": metrics.get("noise_rms", 0.0),
+                    "result": status,
+                    "notes": ", ".join(notes) if notes else "ok",
+                }
+                rows.append(row)
+                print(f"[WaveToy Continuous Validation] result {row}")
+        except Exception as exc:
+            rows.append({"chain_label": "validation", "rendered_duration": 0.0, "output_peak": 0.0, "voiced_rms": 0.0, "noise_rms": 0.0, "result": "EXCEPTION", "notes": str(exc)})
+            self._report_continuous_render_debug({
+                "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
+                "chain_length": len(self.articulation_chain_items),
+                "phoneme_count": len(self.articulation_chain_items),
+                "output_duration": 0.0,
+                "output_peak": 0.0,
+                "voiced_rms": 0.0,
+                "noise_rms": 0.0,
+                "source_rms": 0.0,
+                "transition_count": 0,
+                "transition_duration_total": 0,
+                "final_buffer_length": 0,
+                "voiced_phoneme_count": 0,
+                "exception": str(exc),
+            })
+            print(f"[WaveToy Continuous Validation] exception {exc}")
+        finally:
+            self.articulation_chain_items = saved_items
+            self.articulation_selected_chain_index = saved_selected
+            self.articulation_word_render_settings = saved_settings
+            if self.articulation_word_render_mode_combo is not None:
+                self.articulation_word_render_mode_combo.blockSignals(True)
+                self.articulation_word_render_mode_combo.setCurrentText(saved_mode)
+                self.articulation_word_render_mode_combo.blockSignals(False)
+            self.articulation_word_render_audio = saved_audio
+            self.articulation_word_render_signature = saved_signature
+            self.articulation_last_word_render_path = saved_path
+            self.articulation_last_word_render_created_at = saved_created
+            self._refresh_articulation_chain_cards()
+            self._refresh_articulation_motion_timeline()
+            self._update_articulation_word_status()
+        lines = ["chain | duration | peak | voiced | noise | result | notes"]
+        for row in rows:
+            lines.append(f"{row['chain_label']} | {row['rendered_duration']}s | {row['output_peak']} | {row['voiced_rms']} | {row['noise_rms']} | {row['result']} | {row['notes']}")
+        if self.continuous_validation_results_label is not None:
+            self.continuous_validation_results_label.setText("Validation results:\n" + "\n".join(lines))
 
     def _render_articulation_word_continuous(self) -> np.ndarray:
         segments, total_ms, stop_events, burst_events = self._build_articulation_envelope_timeline()
@@ -9085,7 +9305,7 @@ class WaveToyWindow(QMainWindow):
             if source_audio is None:
                 source_cache[index] = None
                 continue
-            source_cache[index] = prepare_articulation_source_audio(source_audio, phoneme, total_ms / 1000.0)
+            source_cache[index] = prepare_articulation_source_audio(source_audio, phoneme, max(0.08, item.duration_ms / 1000.0))
         phase = 0.0
         previous_tail = 0.0
         for frame_index in range(frame_count):
@@ -9100,7 +9320,9 @@ class WaveToyWindow(QMainWindow):
             source_excitation = np.zeros(count, dtype=np.float64)
             source_audio = source_cache.get(int(active.get("index", 0)))
             if source_audio is not None and source_audio.size:
-                source_slice = source_audio[start_sample:end_sample]
+                local_start_sample = max(0, int(round((center_ms - float(active.get("start", 0.0))) * SAMPLE_RATE / 1000.0)) - count // 2)
+                local_end_sample = local_start_sample + count
+                source_slice = source_audio[local_start_sample:local_end_sample]
                 if len(source_slice) < count:
                     source_slice = np.vstack([source_slice, np.zeros((count - len(source_slice), 2), dtype=np.float32)])
                 source_excitation = source_slice[:count].mean(axis=1).astype(np.float64)
@@ -9160,13 +9382,14 @@ class WaveToyWindow(QMainWindow):
             noise_bus[start_sample:end_sample] += burst_component
             mono[start_sample:end_sample] += burst_component
 
-        smooth_samples = max(3, int(0.004 * SAMPLE_RATE))
+        smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
         if smooth_samples % 2 == 0:
             smooth_samples += 1
-        if len(mono) > smooth_samples:
+        if len(mono) > smooth_samples and not burst_events:
             kernel = np.hanning(smooth_samples)
             kernel = kernel / max(1.0e-9, float(np.sum(kernel)))
-            mono = np.convolve(mono, kernel, mode="same")
+            smoothed_mono = np.convolve(mono, kernel, mode="same")
+            mono = mono * 0.82 + smoothed_mono * 0.18
         peak = float(np.max(np.abs(mono))) if mono.size else 0.0
         if peak > 1.0e-8:
             mono = mono / peak * 0.82
@@ -9270,7 +9493,21 @@ class WaveToyWindow(QMainWindow):
                 return self._render_articulation_word_continuous()
             except Exception as exc:
                 print(f"[WaveToy Envelope] error continuous renderer failed without Clip Crossfade fallback: {exc}")
-                QMessageBox.warning(self, "Create Word", "Continuous Mouth Motion failed to render. Clip Crossfade was not used automatically; inspect the Continuous debug log.")
+                self._report_continuous_render_debug({
+                    "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
+                    "chain_length": len(self.articulation_chain_items),
+                    "phoneme_count": len(self.articulation_chain_items),
+                    "output_duration": 0.0,
+                    "output_peak": 0.0,
+                    "voiced_rms": 0.0,
+                    "noise_rms": 0.0,
+                    "source_rms": 0.0,
+                    "transition_count": 0,
+                    "transition_duration_total": 0,
+                    "final_buffer_length": 0,
+                    "voiced_phoneme_count": 0,
+                    "exception": str(exc),
+                })
                 return np.zeros((0, 2), dtype=np.float32)
         return self._render_articulation_word_clip_crossfade()
 
@@ -9793,8 +10030,8 @@ class WaveToyWindow(QMainWindow):
         wrapper = QWidget()
         wrapper.setObjectName("graphicalWorkflowCard")
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(12, 10, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(6)
         header = QLabel(title)
         header.setObjectName("dashboardExplorerTitle")
         header.setWordWrap(True)
@@ -9831,8 +10068,8 @@ class WaveToyWindow(QMainWindow):
         all_button = QPushButton("Clear Solo")
         for button in (add_button, duplicate_button, all_button):
             button.setObjectName("workspaceToolbarButton")
-            button.setMinimumHeight(WaveToySizing.LARGE_BUTTON_HEIGHT)
-            button.setMinimumWidth(156)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            button.setMinimumWidth(104)
             button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             toolbar_layout.addWidget(button)
         add_button.clicked.connect(self._graphical_add_wave_layer)
@@ -9890,7 +10127,7 @@ class WaveToyWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         self.graphical_vocal_canvas = VocalTractCanvas()
-        self.graphical_vocal_canvas.setMinimumHeight(430)
+        self.graphical_vocal_canvas.setMinimumHeight(340)
         self.graphical_vocal_canvas.set_editable(True)
         self.graphical_vocal_canvas.articulationEdited.connect(self._graphical_set_articulation_value)
         layout.addWidget(self.graphical_vocal_canvas)
@@ -9910,12 +10147,12 @@ class WaveToyWindow(QMainWindow):
         curve_row.addWidget(QLabel("Transition curve:"))
         for curve in ARTICULATION_TRANSITION_CURVES:
             button = QPushButton(curve)
-            button.setMinimumHeight(36)
+            button.setMinimumHeight(32)
             button.clicked.connect(lambda checked=False, curve_name=curve: self._graphical_set_selected_chain_curve(curve_name))
             curve_row.addWidget(button)
         layout.addLayout(curve_row)
         self.graphical_chain_mouth_canvas = VocalTractCanvas()
-        self.graphical_chain_mouth_canvas.setMinimumHeight(310)
+        self.graphical_chain_mouth_canvas.setMinimumHeight(240)
         layout.addWidget(self.graphical_chain_mouth_canvas)
         return panel
 
@@ -9993,7 +10230,7 @@ class WaveToyWindow(QMainWindow):
             remove = QPushButton("Remove")
             for button in (mute, solo, duplicate, remove):
                 button.setObjectName("workspaceToolbarButton")
-                button.setMinimumSize(QSize(96, 48))
+                button.setMinimumSize(QSize(72, 36))
                 button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
                 actions_layout.addWidget(button)
             mute.setCheckable(True)
@@ -10010,7 +10247,7 @@ class WaveToyWindow(QMainWindow):
             body.setObjectName("graphicalWaveCardBody")
             body.waveSelected.connect(self._graphical_select_wave)
             body_layout = QVBoxLayout(body)
-            body_layout.setContentsMargins(10, 10, 10, 10)
+            body_layout.setContentsMargins(6, 6, 6, 6)
             body_layout.setSpacing(0)
             canvas = GraphicalWaveLayerCanvas(wave_id)
             canvas.levelEdited.connect(self._graphical_set_wave_levels)
