@@ -745,8 +745,8 @@ FRICATIVE_PRESETS: Dict[str, Dict[str, object]] = {
 STOP_PRESETS: Dict[str, Dict[str, object]] = {
     "P": {"emoji": "💥", "ipa": "p", "phoneme_family": "stop", "voiced": False, "closure": 1.0, "burst_strength": 0.75, "mouth_open": 0.12, "tongue_height": 0.35, "tongue_frontness": 0.50, "lip_rounding": 0.20, "duration_ms": 180, "noise_color": 0.50, "preview_color": "#ffd6a5"},
     "B": {"emoji": "💥", "ipa": "b", "phoneme_family": "stop", "voiced": True, "closure": 1.0, "burst_strength": 0.55, "mouth_open": 0.12, "tongue_height": 0.35, "tongue_frontness": 0.50, "duration_ms": 200, "noise_color": 0.45, "preview_color": "#fdffb6"},
-    "T": {"emoji": "⚡", "ipa": "t", "phoneme_family": "stop", "voiced": False, "closure": 1.0, "burst_strength": 0.70, "tongue_frontness": 0.90, "mouth_open": 0.18, "tongue_height": 0.72, "duration_ms": 170, "noise_color": 0.85, "preview_color": "#ffadad"},
-    "D": {"emoji": "⚡", "ipa": "d", "phoneme_family": "stop", "voiced": True, "closure": 1.0, "burst_strength": 0.50, "tongue_frontness": 0.90, "mouth_open": 0.18, "tongue_height": 0.70, "duration_ms": 200, "noise_color": 0.78, "preview_color": "#ffc6ff"},
+    "T": {"emoji": "⚡", "ipa": "t", "phoneme_family": "stop", "voiced": False, "air_pressure": 0.70, "teeth_gap": 0.18, "closure": 1.0, "burst_strength": 0.68, "tongue_frontness": 0.90, "mouth_open": 0.18, "tongue_height": 0.72, "duration_ms": 170, "noise_color": 0.75, "preview_color": "#ffadad"},
+    "D": {"emoji": "⚡", "ipa": "d", "phoneme_family": "stop", "voiced": True, "air_pressure": 0.42, "teeth_gap": 0.38, "closure": 0.90, "burst_strength": 0.35, "voice_strength": 0.70, "tongue_frontness": 0.90, "mouth_open": 0.18, "tongue_height": 0.70, "duration_ms": 200, "noise_color": 0.40, "preview_color": "#ffc6ff"},
     "K": {"emoji": "🪨", "ipa": "k", "phoneme_family": "stop", "voiced": False, "closure": 1.0, "burst_strength": 0.80, "tongue_frontness": 0.20, "mouth_open": 0.20, "tongue_height": 0.65, "duration_ms": 190, "noise_color": 0.38, "preview_color": "#a0c4ff"},
     "G": {"emoji": "🪨", "ipa": "g", "phoneme_family": "stop", "voiced": True, "closure": 1.0, "burst_strength": 0.55, "tongue_frontness": 0.20, "mouth_open": 0.20, "tongue_height": 0.65, "duration_ms": 220, "noise_color": 0.34, "preview_color": "#bdb2ff"},
 }
@@ -800,7 +800,8 @@ def articulation_summary(phoneme: ArticulationPhoneme) -> str:
     if phoneme.phoneme_family == "fricative":
         return f"{family_word} | {voice_word} | Air {phoneme.air_pressure:.2f} | Teeth Gap {phoneme.teeth_gap:.2f}"
     if phoneme.phoneme_family == "stop":
-        return f"{family_word} | {voice_word} | Closure {phoneme.closure:.2f} | Burst {phoneme.burst_strength:.2f}"
+        sharpness = 1.0 - float(np.clip(phoneme.teeth_gap, 0.0, 1.0))
+        return f"{family_word} | {voice_word} | Closure {phoneme.closure:.2f} | Burst {phoneme.burst_strength:.2f} | Air {phoneme.air_pressure:.2f} | Release sharpness {sharpness:.2f}"
     if phoneme.phoneme_family == "nasal":
         return f"{family_word} | {voice_word} | Nose Open {phoneme.nasal_open:.2f} | {front_word}"
     return f"{family_word} | {open_word} | {height_word} | {front_word} | {round_word}"
@@ -868,6 +869,87 @@ def _colored_noise(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarra
     return np.fft.irfft(spectrum * envelope, n=sample_count)
 
 
+def _stop_burst_parameters(phoneme: ArticulationPhoneme) -> Dict[str, float]:
+    """Map stop articulation controls to a short release burst."""
+    phoneme = phoneme.clamped()
+    name = phoneme.name.upper()
+    air = float(np.clip(phoneme.air_pressure, 0.0, 1.0))
+    teeth = float(np.clip(phoneme.teeth_gap, 0.0, 1.0))
+    closure = float(np.clip(phoneme.closure, 0.0, 1.0))
+    burst = float(np.clip(phoneme.burst_strength, 0.0, 1.0))
+    voiced_gain = _articulation_voiced_gain(phoneme)
+    voiced_stop = bool(phoneme.voiced and voiced_gain > 0.0)
+
+    place_brightness = {"P": 0.38, "B": 0.30, "T": 0.88, "D": 0.48, "K": 0.58, "G": 0.34}.get(
+        name,
+        0.36 + phoneme.tongue_frontness * 0.42 + phoneme.tongue_height * 0.14,
+    )
+    voice_darkening = 0.26 if voiced_stop else 0.0
+    burst_brightness = float(np.clip(place_brightness + (1.0 - teeth) * 0.32 + phoneme.noise_color * 0.16 + air * 0.08 - voice_darkening, 0.08, 1.0))
+    if voiced_stop:
+        noise_multiplier = {"B": 0.48, "D": 0.42, "G": 0.45}.get(name, 0.50)
+        duration_min, duration_max = {"D": (12.0, 28.0), "B": (12.0, 24.0), "G": (14.0, 30.0)}.get(name, (12.0, 30.0))
+    else:
+        noise_multiplier = {"T": 1.0, "P": 0.82, "K": 0.90}.get(name, 0.88)
+        duration_min, duration_max = {"T": (35.0, 55.0), "P": (24.0, 42.0), "K": (30.0, 50.0)}.get(name, (24.0, 48.0))
+    burst_ms = float(duration_min + (duration_max - duration_min) * burst)
+    closure_samples = int(max(1, round((0.10 + closure * 0.42) * max(1, phoneme.duration_ms) * SAMPLE_RATE / 1000.0)))
+    burst_samples = int(max(1, round(burst_ms * SAMPLE_RATE / 1000.0)))
+    burst_gain = float(np.clip((air ** 1.35) * (burst ** 1.15) * (0.35 + closure * 0.65) * noise_multiplier, 0.0, 1.25))
+    voiced_onset_gain = float(np.clip(voiced_gain * (0.28 + closure * 0.32 + (1.0 - burst) * 0.14), 0.0, 1.0)) if voiced_stop else 0.0
+    return {
+        "air_pressure": air,
+        "teeth_gap": teeth,
+        "closure": closure,
+        "burst_strength": burst,
+        "closure_samples": float(closure_samples),
+        "burst_samples": float(burst_samples),
+        "burst_ms": burst_ms,
+        "burst_gain": burst_gain,
+        "burst_brightness": burst_brightness,
+        "voiced_onset_gain": voiced_onset_gain,
+        "noise_multiplier": noise_multiplier,
+    }
+
+
+def _stop_burst_noise(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarray:
+    """Generate stop-only transient noise instead of sustained fricative hiss."""
+    if sample_count <= 0:
+        return np.zeros(0, dtype=np.float64)
+    params = _stop_burst_parameters(phoneme)
+    rng_seed = abs(hash(("stop_burst", phoneme.name, phoneme.ipa, round(params["burst_brightness"], 2)))) % (2 ** 32)
+    rng = np.random.default_rng(rng_seed)
+    noise = rng.normal(0.0, 1.0, sample_count)
+    spectrum = np.fft.rfft(noise)
+    freqs = np.fft.rfftfreq(sample_count, 1.0 / SAMPLE_RATE)
+    brightness = float(params["burst_brightness"])
+    center = 700.0 + brightness * 6200.0
+    width = 360.0 + (1.0 - float(params["teeth_gap"])) * 1200.0 + brightness * 1800.0
+    envelope = 0.015 + np.exp(-0.5 * ((freqs - center) / max(160.0, width)) ** 2)
+    high_shelf = np.clip((freqs - 2400.0) / 5200.0, 0.0, 1.0)
+    envelope += high_shelf * brightness * (0.18 + (1.0 - float(params["teeth_gap"])) * 0.46)
+    if phoneme.voiced:
+        lowpass = 1.0 / (1.0 + (freqs / (1800.0 + brightness * 2600.0)) ** 2)
+        envelope *= 0.34 + lowpass * 0.92
+    shaped = np.fft.irfft(spectrum * envelope, n=sample_count)
+    peak = float(np.max(np.abs(shaped))) if shaped.size else 0.0
+    if peak > 1.0e-9:
+        shaped = shaped / peak
+    return shaped
+
+
+def _log_stop_render(phoneme: ArticulationPhoneme, params: Dict[str, float], sample_count: int) -> None:
+    print(
+        "[WaveToy Stop] "
+        f"phoneme={phoneme.name} voiced={bool(phoneme.voiced)} "
+        f"air_pressure={params['air_pressure']:.2f} teeth_gap={params['teeth_gap']:.2f} "
+        f"closure={params['closure']:.2f} burst_strength={params['burst_strength']:.2f} "
+        f"closure_samples={int(params['closure_samples'])} burst_samples={int(params['burst_samples'])} "
+        f"burst_gain={params['burst_gain']:.3f} burst_brightness={params['burst_brightness']:.3f} "
+        f"voiced_onset_gain={params['voiced_onset_gain']:.3f} total_samples={int(sample_count)}"
+    )
+
+
 def _voiced_tone(sample_count: int, phoneme: ArticulationPhoneme) -> np.ndarray:
     t = np.arange(sample_count, dtype=np.float64) / SAMPLE_RATE
     pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
@@ -905,6 +987,22 @@ def articulation_synthesis_debug(phoneme: ArticulationPhoneme) -> Dict[str, obje
     phoneme = phoneme.clamped()
     if phoneme.phoneme_family in {"fricative", "affricate"}:
         mix = _fricative_family_mix(phoneme)
+    elif phoneme.phoneme_family == "stop":
+        voiced_gain = _articulation_voiced_gain(phoneme)
+        stop_params = _stop_burst_parameters(phoneme)
+        residual_noise = float(stop_params["burst_gain"] * (0.10 if phoneme.voiced else 0.18))
+        mix = {
+            "voiced_gain": voiced_gain,
+            "noise_gain": residual_noise,
+            "tonal_gain": float(voiced_gain * (0.58 if phoneme.voiced else 0.0)),
+            "air_pressure": float(stop_params["air_pressure"]),
+            "voice_strength": float(np.clip(phoneme.voice_strength, 0.0, 1.0)),
+            "burst_gain": float(stop_params["burst_gain"]),
+            "burst_brightness": float(stop_params["burst_brightness"]),
+            "closure_samples": int(stop_params["closure_samples"]),
+            "burst_samples": int(stop_params["burst_samples"]),
+            "voiced_onset_gain": float(stop_params["voiced_onset_gain"]),
+        }
     else:
         voiced_gain = _articulation_voiced_gain(phoneme)
         air = float(np.clip(phoneme.air_pressure, 0.0, 1.0))
@@ -1028,19 +1126,35 @@ def _render_fricative_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
 
 
 def _render_stop_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
+    phoneme = phoneme.clamped()
     duration = float(np.clip(phoneme.duration_ms / 1000.0, 0.12, 0.25))
     sample_count = max(1, int(duration * SAMPLE_RATE))
     mono = np.zeros(sample_count, dtype=np.float64)
-    closure_samples = min(sample_count - 1, int(sample_count * (0.25 + phoneme.closure * 0.30)))
-    burst_samples = min(sample_count - closure_samples, max(1, int(SAMPLE_RATE * 0.045)))
-    burst = _colored_noise(burst_samples, phoneme) * (0.25 + phoneme.burst_strength)
-    mono[closure_samples:closure_samples + burst_samples] += burst
+    params = _stop_burst_parameters(phoneme)
+    closure_samples = min(sample_count - 1, int(params["closure_samples"]))
+    burst_samples = min(sample_count - closure_samples, max(1, int(params["burst_samples"])))
+    _log_stop_render(phoneme, {**params, "closure_samples": float(closure_samples), "burst_samples": float(burst_samples)}, sample_count)
+
+    if burst_samples > 0 and params["burst_gain"] > 0.0:
+        burst = _stop_burst_noise(burst_samples, phoneme)
+        burst_env = np.exp(-np.linspace(0.0, 5.0, burst_samples, dtype=np.float64))
+        burst_env *= np.linspace(1.0, 0.25, burst_samples, dtype=np.float64)
+        mono[closure_samples:closure_samples + burst_samples] += burst * burst_env * params["burst_gain"]
+
     voiced_gain = _articulation_voiced_gain(phoneme)
-    if voiced_gain > 0.0 and closure_samples < sample_count:
-        onset = _voiced_tone(sample_count - closure_samples, phoneme)
-        onset *= np.linspace(0.15, 1.0, onset.size)
-        mono[closure_samples:] += onset * 0.38
-    return _fade_and_normalize_mono(mono, 2, max(phoneme.release_ms, 35), peak=0.82)
+    if voiced_gain > 0.0:
+        tone = _voiced_tone(sample_count, phoneme)
+        if closure_samples > 0:
+            leak_gain = voiced_gain * (1.0 - params["closure"]) * 0.12
+            mono[:closure_samples] += tone[:closure_samples] * leak_gain
+        if closure_samples < sample_count:
+            onset = tone[closure_samples:]
+            onset_env = np.linspace(0.35, 1.0, onset.size, dtype=np.float64)
+            mono[closure_samples:] += onset * onset_env * params["voiced_onset_gain"]
+
+    peak = float(np.clip(0.10 + params["burst_gain"] * 0.62 + params["voiced_onset_gain"] * 0.36, 0.08, 0.82))
+    release_ms = int(np.clip(params["burst_ms"] + 10.0, 18.0, 65.0))
+    return _fade_and_normalize_mono(mono, 2, max(phoneme.release_ms, release_ms), peak=peak)
 
 
 def _render_nasal_phoneme(phoneme: ArticulationPhoneme) -> np.ndarray:
@@ -6284,13 +6398,20 @@ class WaveToyWindow(QMainWindow):
             self.articulation_summary_label.setText(f"{p.name} /{p.ipa}/  |  {summary}")
         if self.articulation_mix_debug_label is not None:
             mix = articulation_synthesis_debug(p)
+            stop_debug = ""
+            if p.phoneme_family == "stop":
+                stop_debug = (
+                    f" • burst_gain {float(mix.get('burst_gain', 0.0)):.2f}"
+                    f" • burst_brightness {float(mix.get('burst_brightness', 0.0)):.2f}"
+                )
             self.articulation_mix_debug_label.setText(
                 "Mix: "
                 f"voiced_gain {float(mix['voiced_gain']):.2f} • "
                 f"noise_gain {float(mix['noise_gain']):.2f} • "
                 f"tonal_gain {float(mix['tonal_gain']):.2f} • "
                 f"air_pressure {float(mix['air_pressure']):.2f} • "
-                f"voice_strength {float(mix['voice_strength']):.2f} • "
+                f"voice_strength {float(mix['voice_strength']):.2f}"
+                f"{stop_debug} • "
                 f"source_mode {mix['source_mode']}"
             )
         source_badge = articulation_source_badge(p.source_mode, p.source_wave_id, p.source_audio_path)
@@ -7214,12 +7335,24 @@ class WaveToyWindow(QMainWindow):
             hold_end = cursor + hold_ms
             segments.append({"kind": "hold", "index": index, "start": hold_start, "end": hold_end, "from": phoneme, "to": phoneme})
             if phoneme.phoneme_family == "stop" or phoneme.closure > 0.75:
-                closure_end = max(hold_start + 1, hold_end - min(45, max(12, hold_ms // 3)))
+                stop_params = _stop_burst_parameters(phoneme)
+                closure_ms = int(np.clip(hold_ms * (0.18 + phoneme.closure * 0.54), 8, max(9, hold_ms - 1)))
+                closure_end = max(hold_start + 1, min(hold_end - 1, hold_start + closure_ms))
                 stop_events.append({"index": index, "phoneme": phoneme.name, "start": hold_start, "end": closure_end, "closure": phoneme.closure})
-                if phoneme.burst_strength > 0.0:
-                    burst_ms = int(np.clip(14 + phoneme.burst_strength * 22, 8, 42))
-                    burst_start = max(hold_start, hold_end - burst_ms)
-                    burst_events.append({"index": index, "phoneme": phoneme.name, "start": burst_start, "end": hold_end, "strength": phoneme.burst_strength})
+                if stop_params["burst_gain"] > 0.0:
+                    burst_ms = int(np.clip(stop_params["burst_ms"], 8, 60))
+                    burst_start = max(closure_end, min(hold_end - 1, closure_end))
+                    burst_end = min(hold_end, burst_start + burst_ms)
+                    burst_events.append({
+                        "index": index,
+                        "phoneme": phoneme.name,
+                        "start": burst_start,
+                        "end": burst_end,
+                        "strength": phoneme.burst_strength,
+                        "gain": stop_params["burst_gain"],
+                        "brightness": stop_params["burst_brightness"],
+                        "voiced_onset_gain": stop_params["voiced_onset_gain"],
+                    })
             cursor = hold_end
             if index < len(self.articulation_chain_items) - 1:
                 transition_ms = max(0, int(self._chain_transition_duration_ms(item, self.articulation_chain_items[index + 1])))
@@ -7287,7 +7420,11 @@ class WaveToyWindow(QMainWindow):
         for event in stop_events:
             print(f"[WaveToy Envelope] stop event phoneme={event['phoneme']} start_ms={event['start']} end_ms={event['end']} closure={event['closure']:.2f}")
         for event in burst_events:
-            print(f"[WaveToy Envelope] burst event phoneme={event['phoneme']} start_ms={event['start']} end_ms={event['end']} strength={event['strength']:.2f}")
+            print(
+                f"[WaveToy Envelope] burst event phoneme={event['phoneme']} start_ms={event['start']} "
+                f"end_ms={event['end']} strength={event['strength']:.2f} "
+                f"gain={float(event.get('gain', 0.0)):.3f} brightness={float(event.get('brightness', 0.0)):.3f}"
+            )
 
         rng = np.random.default_rng(33033)
         mono = np.zeros(total_samples, dtype=np.float64)
@@ -7315,9 +7452,16 @@ class WaveToyWindow(QMainWindow):
             diff_noise = np.concatenate([[previous_tail], raw_noise[:-1]])
             previous_tail = float(raw_noise[-1])
             noise = raw_noise * (0.55 - 0.35 * brightness) + (raw_noise - diff_noise) * (0.25 + 0.45 * brightness)
-            noise *= noise_gain * (0.18 + 0.82 * phoneme.air_pressure) * (0.35 + 0.65 * phoneme.teeth_gap)
-            closure_gate = float(np.clip(1.0 - closure * 0.94, 0.04, 1.0))
-            frame = self._shape_continuous_frame((tone * 0.62 + noise * 0.28) * closure_gate, phoneme)
+            if phoneme.phoneme_family == "stop":
+                stop_params = _stop_burst_parameters(phoneme)
+                noise *= noise_gain * (0.04 + 0.18 * stop_params["air_pressure"]) * (0.25 + 0.75 * (1.0 - stop_params["teeth_gap"]))
+                closure_gate = float(np.clip(1.0 - closure * 0.97, 0.02, 1.0))
+                voice_gate = float(np.clip(1.0 - closure * 0.70, 0.10, 1.0)) if phoneme.voiced else closure_gate
+                frame = self._shape_continuous_frame(tone * 0.62 * voice_gate + noise * 0.16 * closure_gate, phoneme)
+            else:
+                noise *= noise_gain * (0.18 + 0.82 * phoneme.air_pressure) * (0.35 + 0.65 * phoneme.teeth_gap)
+                closure_gate = float(np.clip(1.0 - closure * 0.94, 0.04, 1.0))
+                frame = self._shape_continuous_frame((tone * 0.62 + noise * 0.28) * closure_gate, phoneme)
             mono[start_sample:end_sample] += frame
             voiced_trace[start_sample:end_sample] = voiced_gain
             noise_trace[start_sample:end_sample] = noise_gain
@@ -7330,12 +7474,13 @@ class WaveToyWindow(QMainWindow):
                 continue
             phoneme = self.articulation_chain_items[int(event["index"])].phoneme_for_render().clamped()
             count = end_sample - start_sample
-            burst = _colored_noise(count, phoneme)
-            peak = float(np.max(np.abs(burst))) if burst.size else 0.0
-            if peak > 0.0:
-                burst = burst / peak
-            env = np.sin(np.linspace(0.0, math.pi, count, dtype=np.float64))
-            mono[start_sample:end_sample] += burst * env * (0.16 + float(event["strength"]) * 0.48)
+            params = _stop_burst_parameters(phoneme)
+            burst = _stop_burst_noise(count, phoneme)
+            env = np.exp(-np.linspace(0.0, 5.5, count, dtype=np.float64))
+            env *= np.linspace(1.0, 0.18, count, dtype=np.float64)
+            gain = float(event.get("gain", params["burst_gain"]))
+            _log_stop_render(phoneme, {**params, "burst_samples": float(count), "burst_gain": gain}, count)
+            mono[start_sample:end_sample] += burst * env * gain * 0.82
 
         smooth_samples = max(3, int(0.004 * SAMPLE_RATE))
         if smooth_samples % 2 == 0:
