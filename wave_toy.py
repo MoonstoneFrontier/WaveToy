@@ -29,6 +29,7 @@ Optional for MP3/OGG/FLAC export:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -39,6 +40,7 @@ import tempfile
 import time
 import uuid
 import wave
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -880,6 +882,57 @@ class ArticulationChainItem:
         )
 
 
+
+@dataclass
+class VoiceCapturePrompt:
+    """Future capture prompt for consent-based voice-font recording workflows."""
+
+    prompt_id: str
+    prompt_type: str
+    text: str
+    phoneme_sequence: List[str] = field(default_factory=list)
+    ipa_sequence: List[str] = field(default_factory=list)
+    target_family: str = ""
+    recording_path: str | None = None
+    analysis_status: str = "not_recorded"
+
+
+@dataclass
+class VoiceFontProfile:
+    """Metadata shell for reusable voice fonts; no voice cloning is implemented yet."""
+
+    profile_id: str
+    name: str
+    author: str
+    consent_confirmed: bool
+    created_at: str
+    sample_rate: int
+    phoneme_recordings: Dict[str, str] = field(default_factory=dict)
+    word_recordings: Dict[str, str] = field(default_factory=dict)
+    phrase_recordings: Dict[str, str] = field(default_factory=dict)
+    extracted_features: Dict[str, object] = field(default_factory=dict)
+    generated_presets: Dict[str, object] = field(default_factory=dict)
+    license: str = "unlicensed"
+    provenance_hash: str = ""
+
+
+@dataclass
+class PhonemeCombinationPreset:
+    """CV/VC transition-library entry for future speech asset workflows."""
+
+    id: str
+    label: str
+    pattern_type: str
+    first_phoneme: str
+    second_phoneme: str
+    phoneme_sequence: List[str]
+    ipa_sequence: List[str]
+    transition_ms: int
+    transition_curve: str
+    crossfade_ms: int
+    recommended_render_mode: str
+    notes: str = ""
+
 @dataclass
 class ArticulationChain:
     """Serializable articulation-chain metadata, including the latest word render."""
@@ -969,6 +1022,164 @@ CONSONANT_PRESET_SECTIONS: Tuple[Tuple[str, Dict[str, Dict[str, object]]], ...] 
     ("💥 Affricates", AFFRICATE_PRESETS),
     ("🦷 Extra Fricatives", EXTRA_FRICATIVE_PRESETS),
 )
+
+
+VOICE_FONT_ANALYSIS_FEATURES = (
+    "pitch_tracking",
+    "amplitude_envelope",
+    "formant_estimation",
+    "noise_voicing_ratio",
+    "fricative_spectral_center",
+    "stop_burst_timing",
+    "nasal_resonance_estimate",
+    "phoneme_duration_estimate",
+    "coarticulation_transition_timing",
+)
+CV_VC_CONSONANTS = ("B", "CH", "D", "DH", "F", "G", "H", "JH", "K", "L", "M", "N", "NG", "P", "R", "S", "SH", "T", "TH", "V", "W", "Y", "Z", "ZH")
+CV_VC_VOWELS = ("AH", "AE", "EE", "EH", "IH", "IY", "OH", "OO", "UH", "ER")
+
+
+def _phoneme_ipa(symbol: str) -> str:
+    for preset_map in (VOWEL_PRESETS, FRICATIVE_PRESETS, STOP_PRESETS, NASAL_PRESETS, GLIDE_PRESETS, LIQUID_PRESETS, AFFRICATE_PRESETS, EXTRA_FRICATIVE_PRESETS):
+        if symbol in preset_map:
+            return str(preset_map[symbol].get("ipa", symbol.lower()))
+    return symbol.lower()
+
+
+def build_cv_vc_combination_library() -> List[PhonemeCombinationPreset]:
+    """Generate all placeholder CV and VC presets without changing render behavior."""
+    presets: List[PhonemeCombinationPreset] = []
+    for consonant in CV_VC_CONSONANTS:
+        for vowel in CV_VC_VOWELS:
+            for pattern_type, first, second in (("CV", consonant, vowel), ("VC", vowel, consonant)):
+                transition_ms = ARTICULATION_TRANSITION_RULE_MS.get(
+                    ("stop" if first in STOP_PRESETS else "vowel", "vowel" if second in VOWEL_PRESETS else "stop" if second in STOP_PRESETS else "fricative"),
+                    ARTICULATION_DEFAULT_TRANSITION_MS,
+                )
+                presets.append(
+                    PhonemeCombinationPreset(
+                        id=f"{pattern_type.lower()}_{first.lower()}_{second.lower()}",
+                        label=f"{first} → {second}",
+                        pattern_type=pattern_type,
+                        first_phoneme=first,
+                        second_phoneme=second,
+                        phoneme_sequence=[first, second],
+                        ipa_sequence=[_phoneme_ipa(first), _phoneme_ipa(second)],
+                        transition_ms=transition_ms,
+                        transition_curve=ARTICULATION_DEFAULT_TRANSITION_CURVE,
+                        crossfade_ms=ARTICULATION_DEFAULT_WORD_CROSSFADE_MS,
+                        recommended_render_mode=ARTICULATION_WORD_RENDER_CONTINUOUS,
+                        notes="Foundation preset for future CV/VC library export and audition workflows.",
+                    )
+                )
+    return presets
+
+
+CV_VC_COMBINATION_LIBRARY = build_cv_vc_combination_library()
+ALL_CV_COMBINATIONS = [preset for preset in CV_VC_COMBINATION_LIBRARY if preset.pattern_type == "CV"]
+ALL_VC_COMBINATIONS = [preset for preset in CV_VC_COMBINATION_LIBRARY if preset.pattern_type == "VC"]
+
+
+def analyze_voice_phoneme_recording(recording_path: str, prompt: VoiceCapturePrompt | None = None) -> Dict[str, object]:
+    """Return a safe placeholder analysis packet for a future phoneme analyzer."""
+    return {
+        "recording_path": recording_path,
+        "prompt_id": prompt.prompt_id if prompt else None,
+        "analysis_status": "planned_stub",
+        "planned_features": list(VOICE_FONT_ANALYSIS_FEATURES),
+        "note": "Placeholder only: production speech recognition, forced alignment, and model training are not implemented.",
+    }
+
+
+def analyze_voice_word_recording(recording_path: str, prompt: VoiceCapturePrompt | None = None) -> Dict[str, object]:
+    """Return a safe placeholder analysis packet for future word-context analysis."""
+    analysis = analyze_voice_phoneme_recording(recording_path, prompt)
+    analysis["context_scope"] = "word"
+    analysis["planned_context_features"] = ["phoneme duration estimate", "coarticulation transition timing"]
+    return analysis
+
+
+def derive_phoneme_preset_from_analysis(analysis: Dict[str, object]) -> Dict[str, object]:
+    """Stub converter from future voice analysis to articulation preset metadata."""
+    return {
+        "source_analysis_status": analysis.get("analysis_status", "unknown"),
+        "preset_status": "planned_stub",
+        "requires_review": True,
+        "note": "Future implementation will map analysis features onto ArticulationPhoneme controls.",
+    }
+
+
+def derive_transition_preset_from_word_context(analysis: Dict[str, object]) -> Dict[str, object]:
+    """Stub converter from future word-context analysis to transition metadata."""
+    return {
+        "source_analysis_status": analysis.get("analysis_status", "unknown"),
+        "transition_status": "planned_stub",
+        "transition_ms": ARTICULATION_DEFAULT_TRANSITION_MS,
+        "transition_curve": ARTICULATION_DEFAULT_TRANSITION_CURVE,
+        "note": "Future implementation will derive coarticulation timing from aligned word recordings.",
+    }
+
+
+def export_articulation_animation_json(path: str | Path, animation_data: Dict[str, object]) -> Path:
+    """Write future Blender articulation animation data as JSON."""
+    output_path = Path(path)
+    payload = {
+        "fps": animation_data.get("fps", 24),
+        "duration_seconds": animation_data.get("duration_seconds", 0.0),
+        "phoneme_blocks": animation_data.get("phoneme_blocks", []),
+        "viseme_blocks": animation_data.get("viseme_blocks", []),
+        "mouth_open_curve": animation_data.get("mouth_open_curve", []),
+        "tongue_height_curve": animation_data.get("tongue_height_curve", []),
+        "tongue_frontness_curve": animation_data.get("tongue_frontness_curve", []),
+        "lip_rounding_curve": animation_data.get("lip_rounding_curve", []),
+        "jaw_curve": animation_data.get("jaw_curve", []),
+        "voicing_curve": animation_data.get("voicing_curve", []),
+        "airflow_curve": animation_data.get("airflow_curve", []),
+        "nasal_open_curve": animation_data.get("nasal_open_curve", []),
+        "format_note": "Foundation JSON schema for a future Blender add-on importer.",
+    }
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return output_path
+
+
+def compute_render_hash(audio_or_bytes: object) -> str:
+    """Compute a deterministic SHA-256 hash for rendered bytes or numpy audio arrays."""
+    hasher = hashlib.sha256()
+    if isinstance(audio_or_bytes, np.ndarray):
+        hasher.update(np.asarray(audio_or_bytes).tobytes())
+    elif isinstance(audio_or_bytes, bytes):
+        hasher.update(audio_or_bytes)
+    else:
+        hasher.update(str(audio_or_bytes).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def build_export_provenance_manifest(
+    *,
+    author: str = "",
+    project_name: str = "Untitled WaveToy Project",
+    app_version: str = "WaveToy single-file",
+    render_hash: str = "",
+    source_hashes: List[str] | None = None,
+    license: str = "unspecified",
+    voice_font_id: str | None = None,
+    export_type: str = "audio",
+    consent_notes: str = "",
+) -> Dict[str, object]:
+    """Build metadata for future publishing and IP/provenance sidecars."""
+    return {
+        "author": author,
+        "project_name": project_name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "app_version": app_version,
+        "render_hash": render_hash,
+        "source_hashes": list(source_hashes or []),
+        "license": license,
+        "voice_font_id": voice_font_id,
+        "export_type": export_type,
+        "consent_notes": consent_notes,
+        "provenance_manifest_version": "0.1-foundation",
+    }
 
 
 
@@ -6867,12 +7078,71 @@ class WaveToyWindow(QMainWindow):
         self._build_wave_explorer_tab()
         self._build_play_tab()
         self._build_articulation_tab()
+        self._build_voice_font_tab()
         self._build_articulation_timeline_tab()
         self._build_graphical_editor_tab()
         self._build_timeline_tab()
         self._build_library_tab()
         if self.tabs is not None:
             self.tabs.setCurrentIndex(0)
+
+    def _show_future_workflow_notice(self, title: str, detail: str) -> None:
+        QMessageBox.information(
+            self,
+            title,
+            f"{detail}\n\nThis task adds safe placeholders and schemas only; full recording, analyzer, Blender add-on, and publishing workflows can follow later.",
+        )
+
+    def _build_voice_font_tab(self) -> None:
+        if self.tabs is None:
+            return
+        tab = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
+        tab.setObjectName("voiceFontTab")
+        tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page = QWidget()
+        page.setObjectName("voiceFontPage")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(14, 10, 14, 18)
+        outer.setSpacing(10)
+
+        header = QWidget()
+        header.setObjectName("articulationLabHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 8, 14, 8)
+        header_layout.setSpacing(12)
+        title = QLabel("Voice Font")
+        title.setObjectName("articulationCompactTitle")
+        info = QLabel("Consent-first planning space for future phoneme, word, and phrase capture. No voice cloning, training, or automatic analysis is implemented yet.")
+        info.setObjectName("articulationInfoBadge")
+        info.setWordWrap(True)
+        header_layout.addWidget(title)
+        header_layout.addWidget(info, 1)
+        outer.addWidget(header)
+
+        sections = (
+            ("Recording Checklist", "Confirm author identity, explicit consent, sample-rate target, quiet-room setup, and license/provenance notes before recording."),
+            ("Phoneme Capture", "Future guided prompts will record isolated vowels, consonants, and difficult articulation families for reusable voice-font features."),
+            ("Word / Phrase Capture", "Future prompts will collect syllables, words, and short phrases to estimate timing and coarticulation transitions."),
+            ("Analysis Status", "Planned analysis: pitch tracking, amplitude envelope, formants, voicing/noise ratio, fricative center, stop bursts, nasal resonance, durations, and transitions."),
+            ("Generated Voice Presets", "Future reviewed analysis packets can create ArticulationPhoneme presets and transition presets without replacing current presets."),
+            ("Export Voice Font", "Future exports should include VoiceFontProfile metadata, prompt manifests, consent notes, generated presets, and provenance hashes."),
+        )
+        for section_title, detail in sections:
+            card = self._toy_group(section_title)
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(12, 18, 12, 12)
+            layout.setSpacing(8)
+            label = QLabel(detail)
+            label.setObjectName("symbolHint")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            button = self._make_story_button("🧭", "Open Future Workflow Note", "#d7b9ff", lambda checked=False, st=section_title: self._show_future_workflow_notice(st, "Voice Font workflow is a consent-first foundation."))
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            layout.addWidget(button)
+            outer.addWidget(card)
+
+        tab.setWidget(page)
+        self.tabs.insertTab(min(3, self.tabs.count()), tab, "Voice Font")
 
     def _build_articulation_tab(self) -> None:
         if self.tabs is None:
@@ -7247,6 +7517,41 @@ class WaveToyWindow(QMainWindow):
         profile_row.addWidget(profile_label)
         profile_row.addWidget(self.articulation_voice_profile_combo, 1)
         chain_layout.addLayout(profile_row)
+
+        cv_vc_card = self._toy_group("CV / VC Library")
+        cv_vc_layout = QVBoxLayout(cv_vc_card)
+        cv_vc_layout.setContentsMargins(12, 18, 12, 12)
+        cv_vc_layout.setSpacing(8)
+        cv_vc_hint = QLabel(f"Foundation library: {len(CV_VC_CONSONANTS)} consonants × {len(CV_VC_VOWELS)} vowels × CV/VC patterns = {len(CV_VC_COMBINATION_LIBRARY)} planned presets.")
+        cv_vc_hint.setObjectName("symbolHint")
+        cv_vc_hint.setWordWrap(True)
+        cv_vc_layout.addWidget(cv_vc_hint)
+        picker_row = QHBoxLayout()
+        self.cv_vc_consonant_combo = QComboBox()
+        self.cv_vc_consonant_combo.addItems(list(CV_VC_CONSONANTS))
+        self.cv_vc_vowel_combo = QComboBox()
+        self.cv_vc_vowel_combo.addItems(list(CV_VC_VOWELS))
+        self.cv_vc_pattern_combo = QComboBox()
+        self.cv_vc_pattern_combo.addItems(["CV", "VC"])
+        for label_text, combo in (("Consonant", self.cv_vc_consonant_combo), ("Vowel", self.cv_vc_vowel_combo), ("Pattern", self.cv_vc_pattern_combo)):
+            label = QLabel(label_text)
+            label.setObjectName("timelineInspectorText")
+            picker_row.addWidget(label)
+            picker_row.addWidget(combo, 1)
+        cv_vc_layout.addLayout(picker_row)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        for icon, label_text, color in (
+            ("▶", "Preview Combination", "#b8f2e6"),
+            ("➕", "Add to Chain", "#caffbf"),
+            ("➕", "Add to Speech Assets", "#ffc6ff"),
+            ("💾", "Export Library JSON", "#fdffb6"),
+        ):
+            button = self._make_story_button(icon, label_text, color, lambda checked=False, lt=label_text: self._show_future_workflow_notice("CV / VC Library", f"{lt} is planned as a future CV/VC-library workflow."))
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            action_row.addWidget(button)
+        cv_vc_layout.addLayout(action_row)
+        chain_layout.addWidget(cv_vc_card)
 
         timeline_header = QHBoxLayout()
         timeline_title = QLabel("🎞 Visual Speech Timeline")
