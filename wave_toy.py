@@ -815,6 +815,7 @@ class ArticulationChainItem:
     crossfade_ms: int = ARTICULATION_DEFAULT_WORD_CROSSFADE_MS
     transition_to_next_ms: int | None = None
     transition_curve: str = ARTICULATION_DEFAULT_TRANSITION_CURVE
+    accentuation_db: float = 0.0
 
     @property
     def transition_ms(self) -> int | None:
@@ -836,6 +837,7 @@ class ArticulationChainItem:
             self.transition_to_next_ms = int(np.clip(int(self.transition_to_next_ms), 0, 250))
         if self.transition_curve not in ARTICULATION_TRANSITION_CURVES:
             self.transition_curve = ARTICULATION_DEFAULT_TRANSITION_CURVE
+        self.accentuation_db = float(np.clip(float(self.accentuation_db), -24.0, 24.0))
 
     def phoneme_for_render(self) -> ArticulationPhoneme:
         data = self.phoneme.to_json_dict()
@@ -857,6 +859,7 @@ class ArticulationChainItem:
                 "transition_to_next_ms": int(self.transition_to_next_ms) if self.transition_to_next_ms is not None else None,
                 "transition_ms": int(self.transition_to_next_ms) if self.transition_to_next_ms is not None else None,
                 "transition_curve": self.transition_curve,
+                "accentuation_db": float(self.accentuation_db),
                 "source_mode": phoneme.source_mode,
                 "source_wave_id": phoneme.source_wave_id,
                 "source_recipe_snapshot": phoneme.source_recipe_snapshot or {},
@@ -880,6 +883,7 @@ class ArticulationChainItem:
             crossfade_ms=int(data.get("crossfade_ms", ARTICULATION_DEFAULT_WORD_CROSSFADE_MS)),
             transition_to_next_ms=int(data["transition_to_next_ms"]) if data.get("transition_to_next_ms") is not None else (int(data["transition_ms"]) if data.get("transition_ms") is not None else None),
             transition_curve=str(data.get("transition_curve", ARTICULATION_DEFAULT_TRANSITION_CURVE)),
+            accentuation_db=float(data.get("accentuation_db", 0.0) or 0.0),
         )
 
 
@@ -5467,12 +5471,14 @@ class ArticulationTimelineCanvas(QWidget):
                 self.drag_index = index
                 if kind == "transition":
                     self.drag_mode = "transition"
+                    nearest = index if x <= rect.center().x() or index >= len(self.items) - 1 else index + 1
+                    self.blockSelected.emit(nearest)
                 elif abs(x - rect.right()) <= 12.0:
                     self.drag_mode = "duration_right"
                 elif abs(x - rect.left()) <= 12.0:
                     self.drag_mode = "duration_left"
                 else:
-                    self.drag_mode = "playhead"
+                    self.drag_mode = "select"
                     self.blockSelected.emit(index)
                 break
         if abs(x - playhead_x) <= 14.0:
@@ -5483,7 +5489,7 @@ class ArticulationTimelineCanvas(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
-        if self.drag_mode is None:
+        if self.drag_mode is None or self.drag_mode == "select":
             return
         pos = event.position() if hasattr(event, "position") else event.pos()
         x = float(pos.x())
@@ -5547,8 +5553,11 @@ class ArticulationTimelineCanvas(QWidget):
                 transition = max(0, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS))
                 painter.drawText(rect.adjusted(2, 0, -2, 0), Qt.AlignCenter, f"↔ {transition} ms\n{curve.split()[0]}")
                 continue
-            painter.setBrush(QColor(phoneme.preview_color))
             selected = index == self.selected_index
+            fill = QColor(phoneme.preview_color)
+            if selected:
+                fill = fill.lighter(115)
+            painter.setBrush(fill)
             painter.setPen(QPen(QColor("#ff4fa3" if selected else "#1d3557"), 5 if selected else 3))
             painter.drawRoundedRect(rect, min(16.0, max(1.0, rect.width() / 2.0)), 16)
             if rect.width() < 18.0:
@@ -5557,7 +5566,9 @@ class ArticulationTimelineCanvas(QWidget):
                 painter.drawRoundedRect(rect.adjusted(-8, 6, 8, -6), 8, 8)
             family_icon = {"vowel": "●", "fricative": "≋", "affricate": "≋!", "stop": "■", "nasal": "∩", "glide": "~", "liquid": "ℓ"}.get(phoneme.phoneme_family, "●")
             badge = articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)
-            label = f"{family_icon} {phoneme.name} /{phoneme.ipa}/\n{int(item.duration_ms or phoneme.duration_ms)} ms • {badge}"
+            accent = float(getattr(item, "accentuation_db", 0.0))
+            accent_badge = f" • {accent:+.0f} dB" if abs(accent) >= 0.05 else ""
+            label = f"{family_icon} {phoneme.name} /{phoneme.ipa}/\n{int(item.duration_ms or phoneme.duration_ms)} ms • {badge}{accent_badge}"
             painter.setPen(QPen(QColor("#1d3557"), 1))
             painter.drawText(rect.adjusted(8, 5, -8, -5), Qt.AlignCenter | Qt.TextWordWrap, label)
             painter.setPen(QPen(QColor("#e63946"), 4))
@@ -6113,6 +6124,14 @@ class WaveToyWindow(QMainWindow):
         self.articulation_playhead_ms = 0.0
         self.articulation_scrub_label: QLabel | None = None
         self.articulation_boundary_curve_combo: QComboBox | None = None
+        self.selected_component_controls_widget: QWidget | None = None
+        self.selected_component_label: QLabel | None = None
+        self.selected_component_duration_spin: QSpinBox | None = None
+        self.selected_component_accent_slider: QSlider | None = None
+        self.selected_component_accent_spin: QDoubleSpinBox | None = None
+        self.selected_component_voice_spin: QDoubleSpinBox | None = None
+        self.selected_component_air_spin: QDoubleSpinBox | None = None
+        self.selected_component_transition_spin: QSpinBox | None = None
         self.articulation_voice_profile_combo: QComboBox | None = None
         self.articulation_boundary_curve_canvas: ArticulationTrackCanvas | None = None
         self.articulation_envelope_canvas: ArticulationTrackCanvas | None = None
@@ -7396,7 +7415,6 @@ class WaveToyWindow(QMainWindow):
         phoneme_actions_column.setSpacing(6)
         for icon, label, color, callback, tooltip in (
             ("💾", "Save Phoneme", "#ffd166", self._save_current_phoneme, "Save the current shaped phoneme as a reusable preset."),
-            ("➕", "Add to Articulation Timeline", "#5cdb95", self._add_current_phoneme_to_chain, "Append the current phoneme to the Articulation Timeline chain."),
         ):
             button = self._make_story_button(icon, label, color, callback)
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
@@ -7450,8 +7468,17 @@ class WaveToyWindow(QMainWindow):
             self.phoneme_drawer_stack.addWidget(self._build_phoneme_drawer_page(title_text, icon, presets, callback))
         rail_layout.addStretch(1)
 
+        add_to_timeline_button = self._make_story_button("➕", "Add to Articulation Timeline", "#5cdb95", self._add_current_phoneme_to_chain)
+        add_to_timeline_button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+        add_to_timeline_button.setToolTip("Append the currently selected/shaped phoneme to the Articulation Timeline chain.")
+        drawer_top = QVBoxLayout()
+        drawer_top.setContentsMargins(0, 0, 0, 0)
+        drawer_top.setSpacing(8)
+        drawer_top.addWidget(add_to_timeline_button)
+        drawer_top.addWidget(self.phoneme_drawer_stack, 1)
+
         drawer_layout.addWidget(rail)
-        drawer_layout.addWidget(self.phoneme_drawer_stack, 1)
+        drawer_layout.addLayout(drawer_top, 1)
         main.addWidget(drawer_shell, 2)
 
         tab.setWidget(page)
@@ -7624,7 +7651,7 @@ class WaveToyWindow(QMainWindow):
         diagnostics_layout.addWidget(self.continuous_diagnostics_status_label)
         diagnostics_layout.addWidget(self.continuous_diagnostics_metrics_label)
         diagnostics_layout.addWidget(self.continuous_validation_results_label)
-        chain_layout.addWidget(diagnostics_card)
+        chain_layout.addWidget(CollapsibleSection("Continuous diagnostics", diagnostics_card, expanded=False))
 
         continuous_tests = ", ".join(" ".join(chain) for chain in CONTINUOUS_RENDER_TEST_CHAINS)
         continuous_test_label = QLabel(f"Continuous validation chains: {continuous_tests}")
@@ -7696,7 +7723,7 @@ class WaveToyWindow(QMainWindow):
             action_row.addWidget(button)
         cv_vc_layout.addLayout(action_row)
         self._update_cv_vc_filter_status()
-        chain_layout.addWidget(cv_vc_card)
+        chain_layout.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=False))
 
         timeline_header = QHBoxLayout()
         timeline_title = QLabel("🎞 Visual Speech Timeline")
@@ -7728,15 +7755,10 @@ class WaveToyWindow(QMainWindow):
         self.articulation_scrub_label.setWordWrap(True)
         chain_layout.addWidget(self.articulation_scrub_label)
 
-        boundary_row = QHBoxLayout()
-        boundary_label = QLabel("Boundary Curve")
-        boundary_label.setObjectName("timelineInspectorText")
         self.articulation_boundary_curve_combo = QComboBox()
         self.articulation_boundary_curve_combo.addItems(list(ARTICULATION_TRANSITION_CURVES))
         self.articulation_boundary_curve_combo.currentTextChanged.connect(self._set_selected_boundary_curve)
-        boundary_row.addWidget(boundary_label)
-        boundary_row.addWidget(self.articulation_boundary_curve_combo, 1)
-        chain_layout.addLayout(boundary_row)
+        chain_layout.addWidget(self._build_selected_component_controls())
 
         self.articulation_envelope_canvas = ArticulationTrackCanvas("envelopes")
         chain_layout.addWidget(self.articulation_envelope_canvas)
@@ -7744,7 +7766,7 @@ class WaveToyWindow(QMainWindow):
         chain_layout.addWidget(self.articulation_formant_canvas)
 
         self.articulation_chain_widget = QWidget()
-        chain_layout.addWidget(self.articulation_chain_widget)
+        chain_layout.addWidget(CollapsibleSection("Advanced chain cards / source actions", self.articulation_chain_widget, expanded=False))
 
         motion_card = self._toy_group("Word Motion Preview")
         motion_layout = QVBoxLayout(motion_card)
@@ -7781,6 +7803,89 @@ class WaveToyWindow(QMainWindow):
         main.addWidget(self._build_speech_assets_panel("articulation_timeline"), 2)
         tab.setWidget(page)
         self.tabs.insertTab(min(3, self.tabs.count()), tab, "Articulation Timeline")
+
+
+    def _build_selected_component_controls(self) -> QWidget:
+        panel = self._toy_group("Selected Component Controls")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 16, 10, 10)
+        layout.setSpacing(6)
+        self.selected_component_label = QLabel("Select a phoneme block in the Visual Articulation Timeline to edit it here.")
+        self.selected_component_label.setObjectName("symbolHint")
+        self.selected_component_label.setWordWrap(True)
+        layout.addWidget(self.selected_component_label)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        row1.addWidget(QLabel("Duration ms"))
+        self.selected_component_duration_spin = QSpinBox()
+        self.selected_component_duration_spin.setRange(80, 5000)
+        self.selected_component_duration_spin.setSingleStep(10)
+        self.selected_component_duration_spin.valueChanged.connect(self._set_selected_component_duration_ms)
+        row1.addWidget(self.selected_component_duration_spin)
+        row1.addWidget(QLabel("Voice"))
+        self.selected_component_voice_spin = QDoubleSpinBox()
+        self.selected_component_voice_spin.setRange(0.0, 1.0)
+        self.selected_component_voice_spin.setSingleStep(0.05)
+        self.selected_component_voice_spin.setDecimals(2)
+        self.selected_component_voice_spin.valueChanged.connect(lambda value: self._set_selected_component_phoneme_float("voice_strength", value))
+        row1.addWidget(self.selected_component_voice_spin)
+        row1.addWidget(QLabel("Air"))
+        self.selected_component_air_spin = QDoubleSpinBox()
+        self.selected_component_air_spin.setRange(0.0, 1.0)
+        self.selected_component_air_spin.setSingleStep(0.05)
+        self.selected_component_air_spin.setDecimals(2)
+        self.selected_component_air_spin.valueChanged.connect(lambda value: self._set_selected_component_phoneme_float("air_pressure", value))
+        row1.addWidget(self.selected_component_air_spin)
+        row1.addStretch(1)
+        layout.addLayout(row1)
+
+        accent_row = QHBoxLayout()
+        accent_row.setSpacing(8)
+        accent_row.addWidget(QLabel("Accentuation dB"))
+        self.selected_component_accent_slider = QSlider(Qt.Horizontal)
+        self.selected_component_accent_slider.setRange(-120, 120)
+        self.selected_component_accent_slider.setTickPosition(QSlider.TicksBelow)
+        self.selected_component_accent_slider.setTickInterval(30)
+        self.selected_component_accent_slider.valueChanged.connect(lambda raw: self._set_selected_component_accentuation(raw / 10.0, source="slider"))
+        accent_row.addWidget(self.selected_component_accent_slider, 1)
+        self.selected_component_accent_spin = QDoubleSpinBox()
+        self.selected_component_accent_spin.setRange(-24.0, 24.0)
+        self.selected_component_accent_spin.setSingleStep(0.5)
+        self.selected_component_accent_spin.setDecimals(1)
+        self.selected_component_accent_spin.setSuffix(" dB")
+        self.selected_component_accent_spin.valueChanged.connect(lambda value: self._set_selected_component_accentuation(value, source="spin"))
+        accent_row.addWidget(self.selected_component_accent_spin)
+        layout.addLayout(accent_row)
+
+        transition_row = QHBoxLayout()
+        transition_row.setSpacing(8)
+        transition_row.addWidget(QLabel("Transition to next ms"))
+        self.selected_component_transition_spin = QSpinBox()
+        self.selected_component_transition_spin.setRange(0, 250)
+        self.selected_component_transition_spin.setSingleStep(5)
+        self.selected_component_transition_spin.valueChanged.connect(self._set_selected_component_transition_ms)
+        transition_row.addWidget(self.selected_component_transition_spin)
+        transition_row.addWidget(QLabel("Curve"))
+        transition_row.addWidget(self.articulation_boundary_curve_combo, 1)
+        layout.addLayout(transition_row)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        for text, callback in (
+            ("Remove Phoneme", lambda checked=False: self._remove_selected_component()),
+            ("Duplicate", lambda checked=False: self._duplicate_selected_component()),
+            ("Move Left", lambda checked=False: self._move_selected_component(-1)),
+            ("Move Right", lambda checked=False: self._move_selected_component(1)),
+        ):
+            button = QPushButton(text)
+            button.setObjectName("phonemeCardSecondaryAction")
+            button.setMinimumHeight(34)
+            button.clicked.connect(callback)
+            action_row.addWidget(button)
+        layout.addLayout(action_row)
+        self.selected_component_controls_widget = panel
+        return panel
 
     def _make_articulation_toy_control(self, key: str, label: str, low_label: str, high_label: str, minimum: int, maximum: int, value: int) -> QWidget:
         row = QWidget()
@@ -8192,6 +8297,7 @@ class WaveToyWindow(QMainWindow):
             layout.addWidget(empty)
             self._update_articulation_word_status()
             self._refresh_articulation_motion_timeline()
+            self._refresh_selected_component_controls()
             return
         for index, item in enumerate(self.articulation_chain_items):
             layout.addWidget(self._make_articulation_chain_card(index, item))
@@ -8199,6 +8305,7 @@ class WaveToyWindow(QMainWindow):
                 layout.addWidget(self._make_articulation_transition_control(index, item, self.articulation_chain_items[index + 1]))
         self._update_articulation_word_status()
         self._refresh_articulation_motion_timeline()
+        self._refresh_selected_component_controls()
 
     def _make_articulation_chain_card(self, index: int, item: ArticulationChainItem) -> QWidget:
         phoneme = item.phoneme_for_render().clamped()
@@ -8226,7 +8333,8 @@ class WaveToyWindow(QMainWindow):
         details = QLabel(
             f"{phoneme.phoneme_family.title()} • {int(item.duration_ms or phoneme.duration_ms)} ms • "
             f"gap {int(item.gap_after_ms)} ms • crossfade {int(item.crossfade_ms)} ms • "
-            f"transition {item.transition_ms if item.transition_ms is not None else 'rule'} ms"
+            f"transition {item.transition_ms if item.transition_ms is not None else 'rule'} ms • "
+            f"accent {float(item.accentuation_db):+0.1f} dB"
         )
         details.setObjectName("phonemeCardSummary")
         details.setWordWrap(True)
@@ -8267,7 +8375,8 @@ class WaveToyWindow(QMainWindow):
             return
         source = self.articulation_chain_items[index]
         duplicate = ArticulationChainItem.from_json_dict(source.to_json_dict())
-        duplicate.name = f"{source.name} copy"
+        duplicate.id = uuid.uuid4().hex
+        duplicate.phoneme.name = f"{source.phoneme.name} copy"
         self.articulation_chain_items.insert(index + 1, duplicate)
         self.articulation_selected_chain_index = index + 1
         self._mark_articulation_word_dirty()
@@ -8394,12 +8503,116 @@ class WaveToyWindow(QMainWindow):
         self.articulation_playhead_ms = float(max(0.0, elapsed_ms))
         self._set_articulation_motion_elapsed(self.articulation_playhead_ms)
 
+    def _selected_chain_item(self) -> ArticulationChainItem | None:
+        index = self.articulation_selected_chain_index
+        if isinstance(index, int) and 0 <= index < len(self.articulation_chain_items):
+            return self.articulation_chain_items[index]
+        return None
+
     def _select_articulation_chain_item(self, index: int) -> None:
         if index < 0 or index >= len(self.articulation_chain_items):
             return
         self.articulation_selected_chain_index = index
         self._set_articulation_ui_from_phoneme(self.articulation_chain_items[index].phoneme)
         self._refresh_articulation_chain_cards()
+
+    def _refresh_selected_component_controls(self) -> None:
+        item = self._selected_chain_item()
+        widgets = [
+            self.selected_component_duration_spin, self.selected_component_accent_slider, self.selected_component_accent_spin,
+            self.selected_component_voice_spin, self.selected_component_air_spin, self.selected_component_transition_spin,
+            self.articulation_boundary_curve_combo,
+        ]
+        for widget in widgets:
+            if widget is not None:
+                widget.setEnabled(item is not None)
+        if item is None:
+            if self.selected_component_label is not None:
+                self.selected_component_label.setText("Select a phoneme block in the Visual Articulation Timeline to edit it here.")
+            return
+        phoneme = item.phoneme_for_render().clamped()
+        if self.selected_component_label is not None:
+            next_text = "none"
+            selected = self.articulation_selected_chain_index
+            if isinstance(selected, int) and selected < len(self.articulation_chain_items) - 1:
+                next_text = f"{self.articulation_chain_items[selected + 1].phoneme.name} ({self._chain_transition_duration_ms(item, self.articulation_chain_items[selected + 1])} ms)"
+            self.selected_component_label.setText(f"Selected phoneme: {phoneme.name} /{phoneme.ipa}/ • {phoneme.phoneme_family.title()} • transition to next: {next_text}")
+        for widget, value in (
+            (self.selected_component_duration_spin, int(item.duration_ms or phoneme.duration_ms)),
+            (self.selected_component_voice_spin, float(phoneme.voice_strength)),
+            (self.selected_component_air_spin, float(phoneme.air_pressure)),
+            (self.selected_component_transition_spin, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS)),
+        ):
+            if widget is not None:
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+        if self.selected_component_transition_spin is not None:
+            self.selected_component_transition_spin.setEnabled(bool(self.articulation_selected_chain_index is not None and self.articulation_selected_chain_index < len(self.articulation_chain_items) - 1))
+        if self.selected_component_accent_slider is not None:
+            self.selected_component_accent_slider.blockSignals(True)
+            self.selected_component_accent_slider.setValue(int(round(float(item.accentuation_db) * 10.0)))
+            self.selected_component_accent_slider.blockSignals(False)
+        if self.selected_component_accent_spin is not None:
+            self.selected_component_accent_spin.blockSignals(True)
+            self.selected_component_accent_spin.setValue(float(item.accentuation_db))
+            self.selected_component_accent_spin.blockSignals(False)
+        if self.articulation_boundary_curve_combo is not None:
+            self.articulation_boundary_curve_combo.blockSignals(True)
+            self.articulation_boundary_curve_combo.setCurrentText(item.transition_curve if item.transition_curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE)
+            self.articulation_boundary_curve_combo.blockSignals(False)
+
+    def _set_selected_component_duration_ms(self, value: int) -> None:
+        index = self.articulation_selected_chain_index
+        if isinstance(index, int):
+            self._set_chain_item_duration_ms(index, int(value))
+
+    def _set_selected_component_transition_ms(self, value: int) -> None:
+        index = self.articulation_selected_chain_index
+        if isinstance(index, int) and index < len(self.articulation_chain_items) - 1:
+            self._set_chain_transition_to_next_ms(index, int(value))
+            self._refresh_articulation_chain_cards()
+
+    def _set_selected_component_accentuation(self, value: float, source: str = "spin") -> None:
+        item = self._selected_chain_item()
+        if item is None:
+            return
+        value = float(np.clip(float(value), -24.0, 24.0))
+        item.accentuation_db = value
+        if source != "slider" and self.selected_component_accent_slider is not None:
+            self.selected_component_accent_slider.blockSignals(True)
+            self.selected_component_accent_slider.setValue(int(round(np.clip(value, -12.0, 12.0) * 10.0)))
+            self.selected_component_accent_slider.blockSignals(False)
+        if source != "spin" and self.selected_component_accent_spin is not None:
+            self.selected_component_accent_spin.blockSignals(True)
+            self.selected_component_accent_spin.setValue(value)
+            self.selected_component_accent_spin.blockSignals(False)
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_motion_timeline()
+
+    def _set_selected_component_phoneme_float(self, key: str, value: float) -> None:
+        item = self._selected_chain_item()
+        if item is None or not hasattr(item.phoneme, key):
+            return
+        setattr(item.phoneme, key, float(np.clip(float(value), 0.0, 1.0)))
+        item.phoneme = item.phoneme.clamped()
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_motion_timeline()
+
+    def _remove_selected_component(self) -> None:
+        index = self.articulation_selected_chain_index
+        if isinstance(index, int):
+            self._remove_articulation_chain_item(index)
+
+    def _duplicate_selected_component(self) -> None:
+        index = self.articulation_selected_chain_index
+        if isinstance(index, int):
+            self._duplicate_articulation_chain_item(index)
+
+    def _move_selected_component(self, direction: int) -> None:
+        index = self.articulation_selected_chain_index
+        if isinstance(index, int):
+            self._move_articulation_chain_item(index, direction)
 
     def _add_current_phoneme_to_chain(self, checked: bool = False) -> None:
         del checked
@@ -8680,6 +8893,9 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_timeline_canvas is not None:
             self.articulation_timeline_canvas.set_zoom(self.articulation_timeline_zoom)
             self.articulation_timeline_canvas.set_timeline(self.articulation_chain_items, total_ms, self.articulation_playhead_ms)
+            selected_index = self.articulation_selected_chain_index
+            self.articulation_timeline_canvas.selected_index = selected_index if isinstance(selected_index, int) and 0 <= selected_index < len(self.articulation_chain_items) else None
+            self.articulation_timeline_canvas.update()
         if self.articulation_envelope_canvas is not None:
             self.articulation_envelope_canvas.set_timeline(segments, total_ms, self.articulation_playhead_ms)
         if self.articulation_formant_canvas is not None:
@@ -9062,11 +9278,46 @@ class WaveToyWindow(QMainWindow):
             f"fresh_render_created={fresh_render_created}"
         )
 
+
+    def _accentuation_gain_for_db(self, accentuation_db: float) -> float:
+        return float(np.clip(10.0 ** (float(accentuation_db) / 20.0), 0.05, 4.0))
+
+    def _accentuation_gain_for_item(self, item: ArticulationChainItem) -> float:
+        return self._accentuation_gain_for_db(float(getattr(item, "accentuation_db", 0.0)))
+
+    def _apply_chain_item_accentuation(self, audio: np.ndarray, item: ArticulationChainItem) -> np.ndarray:
+        if audio.size == 0:
+            return audio
+        gain = self._accentuation_gain_for_item(item)
+        if abs(gain - 1.0) <= 1.0e-6:
+            return audio.astype(np.float32, copy=False)
+        accented = audio.astype(np.float32, copy=False) * np.float32(gain)
+        peak = float(np.max(np.abs(accented))) if accented.size else 0.0
+        if peak > 0.98:
+            accented = np.tanh(accented.astype(np.float64))
+            limited_peak = float(np.max(np.abs(accented))) if accented.size else 0.0
+            if limited_peak > 0.98:
+                accented = accented / limited_peak * 0.98
+        return accented.astype(np.float32)
+
+    def _accentuation_summary(self) -> Dict[str, float]:
+        values = [float(getattr(item, "accentuation_db", 0.0)) for item in self.articulation_chain_items]
+        if not values:
+            return {"active_phoneme_accentuation_db": 0.0, "max_accentuation_db": 0.0, "gain_applied": 1.0}
+        selected = self._selected_chain_item()
+        active_db = float(getattr(selected, "accentuation_db", 0.0)) if selected is not None else values[0]
+        max_db = max(values, key=lambda value: abs(value))
+        return {
+            "active_phoneme_accentuation_db": round(active_db, 3),
+            "max_accentuation_db": round(float(max_db), 3),
+            "gain_applied": round(self._accentuation_gain_for_db(active_db), 6),
+        }
+
     def _render_articulation_word_plain(self) -> np.ndarray:
         word = np.zeros((0, 2), dtype=np.float32)
         print(f"[WaveToy Word] word render started • mode {ARTICULATION_WORD_RENDER_PLAIN} • phoneme count {len(self.articulation_chain_items)}")
         for index, item in enumerate(self.articulation_chain_items):
-            clip = self._render_articulation_with_source(item.phoneme_for_render())
+            clip = self._apply_chain_item_accentuation(self._render_articulation_with_source(item.phoneme_for_render()), item)
             if clip.size == 0:
                 continue
             word = clip if word.size == 0 else np.vstack([word, clip])
@@ -9084,7 +9335,7 @@ class WaveToyWindow(QMainWindow):
         boundaries: List[int] = []
         print(f"[WaveToy Word] word render started • mode simple crossfade • phoneme count {len(self.articulation_chain_items)}")
         for index, item in enumerate(self.articulation_chain_items):
-            clip = self._render_articulation_with_source(item.phoneme_for_render())
+            clip = self._apply_chain_item_accentuation(self._render_articulation_with_source(item.phoneme_for_render()), item)
             gap_after_ms = self._word_gap_after_ms(item, index)
             if index < len(self.articulation_chain_items) - 1:
                 crossfade_ms = self._word_crossfade_ms(int(item.crossfade_ms), item, self.articulation_chain_items[index + 1])
@@ -9115,6 +9366,8 @@ class WaveToyWindow(QMainWindow):
             phoneme.duration_ms = max(80, frame_ms)
             rendered = self._render_articulation_with_source(phoneme)
             if rendered.size:
+                accent_db = float(left.accentuation_db) + (float(right.accentuation_db) - float(left.accentuation_db)) * articulation_curve_progress(progress, left.transition_curve)
+                rendered = (rendered * np.float32(self._accentuation_gain_for_db(accent_db))).astype(np.float32)
                 start = min(max(0, len(rendered) // 3), max(0, len(rendered) - frame_samples))
                 clips.append(rendered[start:start + frame_samples])
         if not clips:
@@ -9135,7 +9388,7 @@ class WaveToyWindow(QMainWindow):
             hold_ms = max(1, int(item.duration_ms or phoneme.duration_ms))
             hold_start = cursor
             hold_end = cursor + hold_ms
-            segments.append({"kind": "hold", "index": index, "start": hold_start, "end": hold_end, "from": phoneme, "to": phoneme})
+            segments.append({"kind": "hold", "index": index, "start": hold_start, "end": hold_end, "from": phoneme, "to": phoneme, "accentuation_db": float(item.accentuation_db)})
             if phoneme.phoneme_family == "stop" or phoneme.closure > 0.75:
                 stop_params = _stop_burst_parameters(phoneme)
                 closure_ms = int(np.clip(hold_ms * (0.18 + phoneme.closure * 0.54), 8, max(9, hold_ms - 1)))
@@ -9160,7 +9413,7 @@ class WaveToyWindow(QMainWindow):
                 transition_ms = max(0, int(self._chain_transition_duration_ms(item, self.articulation_chain_items[index + 1])))
                 if transition_ms > 0:
                     next_phoneme = self.articulation_chain_items[index + 1].phoneme_for_render().clamped()
-                    segments.append({"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme, "curve": item.transition_curve})
+                    segments.append({"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme, "curve": item.transition_curve, "accentuation_db": float(item.accentuation_db), "next_accentuation_db": float(self.articulation_chain_items[index + 1].accentuation_db)})
                     cursor += transition_ms
         return segments, max(cursor, 1), stop_events, burst_events
 
@@ -9322,6 +9575,9 @@ class WaveToyWindow(QMainWindow):
             "continuous_pitch_smoothing_ms",
             "transition_progress",
             "voiced_gain",
+            "active_phoneme_accentuation_db",
+            "max_accentuation_db",
+            "gain_applied",
             "distortion_status",
             "voiced_rms",
             "noise_rms",
@@ -9420,6 +9676,9 @@ class WaveToyWindow(QMainWindow):
                     ArticulationChainItem(phoneme=_phoneme_from_preset_symbol(symbol), duration_ms=_phoneme_from_preset_symbol(symbol).duration_ms)
                     for symbol in chain
                 ]
+                if chain == ("M", "OO", "N") and len(self.articulation_chain_items) > 1:
+                    self.articulation_chain_items[1].accentuation_db = 3.0
+                    label = f"{label} (+3 dB OO accent)"
                 print(f"[WaveToy Continuous Validation] render chain={label}")
                 audio = self._render_articulation_word_continuous()
                 metrics = dict(self.continuous_diagnostics_latest or {})
@@ -9631,6 +9890,17 @@ class WaveToyWindow(QMainWindow):
                 noise_component = noise * 0.16 * voiced_noise_duck * closure_gate
             dry_frame = voiced_component + noise_component
             frame = self._shape_continuous_frame(dry_frame, phoneme)
+            if active.get("kind") == "transition":
+                curve = str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE))
+                start_ms = float(active.get("start", 0.0))
+                end_ms = float(active.get("end", start_ms + 1.0))
+                local = float(np.clip((center_ms - start_ms) / max(1.0, end_ms - start_ms), 0.0, 1.0))
+                accent_t = articulation_curve_progress(local, curve)
+                accent_db = float(active.get("accentuation_db", 0.0)) + (float(active.get("next_accentuation_db", active.get("accentuation_db", 0.0))) - float(active.get("accentuation_db", 0.0))) * accent_t
+            else:
+                accent_db = float(active.get("accentuation_db", 0.0))
+            gain_applied = self._accentuation_gain_for_db(accent_db)
+            frame = frame * gain_applied
             formant_input_energy += float(np.sum(np.square(dry_frame)))
             formant_output_energy += float(np.sum(np.square(frame)))
             formant_sample_count += int(dry_frame.size)
@@ -9648,6 +9918,8 @@ class WaveToyWindow(QMainWindow):
                 "pitch_error_percent": 0.0,
                 "transition_progress": round(transition_progress, 3),
                 "voiced_gain": round(voiced_gain, 3),
+                "active_phoneme_accentuation_db": round(accent_db, 3),
+                "gain_applied": round(gain_applied, 6),
             })
 
         smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
@@ -9803,6 +10075,9 @@ class WaveToyWindow(QMainWindow):
             "transition_duration_total": transition_duration_total,
             "final_buffer_length": int(len(audio)),
             "voiced_phoneme_count": voiced_phoneme_count,
+            "active_phoneme_accentuation_db": round(float(diagnostic_frames[0].get("active_phoneme_accentuation_db", 0.0)) if diagnostic_frames else float(frame_debug[0].get("active_phoneme_accentuation_db", 0.0)) if frame_debug else 0.0, 3),
+            "max_accentuation_db": self._accentuation_summary()["max_accentuation_db"],
+            "gain_applied": round(float(diagnostic_frames[0].get("gain_applied", 1.0)) if diagnostic_frames else float(frame_debug[0].get("gain_applied", 1.0)) if frame_debug else 1.0, 6),
         }
         self._report_continuous_render_debug(metrics)
         print(
@@ -9842,7 +10117,7 @@ class WaveToyWindow(QMainWindow):
         word = np.zeros((0, 2), dtype=np.float32)
         boundaries: List[int] = []
         print(f"[WaveToy Word] word render started • mode coarticulated overlap • phoneme count {len(self.articulation_chain_items)}")
-        clips = [self._render_articulation_with_source(item.phoneme_for_render()) for item in self.articulation_chain_items]
+        clips = [self._apply_chain_item_accentuation(self._render_articulation_with_source(item.phoneme_for_render()), item) for item in self.articulation_chain_items]
         for index, (item, clip) in enumerate(zip(self.articulation_chain_items, clips)):
             if index == 0:
                 word = self._overlap_word_clip(word, clip, 0, boundaries)
@@ -10023,7 +10298,7 @@ class WaveToyWindow(QMainWindow):
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Articulation Chain", "Add at least one phoneme to the chain first.")
             return
-        rendered = [self._render_articulation_with_source(item.phoneme_for_render()) for item in self.articulation_chain_items]
+        rendered = [self._apply_chain_item_accentuation(self._render_articulation_with_source(item.phoneme_for_render()), item) for item in self.articulation_chain_items]
         audio = np.vstack([clip for clip in rendered if clip.size]) if rendered else np.zeros((0, 2), dtype=np.float32)
         self._play_audio_array(audio)
         self._start_articulation_motion(loop=False, speed=1.0)
@@ -11178,7 +11453,7 @@ class WaveToyWindow(QMainWindow):
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Speech Assets", "Add at least one phoneme to the Articulation Chain first.")
             return None
-        rendered = [self._render_articulation_with_source(item.phoneme_for_render()) for item in self.articulation_chain_items]
+        rendered = [self._apply_chain_item_accentuation(self._render_articulation_with_source(item.phoneme_for_render()), item) for item in self.articulation_chain_items]
         audio = np.vstack([clip for clip in rendered if clip.size]) if rendered else np.zeros((0, 2), dtype=np.float32)
         return self._add_speech_bin_item(
             name=self._speech_display_sequence_for_chain(),
