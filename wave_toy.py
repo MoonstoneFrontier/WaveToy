@@ -45,7 +45,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from wavetoy.svg import svg_metadata_for_clip
+from wavetoy.speech_organs import SpeechOrganState
+from wavetoy.svg import anatomical_mouth_svg, svg_metadata_for_clip, vocal_tract_side_svg, voice_source_svg
 
 import numpy as np
 
@@ -54,8 +55,9 @@ try:
 except Exception:
     sd = None
 
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QByteArray, Signal
 from PySide6.QtGui import QAction, QColor, QDrag, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QShortcut
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -84,7 +86,9 @@ from PySide6.QtWidgets import (
     QToolButton,
     QSpinBox,
     QDoubleSpinBox,
+    QDockWidget,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -1310,7 +1314,7 @@ class MusicalTimingSettings:
 
 @dataclass
 class VisemeFrame:
-    """Generic animation frame derived from existing phoneme/articulation state."""
+    """Generic animation frame derived from normalized speech-organ state."""
 
     time_ms: float
     phoneme: str
@@ -1324,6 +1328,7 @@ class VisemeFrame:
     voiced_gain: float
     airflow: float
     transition_progress: float
+    speech_organ_state: Dict[str, float] = field(default_factory=dict)
 
     def to_json_dict(self) -> Dict[str, object]:
         return asdict(self)
@@ -5599,6 +5604,9 @@ class VocalTractCanvas(QWidget):
         self.motion_in_transition = False
         self.motion_playhead_fraction: float | None = None
         self.motion_timeline_blocks: List[Tuple[str, float, float, str]] = []
+        self.display_mode = "Simple"
+        self.svg_view_kind = "mouth"
+        self.show_airflow_overlay = True
         self.editable = False
         self._drag_target: str | None = None
         self._last_mouth_rect = QRectF()
@@ -5618,9 +5626,38 @@ class VocalTractCanvas(QWidget):
             else "Vocal tract: mouth openness, tongue position, and lip rounding update as you explore vowels."
         )
 
+    def set_display_mode(self, mode: str) -> None:
+        self.display_mode = "Anatomical" if str(mode) == "Anatomical" else "Simple"
+        self.update()
+
+    def set_svg_view_kind(self, view_kind: str) -> None:
+        self.svg_view_kind = "side" if str(view_kind) == "side" else "mouth"
+        self.update()
+
+    def set_airflow_overlay_visible(self, visible: bool) -> None:
+        self.show_airflow_overlay = bool(visible)
+        self.update()
+
     def set_phoneme(self, phoneme: ArticulationPhoneme) -> None:
         self.phoneme = phoneme.clamped()
         self.update()
+
+    def _render_svg_view(self, painter: QPainter, rect: QRectF) -> bool:
+        if self.display_mode != "Anatomical":
+            return False
+        state = SpeechOrganState.from_articulation(self.phoneme)
+        label = f"{self.motion_current_name} → {self.motion_next_name} • {int(self.motion_transition_progress * 100)}%"
+        svg = (
+            vocal_tract_side_svg(state, overlay=self.show_airflow_overlay, label=f"Vocal Tract Cutaway • {label}")
+            if self.svg_view_kind == "side"
+            else anatomical_mouth_svg(state, overlay=self.show_airflow_overlay, label=f"Anatomical Mouth • {label}")
+        )
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        if not renderer.isValid():
+            return False
+        painter.fillRect(self.rect(), QColor("#fff7e6"))
+        renderer.render(painter, rect)
+        return True
 
     def set_motion_state(
         self,
@@ -5649,8 +5686,10 @@ class VocalTractCanvas(QWidget):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#fff7e6"))
         rect = QRectF(self.rect()).adjusted(28, 24, -28, -24)
+        if self._render_svg_view(painter, rect):
+            return
+        painter.fillRect(self.rect(), QColor("#fff7e6"))
 
         p = self.phoneme
         mouth_open = float(np.clip(p.mouth_open, 0.0, 1.0))
@@ -6715,6 +6754,11 @@ class WaveToyWindow(QMainWindow):
         self.current_phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
         self.saved_phonemes: List[ArticulationPhoneme] = []
         self.articulation_canvas: VocalTractCanvas | None = None
+        self.articulation_display_mode_combo: QComboBox | None = None
+        self.articulation_airflow_overlay_checkbox: QCheckBox | None = None
+        self.articulation_side_canvas: VocalTractCanvas | None = None
+        self.speech_diagnostics_dock: QDockWidget | None = None
+        self.speech_diagnostics_text: QTextEdit | None = None
         self.articulation_name_label: QLabel | None = None
         self.articulation_ipa_label: QLabel | None = None
         self.articulation_summary_label: QLabel | None = None
@@ -6745,6 +6789,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_envelope_canvas: ArticulationTrackCanvas | None = None
         self.articulation_formant_canvas: ArticulationTrackCanvas | None = None
         self.articulation_motion_canvas: VocalTractCanvas | None = None
+        self.articulation_motion_side_canvas: VocalTractCanvas | None = None
         self.articulation_motion_status_label: QLabel | None = None
         self.articulation_smooth_transitions_checkbox: QCheckBox | None = None
         self.continuous_debug_bypass_formants_checkbox: QCheckBox | None = None
@@ -6833,13 +6878,31 @@ class WaveToyWindow(QMainWindow):
 
         self._build_actions()
         self._build_ui()
+        self._build_speech_diagnostics_dock()
         self._build_shortcuts()
         self._apply_style()
         self._sync_loop_buttons()
         self._sync_note_to_pitch()
         self._generate_now(reason="startup", update_message=True, force=True)
 
+    def _build_speech_diagnostics_dock(self) -> None:
+        """Create the optional read-only speech diagnostics dock."""
+        self.speech_diagnostics_dock = QDockWidget("Speech Diagnostics", self)
+        self.speech_diagnostics_dock.setObjectName("speechDiagnosticsDock")
+        self.speech_diagnostics_text = QTextEdit()
+        self.speech_diagnostics_text.setReadOnly(True)
+        self.speech_diagnostics_text.setMinimumWidth(320)
+        self.speech_diagnostics_dock.setWidget(self.speech_diagnostics_text)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.speech_diagnostics_dock)
+        self.speech_diagnostics_dock.hide()
+        self._update_speech_diagnostics_panel(self.current_phoneme)
+
     def _build_actions(self) -> None:
+        view_menu = self.menuBar().addMenu("View")
+        diagnostics_action = QAction("Speech Diagnostics", self)
+        diagnostics_action.triggered.connect(lambda _checked=False: self.speech_diagnostics_dock.show() if self.speech_diagnostics_dock is not None else None)
+        view_menu.addAction(diagnostics_action)
+
         about = QAction("About WaveToy", self)
         about.triggered.connect(self._show_about)
         self.menuBar().addMenu("Help").addAction(about)
@@ -7957,6 +8020,23 @@ class WaveToyWindow(QMainWindow):
         source_layout.addWidget(self.articulation_source_badge_label)
         explorer_layout.addWidget(source_panel)
 
+        anatomy_controls = QWidget()
+        anatomy_controls.setObjectName("articulationStatusStrip")
+        anatomy_controls_layout = QHBoxLayout(anatomy_controls)
+        anatomy_controls_layout.setContentsMargins(10, 6, 10, 6)
+        anatomy_controls_layout.setSpacing(8)
+        anatomy_controls_layout.addWidget(QLabel("👄 Display"))
+        self.articulation_display_mode_combo = QComboBox()
+        self.articulation_display_mode_combo.addItems(["Simple", "Anatomical"])
+        self.articulation_display_mode_combo.currentTextChanged.connect(self._set_articulation_display_mode)
+        self.articulation_airflow_overlay_checkbox = QCheckBox("Airflow overlay")
+        self.articulation_airflow_overlay_checkbox.setChecked(True)
+        self.articulation_airflow_overlay_checkbox.toggled.connect(self._set_articulation_airflow_overlay)
+        anatomy_controls_layout.addWidget(self.articulation_display_mode_combo)
+        anatomy_controls_layout.addWidget(self.articulation_airflow_overlay_checkbox)
+        anatomy_controls_layout.addStretch(1)
+        explorer_layout.addWidget(anatomy_controls)
+
         self.articulation_canvas = VocalTractCanvas()
         self.articulation_canvas.setMinimumHeight(360)
         self.articulation_canvas.setMaximumHeight(460)
@@ -8466,9 +8546,18 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_status_label.setWordWrap(True)
         motion_layout.addWidget(self.articulation_motion_status_label)
         self.articulation_motion_canvas = VocalTractCanvas()
+        if self.articulation_display_mode_combo is not None:
+            self.articulation_motion_canvas.set_display_mode(self.articulation_display_mode_combo.currentText())
         self.articulation_motion_canvas.setMinimumSize(QSize(620, 430))
         self.articulation_motion_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         motion_layout.addWidget(self.articulation_motion_canvas)
+
+        self.articulation_motion_side_canvas = VocalTractCanvas()
+        self.articulation_motion_side_canvas.set_svg_view_kind("side")
+        self.articulation_motion_side_canvas.set_display_mode("Anatomical")
+        self.articulation_motion_side_canvas.setMinimumSize(QSize(620, 320))
+        self.articulation_motion_side_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        motion_layout.addWidget(CollapsibleSection("Vocal tract side-cutaway (SVG)", self.articulation_motion_side_canvas, expanded=False))
         chain_layout.addWidget(motion_card)
         left.addWidget(chain_card)
         self._refresh_articulation_chain_cards()
@@ -8808,6 +8897,51 @@ class WaveToyWindow(QMainWindow):
         if self.phoneme_loop_enabled:
             self._play_phoneme_preview(rate_limit=False)
 
+    def _set_articulation_display_mode(self, mode: str) -> None:
+        for canvas in (self.articulation_canvas, self.articulation_motion_canvas, self.graphical_vocal_canvas, self.graphical_chain_mouth_canvas):
+            if canvas is not None:
+                canvas.set_display_mode(mode)
+
+    def _set_articulation_airflow_overlay(self, visible: bool) -> None:
+        for canvas in (self.articulation_canvas, self.articulation_motion_canvas, self.articulation_motion_side_canvas, self.graphical_vocal_canvas, self.graphical_chain_mouth_canvas):
+            if canvas is not None:
+                canvas.set_airflow_overlay_visible(visible)
+
+    def _speech_organ_state_for_phoneme(self, phoneme: ArticulationPhoneme) -> SpeechOrganState:
+        return SpeechOrganState.from_articulation(phoneme, voiced_gain=self._continuous_voiced_gain(phoneme))
+
+    def _update_speech_diagnostics_panel(
+        self,
+        phoneme: ArticulationPhoneme,
+        target_name: str = "—",
+        transition_model: str = "idle",
+        transition_progress: float = 0.0,
+    ) -> None:
+        if self.speech_diagnostics_text is None:
+            return
+        state = self._speech_organ_state_for_phoneme(phoneme)
+        metrics = state.summary_metrics()
+        profile = self.articulation_word_render_settings.get("voice_profile", "Neutral")
+        voice_svg = voice_source_svg(state, DEFAULT_VOICE_SOURCE_PROFILE.to_json_dict())
+        lines = [
+            "Speech Diagnostics (read-only)",
+            f"active_phoneme: {phoneme.name}",
+            f"target_phoneme: {target_name}",
+            f"transition_model: {transition_model}",
+            f"transition_progress: {float(np.clip(transition_progress, 0.0, 1.0)):.2f}",
+            f"jaw_open: {metrics['jaw_open']:.2f}",
+            f"lip_rounding: {metrics['lip_rounding']:.2f}",
+            f"tongue_frontness: {metrics['tongue_frontness']:.2f}",
+            f"tongue_height: {metrics['tongue_height']:.2f}",
+            f"voiced_gain: {metrics['voiced_gain']:.2f}",
+            f"airflow: {metrics['airflow']:.2f}",
+            f"voice_source_profile: {profile}",
+            "",
+            "Voice-source SVG values: vocal fold tension, thickness, glottal closure, breathiness, rasp, jitter, shimmer",
+            voice_svg,
+        ]
+        self.speech_diagnostics_text.setPlainText("\n".join(lines))
+
     def _update_articulation_preview(self, regenerate: bool = False) -> None:
         p = self.current_phoneme.clamped()
         if self.articulation_name_label is not None:
@@ -8851,6 +8985,7 @@ class WaveToyWindow(QMainWindow):
         for key, label in self.articulation_value_labels.items():
             value = self._articulation_slider_value(key)
             label.setText(f"{value:.0f} Hz" if key == "voice_pitch" else f"{value:.2f}")
+        self._update_speech_diagnostics_panel(p)
         if regenerate:
             self.phoneme_preview_audio = self._render_articulation_with_source(p)
 
@@ -9803,16 +9938,22 @@ class WaveToyWindow(QMainWindow):
             self._refresh_articulation_chain_cards()
             self._refresh_articulation_motion_timeline()
 
-    def _viseme_name_for_phoneme(self, phoneme: ArticulationPhoneme) -> str:
-        if phoneme.phoneme_family == "vowel":
-            return "open_vowel" if phoneme.mouth_open > 0.55 else "narrow_vowel"
-        if phoneme.phoneme_family == "nasal":
+    def _viseme_name_for_state(self, state: SpeechOrganState, phoneme_family: str = "") -> str:
+        if state.velum_open > 0.45 or state.nasal_airflow > 0.25:
             return "nasal"
-        if phoneme.phoneme_family in {"stop", "affricate"}:
+        if state.closure_strength > 0.55:
             return "closure"
-        if phoneme.lip_rounding > 0.55:
+        if state.lip_rounding > 0.55:
             return "rounded"
-        return phoneme.phoneme_family or "neutral"
+        if state.jaw_open > 0.55:
+            return "open_vowel"
+        if state.lip_open < 0.28:
+            return "narrow_vowel"
+        return phoneme_family or "neutral"
+
+    def _viseme_name_for_phoneme(self, phoneme: ArticulationPhoneme) -> str:
+        """Compatibility layer for callers that still pass phoneme objects."""
+        return self._viseme_name_for_state(self._speech_organ_state_for_phoneme(phoneme), phoneme.phoneme_family or "neutral")
 
     def _build_viseme_frames(self, frame_rate: float = 24.0) -> List[Dict[str, object]]:
         segments, total_ms = self._articulation_motion_timeline()
@@ -9823,11 +9964,14 @@ class WaveToyWindow(QMainWindow):
         t = 0.0
         while t <= max(1, total_ms) + 0.01:
             phoneme, _kind, _label, transition_progress, _duration_ms, _index, _in_transition = self._motion_state_at_ms(t)
+            state = self._speech_organ_state_for_phoneme(phoneme)
+            metrics = state.summary_metrics()
             frame = VisemeFrame(
-                time_ms=round(t, 3), phoneme=phoneme.name, viseme=self._viseme_name_for_phoneme(phoneme),
-                mouth_open=float(phoneme.mouth_open), lip_rounding=float(phoneme.lip_rounding), tongue_height=float(phoneme.tongue_height),
-                tongue_frontness=float(phoneme.tongue_frontness), nasal_open=float(phoneme.nasal_open), closure=float(phoneme.closure),
-                voiced_gain=float(self._continuous_voiced_gain(phoneme)), airflow=float(phoneme.air_pressure), transition_progress=float(transition_progress),
+                time_ms=round(t, 3), phoneme=phoneme.name, viseme=self._viseme_name_for_state(state, phoneme.phoneme_family),
+                mouth_open=float(state.jaw_open), lip_rounding=float(state.lip_rounding), tongue_height=float(metrics["tongue_height"]),
+                tongue_frontness=float(state.tongue_frontness), nasal_open=float(state.velum_open), closure=float(state.closure_strength),
+                voiced_gain=float(state.voiced_gain), airflow=float(state.airflow), transition_progress=float(transition_progress),
+                speech_organ_state=state.to_json_dict(),
             )
             frames.append(frame.to_json_dict())
             t += step_ms
@@ -9869,6 +10013,9 @@ class WaveToyWindow(QMainWindow):
         payload = {
             "schema": "wavetoy.animation_export.v1", "version": "0.1-foundation", "created_at": datetime.now(timezone.utc).isoformat(), "frame_rate": 24, "duration_ms": duration_ms, "render_mode": self._articulation_word_render_mode(), "phoneme_sequence": self._speech_display_sequence_for_chain(),
             "phoneme_timeline": [item.to_json_dict() for item in self.articulation_chain_items], "viseme_timeline": frames,
+            "speech_organ_state_frames": [{"time_ms": f["time_ms"], "state": f.get("speech_organ_state", {})} for f in frames],
+            "viseme_frames": frames, "phoneme_frames": [item.to_json_dict() for item in self.articulation_chain_items],
+            "timing_frames": [{"time_ms": f["time_ms"], "transition_progress": f["transition_progress"]} for f in frames],
             "mouth_open_curve": [[f["time_ms"], f["mouth_open"]] for f in frames], "lip_rounding_curve": [[f["time_ms"], f["lip_rounding"]] for f in frames],
             "tongue_height_curve": [[f["time_ms"], f["tongue_height"]] for f in frames], "tongue_frontness_curve": [[f["time_ms"], f["tongue_frontness"]] for f in frames],
             "nasal_open_curve": [[f["time_ms"], f["nasal_open"]] for f in frames], "closure_curve": [[f["time_ms"], f["closure"]] for f in frames],
@@ -9984,6 +10131,8 @@ class WaveToyWindow(QMainWindow):
         _segments_for_total, total_for_scrub = self._articulation_motion_timeline()
         self.articulation_playhead_ms = float(np.clip(elapsed_ms, 0.0, max(1, total_for_scrub)))
         self.articulation_motion_canvas.set_motion_state(phoneme, current_name, next_name, transition_progress, playhead, transition_ms, in_transition)
+        if self.articulation_motion_side_canvas is not None:
+            self.articulation_motion_side_canvas.set_motion_state(phoneme, current_name, next_name, transition_progress, playhead, transition_ms, in_transition)
         self._refresh_articulation_motion_timeline()
         f1, f2, f3 = formants_from_articulation(phoneme)
         values = ", ".join(f"{name} {getattr(phoneme, name):.2f}" for name in ("mouth_open", "tongue_height", "tongue_frontness", "lip_rounding"))
@@ -10005,6 +10154,10 @@ class WaveToyWindow(QMainWindow):
             self.articulation_motion_status_label.setText(status)
         if self.articulation_scrub_label is not None:
             self.articulation_scrub_label.setText(status)
+        transition_model = "transition" if in_transition else "hold"
+        if active_model_text:
+            transition_model = active_model_text.strip(" •")
+        self._update_speech_diagnostics_panel(phoneme, next_name, transition_model, transition_progress)
 
     def _start_articulation_motion(self, *, loop: bool = False, speed: float = 1.0, audio: np.ndarray | None = None) -> None:
         if not self.articulation_chain_items:
