@@ -41,7 +41,7 @@ import time
 import uuid
 import wave
 from datetime import datetime, timezone
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -799,6 +799,149 @@ def articulation_curve_progress(value: float, curve: str = ARTICULATION_DEFAULT_
     return smoothstep(t)
 
 
+
+
+@dataclass(frozen=True)
+class PhonemePairTransitionModel:
+    """Render-only phoneme-pair transition behavior for Continuous Mouth Motion."""
+
+    model_id: str
+    from_family: str
+    to_family: str
+    default_transition_ms: int
+    curve: str = ARTICULATION_DEFAULT_TRANSITION_CURVE
+    formant_motion_weight: float = 1.0
+    voicing_blend_weight: float = 1.0
+    airflow_blend_weight: float = 1.0
+    closure_preservation: float = 0.0
+    burst_preservation: float = 0.0
+    nasal_decay: float = 0.0
+    frication_hold: float = 0.0
+    notes: str = ""
+    from_phoneme_optional: str | None = None
+    to_phoneme_optional: str | None = None
+
+    def clamped(self) -> "PhonemePairTransitionModel":
+        curve = self.curve if self.curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE
+        return replace(
+            self,
+            from_family=str(self.from_family or "any").lower(),
+            to_family=str(self.to_family or "any").lower(),
+            default_transition_ms=int(np.clip(int(self.default_transition_ms), 0, 250)),
+            curve=curve,
+            formant_motion_weight=float(np.clip(self.formant_motion_weight, 0.0, 1.0)),
+            voicing_blend_weight=float(np.clip(self.voicing_blend_weight, 0.0, 1.0)),
+            airflow_blend_weight=float(np.clip(self.airflow_blend_weight, 0.0, 1.0)),
+            closure_preservation=float(np.clip(self.closure_preservation, 0.0, 1.0)),
+            burst_preservation=float(np.clip(self.burst_preservation, 0.0, 1.0)),
+            nasal_decay=float(np.clip(self.nasal_decay, 0.0, 1.0)),
+            frication_hold=float(np.clip(self.frication_hold, 0.0, 1.0)),
+            from_phoneme_optional=str(self.from_phoneme_optional).upper() if self.from_phoneme_optional else None,
+            to_phoneme_optional=str(self.to_phoneme_optional).upper() if self.to_phoneme_optional else None,
+        )
+
+
+def _transition_model(
+    model_id: str,
+    from_family: str,
+    to_family: str,
+    default_transition_ms: int,
+    curve: str,
+    *,
+    formant_motion_weight: float = 1.0,
+    voicing_blend_weight: float = 1.0,
+    airflow_blend_weight: float = 1.0,
+    closure_preservation: float = 0.0,
+    burst_preservation: float = 0.0,
+    nasal_decay: float = 0.0,
+    frication_hold: float = 0.0,
+    notes: str = "",
+) -> PhonemePairTransitionModel:
+    return PhonemePairTransitionModel(
+        model_id=model_id,
+        from_family=from_family,
+        to_family=to_family,
+        default_transition_ms=default_transition_ms,
+        curve=curve,
+        formant_motion_weight=formant_motion_weight,
+        voicing_blend_weight=voicing_blend_weight,
+        airflow_blend_weight=airflow_blend_weight,
+        closure_preservation=closure_preservation,
+        burst_preservation=burst_preservation,
+        nasal_decay=nasal_decay,
+        frication_hold=frication_hold,
+        notes=notes,
+    ).clamped()
+
+
+PHONEME_PAIR_TRANSITION_MODELS: Dict[str, PhonemePairTransitionModel] = {
+    "vowel_to_vowel": _transition_model("vowel_to_vowel", "vowel", "vowel", 70, "Smoothstep", airflow_blend_weight=0.25, notes="Smooth formant travel and continuous voicing."),
+    "vowel_to_stop": _transition_model("vowel_to_stop", "vowel", "stop", 18, "Ease In", closure_preservation=0.75, burst_preservation=1.0, notes="Prepare closure without washing out following stop."),
+    "stop_to_vowel": _transition_model("stop_to_vowel", "stop", "vowel", 35, "Ease Out", burst_preservation=1.0, voicing_blend_weight=0.75, formant_motion_weight=0.70, notes="Preserve release burst then open into vowel."),
+    "fricative_to_stop": _transition_model("fricative_to_stop", "fricative", "stop", 18, "Ease In", frication_hold=0.70, closure_preservation=0.85, burst_preservation=1.0, notes="Keep frication before stop closure."),
+    "stop_to_fricative": _transition_model("stop_to_fricative", "stop", "fricative", 22, "Ease Out", burst_preservation=0.85, airflow_blend_weight=0.90, notes="Release into controlled frication."),
+    "nasal_to_stop": _transition_model("nasal_to_stop", "nasal", "stop", 28, "Ease In Out", nasal_decay=0.70, closure_preservation=0.80, voicing_blend_weight=0.75, notes="Preserve nasal resonance into voiced stop onset."),
+    "liquid_to_vowel": _transition_model("liquid_to_vowel", "liquid", "vowel", 55, "Smoothstep", formant_motion_weight=0.85, voicing_blend_weight=1.0, notes="Let liquid color carry into vowel."),
+    "glide_to_vowel": _transition_model("glide_to_vowel", "glide", "vowel", 60, "Smoothstep", formant_motion_weight=1.0, voicing_blend_weight=1.0, notes="Smooth glide into target vowel."),
+    "vowel_to_fricative": _transition_model("vowel_to_fricative", "vowel", "fricative", 35, "Ease In", airflow_blend_weight=1.0, frication_hold=0.40, notes="Increase airflow without abrupt vowel cutoff."),
+    "stop_to_liquid": _transition_model("stop_to_liquid", "stop", "liquid", 45, "Ease Out", burst_preservation=0.80, formant_motion_weight=0.75, voicing_blend_weight=0.85, notes="Release a stop into liquid coloring without flattening the burst."),
+    "stop_to_glide": _transition_model("stop_to_glide", "stop", "glide", 45, "Ease Out", burst_preservation=0.75, formant_motion_weight=0.90, voicing_blend_weight=0.85, notes="Release a stop into a narrow glide target while preserving onset definition."),
+}
+
+PHONEME_PAIR_TRANSITION_OVERRIDES: Dict[Tuple[str, str], Dict[str, object]] = {
+    ("S", "T"): {"model": "fricative_to_stop", "frication_hold": 0.85, "closure_preservation": 0.90, "burst_preservation": 1.0},
+    ("T", "R"): {"model": "stop_to_liquid", "burst_preservation": 0.80, "formant_motion_weight": 0.75, "curve": "Ease Out"},
+    ("D", "Y"): {"model": "stop_to_glide", "burst_preservation": 0.65, "formant_motion_weight": 0.95, "curve": "Smoothstep"},
+    ("T", "Y"): {"model": "stop_to_glide", "burst_preservation": 0.85, "airflow_blend_weight": 0.75, "curve": "Ease Out"},
+    ("N", "D"): {"model": "nasal_to_stop", "nasal_decay": 0.85, "closure_preservation": 0.85, "voicing_blend_weight": 0.90},
+    ("M", "B"): {"model": "nasal_to_stop", "nasal_decay": 0.85, "closure_preservation": 0.90, "voicing_blend_weight": 0.90},
+    ("K", "Y"): {"model": "stop_to_glide", "formant_motion_weight": 0.95, "burst_preservation": 0.80, "curve": "Smoothstep"},
+}
+
+
+def phoneme_pair_transition_model(left: ArticulationPhoneme, right: ArticulationPhoneme) -> PhonemePairTransitionModel:
+    """Resolve the render-only transition model for a neighboring phoneme pair."""
+    left = left.clamped()
+    right = right.clamped()
+    key = (left.name.upper(), right.name.upper())
+    override = PHONEME_PAIR_TRANSITION_OVERRIDES.get(key)
+    if override:
+        base = PHONEME_PAIR_TRANSITION_MODELS[str(override.get("model", ""))]
+        updates = {name: value for name, value in override.items() if name != "model"}
+        return replace(base, **updates, from_phoneme_optional=key[0], to_phoneme_optional=key[1]).clamped()
+    model = PHONEME_PAIR_TRANSITION_MODELS.get(f"{left.phoneme_family}_to_{right.phoneme_family}")
+    if model is None and left.phoneme_family == "affricate":
+        model = PHONEME_PAIR_TRANSITION_MODELS.get(f"fricative_to_{right.phoneme_family}")
+    if model is None and right.phoneme_family == "affricate":
+        model = PHONEME_PAIR_TRANSITION_MODELS.get(f"{left.phoneme_family}_to_fricative")
+    if model is None:
+        legacy_ms = ARTICULATION_TRANSITION_RULE_MS.get((left.phoneme_family, right.phoneme_family), ARTICULATION_DEFAULT_TRANSITION_MS)
+        model = _transition_model(f"{left.phoneme_family}_to_{right.phoneme_family}_legacy", left.phoneme_family, right.phoneme_family, legacy_ms, ARTICULATION_DEFAULT_TRANSITION_CURVE, notes="Legacy fallback duration for pairs without a specific model.")
+    return model.clamped()
+
+
+def transition_model_diagnostics(left: ArticulationPhoneme, right: ArticulationPhoneme, explicit_ms: int | None = None, explicit_curve: str | None = None) -> Dict[str, object]:
+    model = phoneme_pair_transition_model(left, right)
+    duration_reason = "manual transition_to_next_ms override" if explicit_ms is not None else f"model default {model.default_transition_ms} ms for {model.from_family}→{model.to_family}"
+    curve_reason = "manual transition_curve override" if explicit_curve and explicit_curve != ARTICULATION_DEFAULT_TRANSITION_CURVE else f"model curve {model.curve}"
+    strength = max(
+        model.formant_motion_weight,
+        model.voicing_blend_weight,
+        model.airflow_blend_weight,
+        model.closure_preservation,
+        model.burst_preservation,
+        model.nasal_decay,
+        model.frication_hold,
+    )
+    return {
+        "transition_model": model.model_id,
+        "transition_model_id": model.model_id,
+        "transition_strength": round(float(np.clip(strength, 0.0, 1.0)), 3),
+        "transition_model_duration_reason": duration_reason,
+        "transition_model_curve_reason": curve_reason,
+        "transition_model_notes": model.notes,
+    }
+
 @dataclass
 class ArticulationBoundary:
     """Editable articulation boundary shared by timeline, renderer, and save files."""
@@ -929,16 +1072,65 @@ def apply_neighbor_coarticulation(phonemes: List[ArticulationPhoneme]) -> Tuple[
     return adjusted, item_diagnostics, pair_diagnostics
 
 
-def interpolate_articulation_phoneme(left: ArticulationPhoneme, right: ArticulationPhoneme, progress: float, curve: str = ARTICULATION_DEFAULT_TRANSITION_CURVE) -> ArticulationPhoneme:
+def interpolate_articulation_phoneme(
+    left: ArticulationPhoneme,
+    right: ArticulationPhoneme,
+    progress: float,
+    curve: str = ARTICULATION_DEFAULT_TRANSITION_CURVE,
+    transition_model: PhonemePairTransitionModel | None = None,
+) -> ArticulationPhoneme:
     """Return a clamped non-mutating slider snapshot between two phonemes."""
     start = left.clamped()
     end = right.clamped()
+    model = (transition_model or phoneme_pair_transition_model(start, end)).clamped()
     t = articulation_curve_progress(progress, curve)
+
+    def weighted_t(weight: float) -> float:
+        # A lower weight preserves more of the source articulation for the first
+        # half of the transition, then lets the target arrive late and cleanly.
+        weight = float(np.clip(weight, 0.0, 1.0))
+        return float(np.clip(t * weight + (t * t) * (1.0 - weight), 0.0, 1.0))
+
+    formant_t = weighted_t(model.formant_motion_weight)
+    voicing_t = weighted_t(model.voicing_blend_weight)
+    airflow_t = weighted_t(model.airflow_blend_weight)
     data = start.to_json_dict()
+    formant_fields = {"mouth_open", "tongue_height", "tongue_frontness", "lip_rounding", "teeth_gap"}
+    airflow_fields = {"air_pressure", "noise_color"}
     for field_name in ARTICULATION_INTERPOLATED_FIELDS:
-        data[field_name] = float(np.clip(float(getattr(start, field_name)) + (float(getattr(end, field_name)) - float(getattr(start, field_name))) * t, 0.0, 1.0))
-    data["voice_pitch"] = float(np.clip(start.voice_pitch + (end.voice_pitch - start.voice_pitch) * t, 60.0, 880.0))
-    data["noise_color"] = float(np.clip(start.noise_color + (end.noise_color - start.noise_color) * t, 0.0, 1.0))
+        field_t = t
+        if field_name in formant_fields:
+            field_t = formant_t
+        elif field_name in {"voice_strength"}:
+            field_t = voicing_t
+        elif field_name in airflow_fields:
+            field_t = airflow_t
+        data[field_name] = float(np.clip(float(getattr(start, field_name)) + (float(getattr(end, field_name)) - float(getattr(start, field_name))) * field_t, 0.0, 1.0))
+
+    if model.frication_hold > 0.0 and start.phoneme_family in {"fricative", "affricate", "vowel"} and end.phoneme_family in {"stop", "fricative", "affricate"}:
+        hold = model.frication_hold * (1.0 - t)
+        data["air_pressure"] = float(np.clip(max(float(data["air_pressure"]), start.air_pressure * hold), 0.0, 1.0))
+        data["teeth_gap"] = float(np.clip(max(float(data["teeth_gap"]), start.teeth_gap * hold), 0.0, 1.0))
+        data["noise_color"] = float(np.clip(max(float(data.get("noise_color", start.noise_color)), start.noise_color * hold), 0.0, 1.0))
+    if model.nasal_decay > 0.0 and start.phoneme_family == "nasal":
+        nasal_hold = model.nasal_decay * (1.0 - smoothstep(t))
+        data["nasal_open"] = float(np.clip(max(float(data["nasal_open"]), start.nasal_open * nasal_hold), 0.0, 1.0))
+    if model.closure_preservation > 0.0 and (start.phoneme_family == "stop" or end.phoneme_family == "stop"):
+        if end.phoneme_family == "stop":
+            prep = model.closure_preservation * smoothstep(t)
+            data["closure"] = float(np.clip(max(float(data["closure"]), end.closure * prep), 0.0, 1.0))
+        else:
+            carry = model.closure_preservation * (1.0 - smoothstep(t))
+            data["closure"] = float(np.clip(max(float(data["closure"]), start.closure * carry), 0.0, 1.0))
+    if model.burst_preservation > 0.0 and (start.phoneme_family == "stop" or end.phoneme_family == "stop"):
+        burst_source = start.burst_strength if start.phoneme_family == "stop" else end.burst_strength
+        preserve = model.burst_preservation * (1.0 - min(1.0, abs(t - 0.5) * 1.4))
+        data["burst_strength"] = float(np.clip(max(float(data["burst_strength"]), burst_source * preserve), 0.0, 1.0))
+
+    data["voice_pitch"] = float(np.clip(start.voice_pitch + (end.voice_pitch - start.voice_pitch) * voicing_t, 60.0, 880.0))
+    data["noise_color"] = float(np.clip(start.noise_color + (end.noise_color - start.noise_color) * airflow_t, 0.0, 1.0))
+    if model.frication_hold > 0.0 and start.phoneme_family in {"fricative", "affricate", "vowel"} and end.phoneme_family in {"stop", "fricative", "affricate"}:
+        data["noise_color"] = float(np.clip(max(float(data["noise_color"]), start.noise_color * model.frication_hold * (1.0 - t)), 0.0, 1.0))
     data["attack_ms"] = int(round(start.attack_ms + (end.attack_ms - start.attack_ms) * t))
     data["release_ms"] = int(round(start.release_ms + (end.release_ms - start.release_ms) * t))
     data["duration_ms"] = int(round(start.duration_ms + (end.duration_ms - start.duration_ms) * t))
@@ -1306,6 +1498,15 @@ CONTINUOUS_RENDER_TEST_CHAINS: Tuple[Tuple[str, ...], ...] = (
     ("SH", "IY"),
     ("TH", "IH", "S"),
     ("S", "T", "AA", "P"),
+    ("T", "R", "IY"),
+    ("D", "Y", "UW"),
+    ("T", "Y", "UW"),
+    ("N", "D", "AH"),
+    ("M", "B", "AH"),
+    ("K", "Y", "UW"),
+    ("AH", "IY"),
+    ("M", "AY"),
+    ("B", "OY"),
     ("D", "AE", "D"),
 )
 
@@ -5688,7 +5889,7 @@ class ArticulationTimelineCanvas(QWidget):
         for index, item in enumerate(self.items):
             total_ms += int(item.duration_ms or item.phoneme.duration_ms)
             if index < len(self.items) - 1:
-                total_ms += max(0, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS))
+                total_ms += self._transition_ms_for_item(item, self.items[index + 1])
         self.total_ms = max(1, total_ms)
         self.playhead_ms = float(np.clip(self.playhead_ms, 0.0, self.total_ms))
         self.setMinimumWidth(max(900, int(self.total_ms * self.zoom * 1.15)))
@@ -5722,7 +5923,8 @@ class ArticulationTimelineCanvas(QWidget):
             rects.append(("block", index, self._accented_block_rect(base_rect, float(getattr(item, "accentuation_db", 0.0)))))
             cursor += width
             if index < len(self.items) - 1:
-                transition = self._transition_ms_for_item(item)
+                next_item = self.items[index + 1] if index + 1 < len(self.items) else None
+                transition = self._transition_ms_for_item(item, next_item)
                 trans_width = max(1.0, transition * px)
                 rects.append(("transition", index, QRectF(cursor, lane.top() + 10, trans_width, lane.height() - 20)))
                 cursor += trans_width
@@ -5812,8 +6014,14 @@ class ArticulationTimelineCanvas(QWidget):
             phoneme = item.phoneme_for_render().clamped()
             gain = 10.0 ** (float(item.accentuation_db) / 20.0)
             if kind == "transition":
-                transition = self._transition_ms_for_item(item)
-                self.setToolTip(f"Transition {phoneme.name} → next: {transition} ms • curve {item.transition_curve}")
+                next_item = self.items[index + 1] if index + 1 < len(self.items) else None
+                transition = self._transition_ms_for_item(item, next_item)
+                curve = self._transition_curve_for_item(item, next_item)
+                model_text = ""
+                if next_item is not None:
+                    model = phoneme_pair_transition_model(phoneme, next_item.phoneme_for_render())
+                    model_text = f" • model {model.model_id}"
+                self.setToolTip(f"Transition {phoneme.name} → next: {transition} ms • curve {curve}{model_text}")
             else:
                 self.setToolTip(
                     f"{phoneme.name} /{phoneme.ipa}/ • duration {int(item.duration_ms or phoneme.duration_ms)} ms • "
@@ -5823,8 +6031,19 @@ class ArticulationTimelineCanvas(QWidget):
             return
         self.setToolTip("Ctrl/Shift + wheel zooms. Drag the red playhead to scrub, block bodies to reorder, block edges for duration, and dashed transition wedges for boundary length.")
 
-    def _transition_ms_for_item(self, item: ArticulationChainItem) -> int:
-        return max(0, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS))
+    def _transition_ms_for_item(self, item: ArticulationChainItem, next_item: ArticulationChainItem | None = None) -> int:
+        if item.transition_to_next_ms is not None:
+            return max(0, int(item.transition_to_next_ms))
+        if next_item is not None:
+            return max(0, int(phoneme_pair_transition_model(item.phoneme_for_render(), next_item.phoneme_for_render()).default_transition_ms))
+        return ARTICULATION_DEFAULT_TRANSITION_MS
+
+    def _transition_curve_for_item(self, item: ArticulationChainItem, next_item: ArticulationChainItem | None = None) -> str:
+        if item.transition_curve in ARTICULATION_TRANSITION_CURVES and item.transition_curve != ARTICULATION_DEFAULT_TRANSITION_CURVE:
+            return item.transition_curve
+        if next_item is not None:
+            return phoneme_pair_transition_model(item.phoneme_for_render(), next_item.phoneme_for_render()).curve
+        return item.transition_curve if item.transition_curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
         del event
@@ -5890,12 +6109,14 @@ class ArticulationTimelineCanvas(QWidget):
             item = self.items[index]
             phoneme = item.phoneme_for_render().clamped()
             if kind == "transition":
-                curve = item.transition_curve if item.transition_curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE
+                next_item = self.items[index + 1] if index + 1 < len(self.items) else None
+                curve = self._transition_curve_for_item(item, next_item)
                 painter.setBrush(QColor("#fff8d9"))
                 painter.setPen(QPen(QColor("#7b2cbf"), 2, Qt.DashLine))
                 painter.drawRoundedRect(rect, 10, 10)
                 painter.setPen(QPen(QColor("#7b2cbf"), 2))
-                transition = self._transition_ms_for_item(item)
+                next_item = self.items[index + 1] if index + 1 < len(self.items) else None
+                transition = self._transition_ms_for_item(item, next_item)
                 painter.drawText(rect.adjusted(2, 0, -2, 0), Qt.AlignCenter, f"↔ {transition} ms\n{curve.split()[0]}")
                 continue
             selected = index == self.selected_index
@@ -5991,7 +6212,14 @@ class ArticulationTrackCanvas(QWidget):
         end = max(start + 1.0, float(active["end"]))
         local = float(np.clip((elapsed_ms - start) / (end - start), 0.0, 1.0))
         if active["kind"] == "transition":
-            return interpolate_articulation_phoneme(active["from"], active["to"], local, str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE)))
+            model = active.get("transition_model_object")
+            return interpolate_articulation_phoneme(
+                active["from"],
+                active["to"],
+                local,
+                str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE)),
+                model if isinstance(model, PhonemePairTransitionModel) else None,
+            )
         return active["from"].clamped()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
@@ -9672,9 +9900,15 @@ class WaveToyWindow(QMainWindow):
     def _chain_transition_duration_ms(self, left: ArticulationChainItem, right: ArticulationChainItem) -> int:
         if left.transition_to_next_ms is not None:
             return int(left.transition_to_next_ms)
-        left_family = left.phoneme_for_render().phoneme_family
-        right_family = right.phoneme_for_render().phoneme_family
-        return int(ARTICULATION_TRANSITION_RULE_MS.get((left_family, right_family), ARTICULATION_DEFAULT_TRANSITION_MS))
+        model = phoneme_pair_transition_model(left.phoneme_for_render(), right.phoneme_for_render())
+        return int(model.default_transition_ms)
+
+    def _chain_transition_curve(self, left: ArticulationChainItem, right: ArticulationChainItem) -> str:
+        # Existing chains saved Smoothstep as the neutral default. Non-default
+        # user-selected curves still override the model curve.
+        if left.transition_curve in ARTICULATION_TRANSITION_CURVES and left.transition_curve != ARTICULATION_DEFAULT_TRANSITION_CURVE:
+            return left.transition_curve
+        return phoneme_pair_transition_model(left.phoneme_for_render(), right.phoneme_for_render()).curve
 
     def _articulation_motion_timeline(self, include_word_gaps: bool = False) -> Tuple[List[Dict[str, object]], int]:
         del include_word_gaps
@@ -9732,9 +9966,10 @@ class WaveToyWindow(QMainWindow):
         transition_duration_ms = self._chain_transition_duration_ms(self.articulation_chain_items[int(active["index"])], self.articulation_chain_items[int(active["index"]) + 1]) if int(active["index"]) < len(self.articulation_chain_items) - 1 else 0
         in_transition = active["kind"] == "transition"
         if in_transition:
-            phoneme = interpolate_articulation_phoneme(left, right, local, str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE)))
+            model = active.get("transition_model_object")
+            phoneme = interpolate_articulation_phoneme(left, right, local, str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE)), model if isinstance(model, PhonemePairTransitionModel) else None)
             next_name = right.name
-            transition_progress = local
+            transition_progress = articulation_curve_progress(local, str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE)))
         else:
             phoneme, _diphthong_diagnostics = apply_diphthong_transition_shape(left, local)
             next_index = int(active["index"]) + 1
@@ -9754,9 +9989,16 @@ class WaveToyWindow(QMainWindow):
         values = ", ".join(f"{name} {getattr(phoneme, name):.2f}" for name in ("mouth_open", "tongue_height", "tongue_frontness", "lip_rounding"))
         voiced_level = self._continuous_voiced_gain(phoneme)
         airflow_level = float(np.clip(phoneme.air_pressure, 0.0, 1.0))
+        active_model_text = ""
+        segments, _total_ms = self._articulation_motion_timeline()
+        for segment in segments:
+            if float(segment["start"]) <= self.articulation_playhead_ms <= float(segment["end"]):
+                if segment.get("kind") == "transition":
+                    active_model_text = f" • model {segment.get('transition_model_id', 'legacy')} strength {segment.get('transition_strength', 0.0)}"
+                break
         status = (
             f"Active phoneme {current_name} → target {next_name} • transition {transition_ms} ms • {'active' if in_transition else 'holding'} • "
-            f"progress {int(transition_progress * 100)}% • voiced level {voiced_level:.2f} • airflow level {airflow_level:.2f} • "
+            f"progress {int(transition_progress * 100)}%{active_model_text} • voiced level {voiced_level:.2f} • airflow level {airflow_level:.2f} • "
             f"playhead {int(playhead * 100)}% • {values} • F1/F2/F3 {f1:.0f}/{f2:.0f}/{f3:.0f} Hz"
         )
         if self.articulation_motion_status_label is not None:
@@ -10165,13 +10407,15 @@ class WaveToyWindow(QMainWindow):
         clips: List[np.ndarray] = []
         left_phoneme = left.phoneme_for_render()
         right_phoneme = right.phoneme_for_render()
+        model = phoneme_pair_transition_model(left_phoneme, right_phoneme)
+        curve = self._chain_transition_curve(left, right)
         for frame in range(frames):
             progress = (frame + 0.5) / frames
-            phoneme = interpolate_articulation_phoneme(left_phoneme, right_phoneme, progress)
+            phoneme = interpolate_articulation_phoneme(left_phoneme, right_phoneme, progress, curve, model)
             phoneme.duration_ms = max(80, frame_ms)
             rendered = self._render_articulation_with_source(phoneme)
             if rendered.size:
-                accent_db = float(left.accentuation_db) + (float(right.accentuation_db) - float(left.accentuation_db)) * articulation_curve_progress(progress, left.transition_curve)
+                accent_db = float(left.accentuation_db) + (float(right.accentuation_db) - float(left.accentuation_db)) * articulation_curve_progress(progress, curve)
                 rendered = (rendered * np.float32(self._accentuation_gain_for_db(accent_db))).astype(np.float32)
                 start = min(max(0, len(rendered) // 3), max(0, len(rendered) - frame_samples))
                 clips.append(rendered[start:start + frame_samples])
@@ -10228,7 +10472,12 @@ class WaveToyWindow(QMainWindow):
                 transition_ms = max(0, int(self._chain_transition_duration_ms(item, self.articulation_chain_items[index + 1])))
                 if transition_ms > 0:
                     next_phoneme = (render_phonemes[index + 1] if render_phonemes is not None and index + 1 < len(render_phonemes) else self._apply_voice_source_to_phoneme(self.articulation_chain_items[index + 1].phoneme_for_render())).clamped()
-                    transition_segment = {"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme, "curve": item.transition_curve, "accentuation_db": float(item.accentuation_db), "next_accentuation_db": float(self.articulation_chain_items[index + 1].accentuation_db)}
+                    model = phoneme_pair_transition_model(phoneme, next_phoneme)
+                    explicit_ms = item.transition_to_next_ms
+                    curve = self._chain_transition_curve(item, self.articulation_chain_items[index + 1])
+                    explicit_curve = item.transition_curve if item.transition_curve != ARTICULATION_DEFAULT_TRANSITION_CURVE else None
+                    transition_segment = {"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme, "curve": curve, "transition_model_object": model, "accentuation_db": float(item.accentuation_db), "next_accentuation_db": float(self.articulation_chain_items[index + 1].accentuation_db)}
+                    transition_segment.update(transition_model_diagnostics(phoneme, next_phoneme, explicit_ms, explicit_curve))
                     if (index, index + 1) in pair_diagnostics:
                         transition_segment.update(pair_diagnostics[(index, index + 1)])
                     segments.append(transition_segment)
@@ -10248,14 +10497,20 @@ class WaveToyWindow(QMainWindow):
         right = active["to"]
         if active["kind"] == "transition":
             curve = str(active.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE))
-            phoneme = interpolate_articulation_phoneme(left, right, local, curve)
+            model = active.get("transition_model_object")
+            model = model if isinstance(model, PhonemePairTransitionModel) else phoneme_pair_transition_model(left, right)
+            phoneme = interpolate_articulation_phoneme(left, right, local, curve, model)
             t = articulation_curve_progress(local, curve)
             left_voiced = _articulation_voiced_gain(left)
             right_voiced = _articulation_voiced_gain(right)
-            voiced_gain = float(left_voiced + (right_voiced - left_voiced) * t)
+            voice_t = float(np.clip(t * model.voicing_blend_weight + (t * t) * (1.0 - model.voicing_blend_weight), 0.0, 1.0))
+            air_t = float(np.clip(t * model.airflow_blend_weight + (t * t) * (1.0 - model.airflow_blend_weight), 0.0, 1.0))
+            voiced_gain = float(left_voiced + (right_voiced - left_voiced) * voice_t)
             left_noise = float(articulation_synthesis_debug(left).get("noise_gain", 0.0))
             right_noise = float(articulation_synthesis_debug(right).get("noise_gain", 0.0))
-            noise_gain = float(left_noise + (right_noise - left_noise) * t)
+            noise_gain = float(left_noise + (right_noise - left_noise) * air_t)
+            if model.frication_hold > 0.0:
+                noise_gain = max(noise_gain, left_noise * model.frication_hold * (1.0 - t))
         else:
             phoneme, diphthong_diagnostics = apply_diphthong_transition_shape(left, local)
             if diphthong_diagnostics:
@@ -10394,6 +10649,9 @@ class WaveToyWindow(QMainWindow):
             "formant_gain_ratio",
             "continuous_pitch_smoothing_ms",
             "transition_progress",
+            "transition_model",
+            "transition_model_id",
+            "transition_strength",
             "voiced_gain",
             "active_phoneme_accentuation_db",
             "max_accentuation_db",
@@ -10443,6 +10701,9 @@ class WaveToyWindow(QMainWindow):
             "pitch_error_percent",
             "active_phoneme",
             "transition_progress",
+            "transition_model",
+            "transition_model_id",
+            "transition_strength",
             "voiced_gain",
             "continuous_pitch_smoothing_ms",
             "formant_intensity",
@@ -10610,7 +10871,11 @@ class WaveToyWindow(QMainWindow):
         print(f"[WaveToy Envelope] render mode={ARTICULATION_WORD_RENDER_CONTINUOUS} phoneme_count={len(self.articulation_chain_items)} total_envelope_ms={total_ms} frame_count={frame_count}")
         for segment in segments:
             if segment["kind"] == "transition":
-                print(f"[WaveToy Envelope] transition {segment['from'].name}->{segment['to'].name} start_ms={segment['start']} end_ms={segment['end']} duration_ms={int(segment['end']) - int(segment['start'])}")
+                print(
+                    f"[WaveToy Envelope] transition {segment['from'].name}->{segment['to'].name} "
+                    f"start_ms={segment['start']} end_ms={segment['end']} duration_ms={int(segment['end']) - int(segment['start'])} "
+                    f"model={segment.get('transition_model_id')} strength={segment.get('transition_strength')}"
+                )
         for event in stop_events:
             print(f"[WaveToy Envelope] stop event phoneme={event['phoneme']} start_ms={event['start']} end_ms={event['end']} closure={event['closure']:.2f}")
         for event in burst_events:
@@ -10748,6 +11013,7 @@ class WaveToyWindow(QMainWindow):
                 diphthong_frame["active_phoneme"] = phoneme.name
                 diphthong_debug_frames.append(diphthong_frame)
             coarticulation_frame = {key: active.get(key) for key in ("coarticulation_pair", "coarticulation_strength", "coarticulation_type", "anticipatory_tongue_shift", "carryover_closure", "lip_rounding_carryover", "nasal_carryover", "voicing_carryover") if key in active}
+            transition_model_frame = {key: active.get(key) for key in ("transition_model", "transition_model_id", "transition_strength", "transition_model_duration_reason", "transition_model_curve_reason") if key in active}
             frame_debug.append({
                 "frame_index": frame_index,
                 "active_phoneme": phoneme.name,
@@ -10761,6 +11027,7 @@ class WaveToyWindow(QMainWindow):
                 "gain_applied": round(gain_applied, 6),
                 **diphthong_frame,
                 **coarticulation_frame,
+                **transition_model_frame,
             })
 
         smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
@@ -10931,6 +11198,10 @@ class WaveToyWindow(QMainWindow):
             "coarticulation_pair": next((item.get("coarticulation_pair") for item in frame_debug if item.get("coarticulation_pair")), None),
             "coarticulation_strength": next((item.get("coarticulation_strength") for item in frame_debug if item.get("coarticulation_pair")), None),
             "coarticulation_type": next((item.get("coarticulation_type") for item in frame_debug if item.get("coarticulation_pair")), None),
+            "transition_model_debug_frames": [item for item in frame_debug if item.get("transition_model_id")][:24],
+            "transition_model": next((item.get("transition_model") for item in frame_debug if item.get("transition_model_id")), None),
+            "transition_model_id": next((item.get("transition_model_id") for item in frame_debug if item.get("transition_model_id")), None),
+            "transition_strength": next((item.get("transition_strength") for item in frame_debug if item.get("transition_model_id")), None),
         }
         self._report_continuous_render_debug(metrics)
         print(
