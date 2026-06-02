@@ -186,6 +186,23 @@ ARTICULATION_INTERPOLATED_FIELDS = (
     "burst_strength",
     "nasal_open",
 )
+DIPHTHONG_TRANSITION_MAP = {
+    "AY": ("AH", "IY"),
+    "AW": ("AH", "UW"),
+    "OY": ("AO", "IY"),
+    "OW": ("AO", "UW"),
+    "EY": ("EH", "IY"),
+}
+DIPHTHONG_INTERPOLATED_FIELDS = (
+    "tongue_height",
+    "tongue_frontness",
+    "lip_rounding",
+    "mouth_open",
+    "nasal_open",
+    "closure",
+    "air_pressure",
+)
+DIPHTHONG_INTERPOLATION_CURVE = "Ease In Out"
 ARTICULATION_TRANSITION_RULE_MS = {
     ("vowel", "vowel"): 70,
     ("vowel", "glide"): 60,
@@ -771,6 +788,43 @@ class ArticulationBoundary:
     def clamped(self) -> "ArticulationBoundary":
         curve = self.transition_curve if self.transition_curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE
         return ArticulationBoundary(transition_ms=int(np.clip(int(self.transition_ms), 0, 250)), transition_curve=curve)
+
+
+def diphthong_transition_targets(symbol: str) -> Tuple[ArticulationPhoneme, ArticulationPhoneme] | None:
+    """Return non-mutating vowel targets for a diphthong symbol when defined."""
+    mapping = DIPHTHONG_TRANSITION_MAP.get(str(symbol).upper())
+    if mapping is None:
+        return None
+    start_symbol, end_symbol = mapping
+    if start_symbol not in VOWEL_PRESETS or end_symbol not in VOWEL_PRESETS:
+        return None
+    return _phoneme_from_preset_symbol(start_symbol).clamped(), _phoneme_from_preset_symbol(end_symbol).clamped()
+
+
+def apply_diphthong_transition_shape(phoneme: ArticulationPhoneme, progress: float, curve: str = DIPHTHONG_INTERPOLATION_CURVE) -> Tuple[ArticulationPhoneme, Dict[str, object]]:
+    """Return a render-only internal vowel morph for diphthongs without splitting the timeline phoneme."""
+    base = phoneme.clamped()
+    targets = diphthong_transition_targets(base.name)
+    if targets is None:
+        return base, {}
+    start, end = targets
+    t = articulation_curve_progress(progress, curve)
+    data = base.to_json_dict()
+    for field_name in DIPHTHONG_INTERPOLATED_FIELDS:
+        data[field_name] = float(np.clip(float(getattr(start, field_name)) + (float(getattr(end, field_name)) - float(getattr(start, field_name))) * t, 0.0, 1.0))
+    data["voice_strength"] = float(np.clip(start.voice_strength + (end.voice_strength - start.voice_strength) * t, 0.0, 1.0))
+    data["noise_color"] = float(np.clip(start.noise_color + (end.noise_color - start.noise_color) * t, 0.0, 1.0))
+    data["voice_pitch"] = float(np.clip(base.voice_pitch, 60.0, 880.0))
+    data["name"] = base.name
+    data["ipa"] = base.ipa
+    data["phoneme_family"] = base.phoneme_family
+    diagnostics = {
+        "diphthong_start_vowel": start.name,
+        "diphthong_end_vowel": end.name,
+        "diphthong_progress": round(float(t), 3),
+        "diphthong_interpolation_curve": curve,
+    }
+    return ArticulationPhoneme.from_json_dict(data).clamped(), diagnostics
 
 
 def interpolate_articulation_phoneme(left: ArticulationPhoneme, right: ArticulationPhoneme, progress: float, curve: str = ARTICULATION_DEFAULT_TRANSITION_CURVE) -> ArticulationPhoneme:
@@ -7972,11 +8026,14 @@ class WaveToyWindow(QMainWindow):
         picker_row = QHBoxLayout()
         self.cv_vc_consonant_combo = QComboBox()
         self.cv_vc_consonant_combo.addItems(list(CV_VC_CONSONANTS))
+        self.cv_vc_consonant_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
         self.cv_vc_vowel_combo = QComboBox()
         self.cv_vc_vowel_combo.addItems(list(CV_VC_VOWELS))
+        self.cv_vc_vowel_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
         self.cv_vc_pattern_combo = QComboBox()
-        self.cv_vc_pattern_combo.addItems(["CV", "VC", "All"])
+        self.cv_vc_pattern_combo.addItems(["CV", "VC", "All: CV + VC"])
         self.cv_vc_pattern_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
+        self.cv_vc_pattern_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
         for label_text, combo in (("Consonant", self.cv_vc_consonant_combo), ("Vowel", self.cv_vc_vowel_combo), ("Pattern", self.cv_vc_pattern_combo)):
             label = QLabel(label_text)
             label.setObjectName("timelineInspectorText")
@@ -8563,6 +8620,11 @@ class WaveToyWindow(QMainWindow):
         data["voice_strength"] = float(np.clip(float(data.get("voice_strength", 0.65)) * (0.85 + float(profile.glottal_closure) * 0.30), 0.0, 1.0))
         data["air_pressure"] = float(np.clip(float(data.get("air_pressure", 0.45)) + float(profile.breathiness) * 0.12 + float(profile.rasp) * 0.06, 0.0, 1.0))
         data["noise_color"] = float(np.clip(float(data.get("noise_color", 0.50)) + float(profile.breathiness) * 0.10 + float(profile.rasp) * 0.12, 0.0, 1.0))
+        print(
+            f"[WaveToy Voice Source] applied profile_id={profile.profile_id} pitch_bias={pitch_bias:.4f} "
+            f"breathiness={float(profile.breathiness):.3f} rasp={float(profile.rasp):.3f} "
+            f"glottal_closure={float(profile.glottal_closure):.3f} render_copy_only=True"
+        )
         return ArticulationPhoneme.from_json_dict(data)
 
     def _render_articulation_with_source(self, phoneme: ArticulationPhoneme) -> np.ndarray:
@@ -8784,6 +8846,7 @@ class WaveToyWindow(QMainWindow):
             value_label.setText(f"{value} ms")
         self._mark_articulation_word_dirty()
         self._refresh_articulation_motion_timeline()
+        self._schedule_live_preview("selected_transition")
 
     def _set_chain_item_duration_ms(self, index: int, raw_value: int) -> None:
         if index < 0 or index >= len(self.articulation_chain_items):
@@ -8808,6 +8871,7 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._scrub_articulation_playhead(self.articulation_playhead_ms)
+        self._schedule_live_preview("selected_transition")
 
     def _set_selected_boundary_curve(self, curve: str) -> None:
         if self.articulation_selected_chain_index is None:
@@ -9187,10 +9251,14 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_settings["continuous_pitch_smoothing_ms"] = int(np.clip(value, 0, 120))
         self._mark_articulation_word_dirty()
 
+    def _normalized_cv_vc_pattern(self) -> str:
+        pattern = self.cv_vc_pattern_combo.currentText() if self.cv_vc_pattern_combo is not None else "CV"
+        return "All" if str(pattern).startswith("All") else str(pattern)
+
     def _selected_cv_vc_symbols(self) -> Tuple[str, str]:
         consonant = self.cv_vc_consonant_combo.currentText() if self.cv_vc_consonant_combo is not None else CV_VC_CONSONANTS[0]
         vowel = self.cv_vc_vowel_combo.currentText() if self.cv_vc_vowel_combo is not None else CV_VC_VOWELS[0]
-        pattern = self.cv_vc_pattern_combo.currentText() if self.cv_vc_pattern_combo is not None else "CV"
+        pattern = self._normalized_cv_vc_pattern()
         return (vowel, consonant) if pattern == "VC" else (consonant, vowel)
 
     def _update_cv_vc_filter_status(self, *_args: object) -> None:
@@ -9199,7 +9267,7 @@ class WaveToyWindow(QMainWindow):
         query = (self.cv_vc_search_edit.text() if self.cv_vc_search_edit is not None else "").strip().upper()
         starts = self.cv_vc_starts_with_combo.currentText() if self.cv_vc_starts_with_combo is not None else "Any start"
         contains = self.cv_vc_contains_combo.currentText() if self.cv_vc_contains_combo is not None else "Any contains"
-        pattern = self.cv_vc_pattern_combo.currentText() if self.cv_vc_pattern_combo is not None else "All"
+        pattern = self._normalized_cv_vc_pattern()
         matches = []
         for preset in CV_VC_COMBINATION_LIBRARY:
             symbols = [preset.first_phoneme, preset.second_phoneme]
@@ -9214,7 +9282,8 @@ class WaveToyWindow(QMainWindow):
                 continue
             matches.append(preset)
         examples = ", ".join(p.label for p in matches[:5]) if matches else "none"
-        self.cv_vc_filter_status_label.setText(f"Filter: {len(matches)} matches • examples: {examples}")
+        all_note = " • Will use both C+V and V+C for selected pair." if pattern == "All" else ""
+        self.cv_vc_filter_status_label.setText(f"Filter: {len(matches)} matches • examples: {examples}{all_note}")
 
     def _load_cv_vc_combination_to_chain(self, checked: bool = False) -> None:
         del checked
@@ -9243,13 +9312,18 @@ class WaveToyWindow(QMainWindow):
     def _run_live_preview(self) -> None:
         if not getattr(self, "live_preview_enabled", False):
             return
-        if not self._can_start_playback():
-            self._schedule_live_preview(self.live_preview_target)
-            return
-        self._stop_phoneme_preview()
         target = getattr(self, "live_preview_target", "selected_timeline_fragment")
+        selected_index = self.articulation_selected_chain_index if isinstance(self.articulation_selected_chain_index, int) else None
+        if self.playback_start_monotonic is not None:
+            print(f"[WaveToy Live Preview] skip target={target} selected_index={selected_index} reason=playback_busy")
+            return
+        if not self._can_start_playback(show_status=False):
+            print(f"[WaveToy Live Preview] skip target={target} selected_index={selected_index} reason=rate_limited_or_refused")
+            return
         audio = np.zeros((0, 2), dtype=np.float32)
-        if target in {"selected_timeline_fragment", "selected_transition"} and self._selected_chain_item() is not None:
+        if target == "selected_transition":
+            audio = self._render_selected_transition_preview_audio()
+        elif target == "selected_timeline_fragment" and self._selected_chain_item() is not None:
             item = self._selected_chain_item()
             if item is not None:
                 audio = self._apply_chain_item_accentuation(self._render_articulation_with_source(item.phoneme_for_render()), item)
@@ -9258,21 +9332,42 @@ class WaveToyWindow(QMainWindow):
         else:
             self.current_phoneme = self._phoneme_from_articulation_ui()
             audio = self._render_articulation_with_source(self.current_phoneme)
+        duration = len(audio) / SAMPLE_RATE if audio.size else 0.0
+        print(f"[WaveToy Live Preview] target={target} selected_index={selected_index} render_mode={self._articulation_word_render_mode()} duration={duration:.3f}s samples={len(audio)}")
         if audio.size:
-            print(f"[WaveToy Live Preview] target={target} samples={len(audio)}")
+            self._stop_phoneme_preview()
             self._play_audio_array(audio)
+            self._start_playback_tracking(len(audio), SAMPLE_RATE)
+
+    def _render_selected_transition_preview_audio(self) -> np.ndarray:
+        selected = self.articulation_selected_chain_index
+        if not isinstance(selected, int) or selected < 0 or selected >= len(self.articulation_chain_items):
+            return np.zeros((0, 2), dtype=np.float32)
+        end_index = min(len(self.articulation_chain_items), selected + 2)
+        saved_items = list(self.articulation_chain_items)
+        saved_selection = self.articulation_selected_chain_index
+        try:
+            self.articulation_chain_items = [ArticulationChainItem.from_json_dict(item.to_json_dict()) for item in saved_items[selected:end_index]]
+            self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+            return self._render_articulation_word() if self.articulation_chain_items else np.zeros((0, 2), dtype=np.float32)
+        finally:
+            self.articulation_chain_items = saved_items
+            self.articulation_selected_chain_index = saved_selection
 
     def _selected_cv_vc_presets(self) -> List[PhonemeCombinationPreset]:
         consonant = self.cv_vc_consonant_combo.currentText() if self.cv_vc_consonant_combo is not None else CV_VC_CONSONANTS[0]
         vowel = self.cv_vc_vowel_combo.currentText() if self.cv_vc_vowel_combo is not None else CV_VC_VOWELS[0]
-        pattern = self.cv_vc_pattern_combo.currentText() if self.cv_vc_pattern_combo is not None else "CV"
+        pattern = self._normalized_cv_vc_pattern()
         wanted_patterns = ["CV", "VC"] if pattern == "All" else [pattern]
         matches = [p for p in CV_VC_COMBINATION_LIBRARY if p.pattern_type in wanted_patterns and set(p.phoneme_sequence) == {consonant, vowel}]
         return matches or [p for p in CV_VC_COMBINATION_LIBRARY if p.first_phoneme == consonant and p.second_phoneme == vowel][:1]
 
     def _cv_vc_items_for_presets(self, presets: List[PhonemeCombinationPreset]) -> List[ArticulationChainItem]:
         items: List[ArticulationChainItem] = []
-        for preset in presets:
+        for preset_index, preset in enumerate(presets):
+            if preset_index > 0 and items:
+                items[-1].transition_to_next_ms = min(45, max(20, int(preset.transition_ms)))
+                items[-1].transition_curve = "Ease In Out"
             for symbol in preset.phoneme_sequence:
                 phoneme = _phoneme_from_preset_symbol(symbol)
                 items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=phoneme.duration_ms, transition_to_next_ms=preset.transition_ms, transition_curve=preset.transition_curve))
@@ -9312,13 +9407,27 @@ class WaveToyWindow(QMainWindow):
 
     def _add_cv_vc_combination_to_speech_assets(self, checked: bool = False) -> None:
         del checked
-        audio = self._render_cv_vc_combination_audio()
         presets = self._selected_cv_vc_presets()
-        labels = ", ".join(p.label for p in presets)
-        metadata = {"cv_vc_presets": [asdict(preset) for preset in presets], "render_mode": self._articulation_word_render_mode(), "voice_source_profile": self.voice_source_profile.to_json_dict()}
-        sequence = " + ".join(symbol for preset in presets for symbol in preset.phoneme_sequence)
-        ipa = " ".join(f"/{_phoneme_from_preset_symbol(symbol).ipa}/" for preset in presets for symbol in preset.phoneme_sequence)
-        self._add_speech_bin_item(labels or "CV/VC Combination", "cv_vc", audio, ipa, sequence, metadata, "cv_vc_library")
+        for preset in presets:
+            audio = self._render_cv_vc_preset_audio(preset)
+            if not audio.size:
+                continue
+            metadata = {"cv_vc_presets": [asdict(preset)], "render_mode": self._articulation_word_render_mode(), "voice_source_profile": self.voice_source_profile.to_json_dict()}
+            sequence = " ".join(symbol for symbol in preset.phoneme_sequence)
+            ipa = " ".join(f"/{_phoneme_from_preset_symbol(symbol).ipa}/" for symbol in preset.phoneme_sequence)
+            label = f"{preset.pattern_type} {sequence}"
+            self._add_speech_bin_item(label, "cv_vc", audio, ipa, sequence, metadata, "cv_vc_library")
+
+    def _render_cv_vc_preset_audio(self, preset: PhonemeCombinationPreset) -> np.ndarray:
+        saved_items = list(self.articulation_chain_items)
+        saved_selection = self.articulation_selected_chain_index
+        try:
+            self.articulation_chain_items = self._cv_vc_items_for_presets([preset])
+            self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+            return self._render_articulation_word() if self.articulation_chain_items else np.zeros((0, 2), dtype=np.float32)
+        finally:
+            self.articulation_chain_items = saved_items
+            self.articulation_selected_chain_index = saved_selection
 
     def _reset_continuous_tuning(self, checked: bool = False) -> None:
         del checked
@@ -9339,10 +9448,25 @@ class WaveToyWindow(QMainWindow):
             for symbols in tests:
                 self.articulation_chain_items = [ArticulationChainItem(phoneme=_phoneme_from_preset_symbol(symbol)) for symbol in symbols]
                 audio = self._render_articulation_word_continuous()
-                peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-                rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
-                clipped = int(np.count_nonzero(np.abs(audio) >= 0.999)) if audio.size else 0
-                print(f"[WaveToy Stop Test] sequence={' '.join(symbols)} burst_peak={peak:.6f} burst_rms={rms:.6f} clipped_samples={clipped} stop_burst_status={'present' if peak > 0.003 else 'low'}")
+                output_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+                output_rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
+                metrics = dict(self.continuous_diagnostics_latest or {})
+                has_burst = "burst_peak" in metrics and "burst_rms" in metrics
+                burst_part = (
+                    f"burst_peak={float(metrics.get('burst_peak', 0.0) or 0.0):.6f} burst_rms={float(metrics.get('burst_rms', 0.0) or 0.0):.6f}"
+                    if has_burst
+                    else f"output_peak={output_peak:.6f} output_rms={output_rms:.6f}"
+                )
+                fields = {
+                    "stop_burst_status": metrics.get("stop_burst_status", "unavailable"),
+                    "voiced_rms": metrics.get("voiced_rms", "unavailable"),
+                    "noise_rms": metrics.get("noise_rms", "unavailable"),
+                    "pitch_error": metrics.get("pitch_error", "unavailable"),
+                    "clipped_samples": metrics.get("clipped_samples", int(np.count_nonzero(np.abs(audio) >= 0.999)) if audio.size else 0),
+                }
+                tail = " ".join(f"{key}={value}" for key, value in fields.items())
+                print(f"[WaveToy Stop Test] sequence={' '.join(symbols)} {burst_part} {tail}")
+                print(f"[WaveToy Stop Test Row] chain={' '.join(symbols)} output_peak={output_peak:.6f} output_rms={output_rms:.6f} {burst_part} {tail}")
         finally:
             self.articulation_chain_items = saved_items
             self.articulation_selected_chain_index = saved_selection
@@ -9381,23 +9505,39 @@ class WaveToyWindow(QMainWindow):
 
     def _export_viseme_json(self, checked: bool = False) -> None:
         del checked
+        if not self.articulation_chain_items:
+            QMessageBox.warning(self, "Export Viseme JSON", "Add at least one phoneme to the chain before exporting a viseme timeline.")
+            return
         filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Viseme JSON", "wave_toy_viseme_timeline.json", "JSON Files (*.json);;All Files (*)")
         if not filename:
             return
         frames = self._build_viseme_frames()
-        payload = {"version": "0.1-foundation", "frame_rate": 24, "duration_ms": self._articulation_motion_timeline()[1], "phoneme_sequence": self._speech_display_sequence_for_chain(), "viseme_timeline": frames}
+        duration_ms = self._articulation_motion_timeline()[1]
+        payload = {
+            "schema": "wavetoy.viseme_timeline.v1",
+            "version": "0.1-foundation",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "frame_rate": 24,
+            "duration_ms": duration_ms,
+            "render_mode": self._articulation_word_render_mode(),
+            "phoneme_sequence": self._speech_display_sequence_for_chain(),
+            "viseme_timeline": frames,
+        }
         Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         QMessageBox.information(self, "Export Viseme JSON", f"Exported {len(frames)} viseme frames to {filename}.")
 
     def _export_animation_json(self, checked: bool = False) -> None:
         del checked
+        if not self.articulation_chain_items:
+            QMessageBox.warning(self, "Export Animation JSON", "Add at least one phoneme to the chain before exporting animation JSON.")
+            return
         filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Animation JSON", "wave_toy_animation_export.json", "JSON Files (*.json);;All Files (*)")
         if not filename:
             return
         frames = self._build_viseme_frames()
         duration_ms = self._articulation_motion_timeline()[1]
         payload = {
-            "version": "0.1-foundation", "frame_rate": 24, "duration_ms": duration_ms,
+            "schema": "wavetoy.animation_export.v1", "version": "0.1-foundation", "created_at": datetime.now(timezone.utc).isoformat(), "frame_rate": 24, "duration_ms": duration_ms, "render_mode": self._articulation_word_render_mode(), "phoneme_sequence": self._speech_display_sequence_for_chain(),
             "phoneme_timeline": [item.to_json_dict() for item in self.articulation_chain_items], "viseme_timeline": frames,
             "mouth_open_curve": [[f["time_ms"], f["mouth_open"]] for f in frames], "lip_rounding_curve": [[f["time_ms"], f["lip_rounding"]] for f in frames],
             "tongue_height_curve": [[f["time_ms"], f["tongue_height"]] for f in frames], "tongue_frontness_curve": [[f["time_ms"], f["tongue_frontness"]] for f in frames],
@@ -9494,10 +9634,10 @@ class WaveToyWindow(QMainWindow):
             next_name = right.name
             transition_progress = local
         else:
-            phoneme = left.clamped()
+            phoneme, _diphthong_diagnostics = apply_diphthong_transition_shape(left, local)
             next_index = int(active["index"]) + 1
             next_name = self.articulation_chain_items[next_index].phoneme.name if next_index < len(self.articulation_chain_items) else "—"
-            transition_progress = 0.0
+            transition_progress = float(_diphthong_diagnostics.get("diphthong_progress", 0.0)) if _diphthong_diagnostics else 0.0
         return phoneme, left.name, next_name, transition_progress, elapsed_ms / total_ms, transition_duration_ms, in_transition
 
     def _set_articulation_motion_elapsed(self, elapsed_ms: float) -> None:
@@ -9947,7 +10087,7 @@ class WaveToyWindow(QMainWindow):
         burst_events: List[Dict[str, object]] = []
         cursor = 0
         for index, item in enumerate(self.articulation_chain_items):
-            phoneme = item.phoneme_for_render().clamped()
+            phoneme = self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()
             hold_ms = max(1, int(item.duration_ms or phoneme.duration_ms))
             hold_start = cursor
             hold_end = cursor + hold_ms
@@ -9975,7 +10115,7 @@ class WaveToyWindow(QMainWindow):
             if index < len(self.articulation_chain_items) - 1:
                 transition_ms = max(0, int(self._chain_transition_duration_ms(item, self.articulation_chain_items[index + 1])))
                 if transition_ms > 0:
-                    next_phoneme = self.articulation_chain_items[index + 1].phoneme_for_render().clamped()
+                    next_phoneme = self._apply_voice_source_to_phoneme(self.articulation_chain_items[index + 1].phoneme_for_render()).clamped()
                     segments.append({"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme, "curve": item.transition_curve, "accentuation_db": float(item.accentuation_db), "next_accentuation_db": float(self.articulation_chain_items[index + 1].accentuation_db)})
                     cursor += transition_ms
         return segments, max(cursor, 1), stop_events, burst_events
@@ -10002,7 +10142,9 @@ class WaveToyWindow(QMainWindow):
             right_noise = float(articulation_synthesis_debug(right).get("noise_gain", 0.0))
             noise_gain = float(left_noise + (right_noise - left_noise) * t)
         else:
-            phoneme = left.clamped()
+            phoneme, diphthong_diagnostics = apply_diphthong_transition_shape(left, local)
+            if diphthong_diagnostics:
+                active = {**active, **diphthong_diagnostics}
             voiced_gain = _articulation_voiced_gain(phoneme)
             noise_gain = float(articulation_synthesis_debug(phoneme).get("noise_gain", 0.0))
         closure = float(np.clip(phoneme.closure, 0.0, 1.0))
@@ -10153,6 +10295,10 @@ class WaveToyWindow(QMainWindow):
             "transition_duration_total",
             "final_buffer_length",
             "voiced_phoneme_count",
+            "diphthong_start_vowel",
+            "diphthong_end_vowel",
+            "diphthong_progress",
+            "diphthong_interpolation_curve",
         )
         text = " • ".join(f"{key}: {metrics.get(key)}" for key in ordered_keys)
         if metrics.get("exception"):
@@ -10199,6 +10345,10 @@ class WaveToyWindow(QMainWindow):
             "transition_duration_total",
             "final_buffer_length",
             "voiced_phoneme_count",
+            "diphthong_start_vowel",
+            "diphthong_end_vowel",
+            "diphthong_progress",
+            "diphthong_interpolation_curve",
             "status",
         )
         payload = " ".join(f"{key}={metrics.get(key)}" for key in ordered_keys)
@@ -10336,8 +10486,8 @@ class WaveToyWindow(QMainWindow):
         frame_count = max(1, int(math.ceil(total_samples / frame_samples)))
         transition_count = sum(1 for segment in segments if segment["kind"] == "transition")
         transition_duration_total = sum(int(segment["end"]) - int(segment["start"]) for segment in segments if segment["kind"] == "transition")
-        voiced_phoneme_count = sum(1 for item in self.articulation_chain_items if self._continuous_voiced_gain(item.phoneme_for_render().clamped()) > 0.0)
-        initial_voiced = [item.phoneme_for_render().clamped() for item in self.articulation_chain_items if self._continuous_voiced_gain(item.phoneme_for_render().clamped()) > 0.0]
+        voiced_phoneme_count = sum(1 for item in self.articulation_chain_items if self._continuous_voiced_gain(self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()) > 0.0)
+        initial_voiced = [self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped() for item in self.articulation_chain_items if self._continuous_voiced_gain(self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()) > 0.0]
         last_voiced_pitch = float(np.clip(initial_voiced[0].voice_pitch if initial_voiced else 220.0, 60.0, 880.0))
         print(f"[WaveToy Envelope] render mode={ARTICULATION_WORD_RENDER_CONTINUOUS} phoneme_count={len(self.articulation_chain_items)} total_envelope_ms={total_ms} frame_count={frame_count}")
         for segment in segments:
@@ -10365,7 +10515,7 @@ class WaveToyWindow(QMainWindow):
         frame_debug: List[Dict[str, object]] = []
         source_cache: Dict[int, np.ndarray | None] = {}
         for index, item in enumerate(self.articulation_chain_items):
-            phoneme = item.phoneme_for_render().clamped()
+            phoneme = self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()
             if phoneme.source_mode == ARTICULATION_SOURCE_DEFAULT:
                 source_cache[index] = None
                 continue
@@ -10383,6 +10533,7 @@ class WaveToyWindow(QMainWindow):
         formant_output_energy = 0.0
         formant_sample_count = 0
         transition_progress = 0.0
+        diphthong_debug_frames: List[Dict[str, object]] = []
         stop_debug_events: List[Dict[str, object]] = []
         for frame_index in range(frame_count):
             start_sample = frame_index * frame_samples
@@ -10410,7 +10561,7 @@ class WaveToyWindow(QMainWindow):
                     last_voiced_pitch = float(left_pitch + (right_pitch - left_pitch) * pitch_t)
                 else:
                     last_voiced_pitch = float(np.clip(phoneme.voice_pitch, 60.0, 880.0))
-                    transition_progress = 0.0
+                    transition_progress = float(active.get("diphthong_progress", 0.0) or 0.0)
             smoothed_pitch_hz += (last_voiced_pitch - smoothed_pitch_hz) * pitch_alpha
             intended_pitch_hz = smoothed_pitch_hz
             source_excitation = np.zeros(count, dtype=np.float64)
@@ -10473,6 +10624,11 @@ class WaveToyWindow(QMainWindow):
             voiced_trace[start_sample:end_sample] = voiced_gain
             noise_trace[start_sample:end_sample] = noise_gain
             closure_trace[start_sample:end_sample] = closure
+            diphthong_frame = {key: active.get(key) for key in ("diphthong_start_vowel", "diphthong_end_vowel", "diphthong_progress", "diphthong_interpolation_curve") if key in active}
+            if diphthong_frame:
+                diphthong_frame["frame_index"] = frame_index
+                diphthong_frame["active_phoneme"] = phoneme.name
+                diphthong_debug_frames.append(diphthong_frame)
             frame_debug.append({
                 "frame_index": frame_index,
                 "active_phoneme": phoneme.name,
@@ -10483,6 +10639,7 @@ class WaveToyWindow(QMainWindow):
                 "voiced_gain": round(voiced_gain, 3),
                 "active_phoneme_accentuation_db": round(accent_db, 3),
                 "gain_applied": round(gain_applied, 6),
+                **diphthong_frame,
             })
 
         smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
@@ -10515,7 +10672,7 @@ class WaveToyWindow(QMainWindow):
             end_sample = min(total_samples, int(round(float(event["end"]) * SAMPLE_RATE / 1000.0)))
             if end_sample <= start_sample:
                 continue
-            phoneme = self.articulation_chain_items[int(event["index"])].phoneme_for_render().clamped()
+            phoneme = self._apply_voice_source_to_phoneme(self.articulation_chain_items[int(event["index"])].phoneme_for_render()).clamped()
             count = end_sample - start_sample
             params = _stop_burst_parameters(phoneme)
             burst = _stop_burst_noise(count, phoneme)
@@ -10641,6 +10798,11 @@ class WaveToyWindow(QMainWindow):
             "active_phoneme_accentuation_db": round(float(diagnostic_frames[0].get("active_phoneme_accentuation_db", 0.0)) if diagnostic_frames else float(frame_debug[0].get("active_phoneme_accentuation_db", 0.0)) if frame_debug else 0.0, 3),
             "max_accentuation_db": self._accentuation_summary()["max_accentuation_db"],
             "gain_applied": round(float(diagnostic_frames[0].get("gain_applied", 1.0)) if diagnostic_frames else float(frame_debug[0].get("gain_applied", 1.0)) if frame_debug else 1.0, 6),
+            "diphthong_start_vowel": diphthong_debug_frames[0].get("diphthong_start_vowel") if diphthong_debug_frames else None,
+            "diphthong_end_vowel": diphthong_debug_frames[0].get("diphthong_end_vowel") if diphthong_debug_frames else None,
+            "diphthong_progress": diphthong_debug_frames[-1].get("diphthong_progress") if diphthong_debug_frames else None,
+            "diphthong_interpolation_curve": diphthong_debug_frames[0].get("diphthong_interpolation_curve") if diphthong_debug_frames else None,
+            "diphthong_debug_frames": diphthong_debug_frames[:24],
         }
         self._report_continuous_render_debug(metrics)
         print(
@@ -10975,6 +11137,7 @@ class WaveToyWindow(QMainWindow):
         del checked
         self.phoneme_loop_enabled = False
         self.phoneme_loop_timer.stop()
+        self._stop_playback_tracking(clear_playheads=True)
         if sd is not None:
             try:
                 sd.stop()
