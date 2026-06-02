@@ -186,12 +186,15 @@ ARTICULATION_INTERPOLATED_FIELDS = (
     "burst_strength",
     "nasal_open",
 )
+DIPHTHONG_PROFILES = {
+    "AY": {"start_vowel": "AH", "end_vowel": "IY", "curve": "Ease In", "glide_start_percent": 55},
+    "AW": {"start_vowel": "AH", "end_vowel": "UW", "curve": "Ease In Out", "glide_start_percent": 45},
+    "OY": {"start_vowel": "AO", "end_vowel": "IY", "curve": "Smoothstep", "glide_start_percent": 40},
+    "OW": {"start_vowel": "AO", "end_vowel": "UW", "curve": "Ease Out", "glide_start_percent": 35},
+    "EY": {"start_vowel": "EH", "end_vowel": "IY", "curve": "Ease In Out", "glide_start_percent": 45},
+}
 DIPHTHONG_TRANSITION_MAP = {
-    "AY": ("AH", "IY"),
-    "AW": ("AH", "UW"),
-    "OY": ("AO", "IY"),
-    "OW": ("AO", "UW"),
-    "EY": ("EH", "IY"),
+    symbol: (str(profile["start_vowel"]), str(profile["end_vowel"])) for symbol, profile in DIPHTHONG_PROFILES.items()
 }
 DIPHTHONG_INTERPOLATED_FIELDS = (
     "tongue_height",
@@ -203,6 +206,24 @@ DIPHTHONG_INTERPOLATED_FIELDS = (
     "air_pressure",
 )
 DIPHTHONG_INTERPOLATION_CURVE = "Ease In Out"
+COARTICULATION_RULES = {
+    ("S", "T"): {"type": "alveolar_stop_prep", "strength": 0.42, "anticipatory_tongue_shift": 0.34, "carryover_closure": 0.24},
+    ("T", "R"): {"type": "retroflex_release", "strength": 0.46, "anticipatory_tongue_shift": 0.40, "carryover_closure": 0.18, "voicing_carryover": 0.10},
+    ("K", "Y"): {"type": "palatal_fronting", "strength": 0.48, "anticipatory_tongue_shift": 0.44, "voicing_carryover": 0.10},
+    ("N", "D"): {"type": "nasal_to_stop_closure", "strength": 0.40, "nasal_carryover": 0.36, "carryover_closure": 0.22, "voicing_carryover": 0.18},
+    ("M", "B"): {"type": "bilabial_carryover", "strength": 0.42, "lip_rounding_carryover": 0.22, "nasal_carryover": 0.30, "carryover_closure": 0.30, "voicing_carryover": 0.16},
+    ("D", "Y"): {"type": "alveopalatal_glide", "strength": 0.44, "anticipatory_tongue_shift": 0.38, "voicing_carryover": 0.18},
+    ("T", "Y"): {"type": "palatal_stop_release", "strength": 0.44, "anticipatory_tongue_shift": 0.40, "carryover_closure": 0.20},
+    ("L", "IY"): {"type": "front_vowel_lift", "strength": 0.34, "anticipatory_tongue_shift": 0.30, "voicing_carryover": 0.12},
+    ("R", "AH"): {"type": "rhotic_vowel_carryover", "strength": 0.34, "anticipatory_tongue_shift": 0.24, "lip_rounding_carryover": 0.18, "voicing_carryover": 0.12},
+}
+COARTICULATION_INFLUENCE_FIELDS = (
+    "anticipatory_tongue_shift",
+    "carryover_closure",
+    "lip_rounding_carryover",
+    "nasal_carryover",
+    "voicing_carryover",
+)
 ARTICULATION_TRANSITION_RULE_MS = {
     ("vowel", "vowel"): 70,
     ("vowel", "glide"): 60,
@@ -801,14 +822,33 @@ def diphthong_transition_targets(symbol: str) -> Tuple[ArticulationPhoneme, Arti
     return _phoneme_from_preset_symbol(start_symbol).clamped(), _phoneme_from_preset_symbol(end_symbol).clamped()
 
 
+def diphthong_profile_for_symbol(symbol: str) -> Dict[str, object] | None:
+    """Return the per-diphthong render profile without changing saved chain data."""
+    profile = DIPHTHONG_PROFILES.get(str(symbol).upper())
+    return dict(profile) if isinstance(profile, dict) else None
+
+
 def apply_diphthong_transition_shape(phoneme: ArticulationPhoneme, progress: float, curve: str = DIPHTHONG_INTERPOLATION_CURVE) -> Tuple[ArticulationPhoneme, Dict[str, object]]:
     """Return a render-only internal vowel morph for diphthongs without splitting the timeline phoneme."""
     base = phoneme.clamped()
     targets = diphthong_transition_targets(base.name)
     if targets is None:
         return base, {}
+    profile = diphthong_profile_for_symbol(base.name) or {
+        "start_vowel": targets[0].name,
+        "end_vowel": targets[1].name,
+        "curve": curve,
+        "glide_start_percent": 0,
+    }
     start, end = targets
-    t = articulation_curve_progress(progress, curve)
+    profile_curve = str(profile.get("curve", curve))
+    if profile_curve not in ARTICULATION_TRANSITION_CURVES:
+        profile_curve = curve
+    glide_start_percent = int(np.clip(int(profile.get("glide_start_percent", 0)), 0, 95))
+    raw_progress = float(np.clip(progress, 0.0, 1.0))
+    glide_start = glide_start_percent / 100.0
+    glide_progress = 0.0 if raw_progress <= glide_start else (raw_progress - glide_start) / max(0.01, 1.0 - glide_start)
+    t = articulation_curve_progress(glide_progress, profile_curve)
     data = base.to_json_dict()
     for field_name in DIPHTHONG_INTERPOLATED_FIELDS:
         data[field_name] = float(np.clip(float(getattr(start, field_name)) + (float(getattr(end, field_name)) - float(getattr(start, field_name))) * t, 0.0, 1.0))
@@ -819,12 +859,74 @@ def apply_diphthong_transition_shape(phoneme: ArticulationPhoneme, progress: flo
     data["ipa"] = base.ipa
     data["phoneme_family"] = base.phoneme_family
     diagnostics = {
+        "diphthong_profile": base.name,
+        "glide_start_percent": glide_start_percent,
         "diphthong_start_vowel": start.name,
         "diphthong_end_vowel": end.name,
         "diphthong_progress": round(float(t), 3),
-        "diphthong_interpolation_curve": curve,
+        "diphthong_interpolation_curve": profile_curve,
     }
     return ArticulationPhoneme.from_json_dict(data).clamped(), diagnostics
+
+
+def _blend_unit_value(start: float, target: float, amount: float) -> float:
+    return float(np.clip(float(start) + (float(target) - float(start)) * float(np.clip(amount, 0.0, 1.0)), 0.0, 1.0))
+
+
+def apply_neighbor_coarticulation(phonemes: List[ArticulationPhoneme]) -> Tuple[List[ArticulationPhoneme], Dict[int, Dict[str, object]], Dict[Tuple[int, int], Dict[str, object]]]:
+    """Return render-copy coarticulated phonemes plus diagnostics for supported neighboring pairs."""
+    adjusted = [phoneme.clamped() for phoneme in phonemes]
+    item_diagnostics: Dict[int, Dict[str, object]] = {}
+    pair_diagnostics: Dict[Tuple[int, int], Dict[str, object]] = {}
+    for index in range(len(adjusted) - 1):
+        left = adjusted[index].clamped()
+        right = adjusted[index + 1].clamped()
+        key = (left.name.upper(), right.name.upper())
+        rule = COARTICULATION_RULES.get(key)
+        if rule is None:
+            continue
+        strength = float(np.clip(float(rule.get("strength", 0.0)), 0.0, 1.0))
+        if strength <= 0.0:
+            continue
+        anticipatory_tongue_shift = float(rule.get("anticipatory_tongue_shift", 0.0)) * strength
+        carryover_closure = float(rule.get("carryover_closure", 0.0)) * strength
+        lip_rounding_carryover = float(rule.get("lip_rounding_carryover", 0.0)) * strength
+        nasal_carryover = float(rule.get("nasal_carryover", 0.0)) * strength
+        voicing_carryover = float(rule.get("voicing_carryover", 0.0)) * strength
+
+        left_data = left.to_json_dict()
+        right_data = right.to_json_dict()
+        if anticipatory_tongue_shift > 0.0:
+            left_data["tongue_frontness"] = _blend_unit_value(left.tongue_frontness, right.tongue_frontness, anticipatory_tongue_shift)
+            left_data["tongue_height"] = _blend_unit_value(left.tongue_height, right.tongue_height, anticipatory_tongue_shift * 0.70)
+        if lip_rounding_carryover > 0.0:
+            right_data["lip_rounding"] = _blend_unit_value(right.lip_rounding, left.lip_rounding, lip_rounding_carryover)
+        if nasal_carryover > 0.0:
+            right_data["nasal_open"] = float(np.clip(max(float(right_data.get("nasal_open", 0.0)), left.nasal_open * nasal_carryover), 0.0, 1.0))
+        if voicing_carryover > 0.0 and left.voiced and right.voiced:
+            right_data["voice_strength"] = _blend_unit_value(right.voice_strength, left.voice_strength, voicing_carryover)
+        if carryover_closure > 0.0:
+            if right.phoneme_family == "stop":
+                right_data["closure"] = float(np.clip(max(right.closure, min(1.0, left.closure + carryover_closure)), 0.0, 1.0))
+            elif left.phoneme_family == "stop":
+                left_data["closure"] = float(np.clip(max(left.closure, left.closure + carryover_closure * 0.20), 0.0, 1.0))
+
+        adjusted[index] = ArticulationPhoneme.from_json_dict(left_data).clamped()
+        adjusted[index + 1] = ArticulationPhoneme.from_json_dict(right_data).clamped()
+        diagnostics = {
+            "coarticulation_pair": f"{key[0]}-{key[1]}",
+            "coarticulation_strength": round(strength, 3),
+            "coarticulation_type": str(rule.get("type", "neighbor")),
+            "anticipatory_tongue_shift": round(anticipatory_tongue_shift, 3),
+            "carryover_closure": round(carryover_closure, 3),
+            "lip_rounding_carryover": round(lip_rounding_carryover, 3),
+            "nasal_carryover": round(nasal_carryover, 3),
+            "voicing_carryover": round(voicing_carryover, 3),
+        }
+        pair_diagnostics[(index, index + 1)] = diagnostics
+        item_diagnostics[index] = diagnostics
+        item_diagnostics[index + 1] = diagnostics
+    return adjusted, item_diagnostics, pair_diagnostics
 
 
 def interpolate_articulation_phoneme(left: ArticulationPhoneme, right: ArticulationPhoneme, progress: float, curve: str = ARTICULATION_DEFAULT_TRANSITION_CURVE) -> ArticulationPhoneme:
@@ -10080,18 +10182,28 @@ class WaveToyWindow(QMainWindow):
         transition = transition[:target_samples]
         return transition.astype(np.float32)
 
-    def _build_articulation_envelope_timeline(self) -> Tuple[List[Dict[str, object]], int, List[Dict[str, object]], List[Dict[str, object]]]:
+    def _build_articulation_envelope_timeline(
+        self,
+        render_phonemes: List[ArticulationPhoneme] | None = None,
+        coarticulation_item_diagnostics: Dict[int, Dict[str, object]] | None = None,
+        coarticulation_pair_diagnostics: Dict[Tuple[int, int], Dict[str, object]] | None = None,
+    ) -> Tuple[List[Dict[str, object]], int, List[Dict[str, object]], List[Dict[str, object]]]:
         """Create the shared hold/transition timeline used by motion and continuous audio."""
         segments: List[Dict[str, object]] = []
         stop_events: List[Dict[str, object]] = []
         burst_events: List[Dict[str, object]] = []
+        item_diagnostics = coarticulation_item_diagnostics or {}
+        pair_diagnostics = coarticulation_pair_diagnostics or {}
         cursor = 0
         for index, item in enumerate(self.articulation_chain_items):
-            phoneme = self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()
+            phoneme = (render_phonemes[index] if render_phonemes is not None and index < len(render_phonemes) else self._apply_voice_source_to_phoneme(item.phoneme_for_render())).clamped()
             hold_ms = max(1, int(item.duration_ms or phoneme.duration_ms))
             hold_start = cursor
             hold_end = cursor + hold_ms
-            segments.append({"kind": "hold", "index": index, "start": hold_start, "end": hold_end, "from": phoneme, "to": phoneme, "accentuation_db": float(item.accentuation_db)})
+            hold_segment = {"kind": "hold", "index": index, "start": hold_start, "end": hold_end, "from": phoneme, "to": phoneme, "accentuation_db": float(item.accentuation_db)}
+            if index in item_diagnostics:
+                hold_segment.update(item_diagnostics[index])
+            segments.append(hold_segment)
             if phoneme.phoneme_family == "stop" or phoneme.closure > 0.75:
                 stop_params = _stop_burst_parameters(phoneme)
                 closure_ms = int(np.clip(hold_ms * (0.18 + phoneme.closure * 0.54), 8, max(9, hold_ms - 1)))
@@ -10115,8 +10227,11 @@ class WaveToyWindow(QMainWindow):
             if index < len(self.articulation_chain_items) - 1:
                 transition_ms = max(0, int(self._chain_transition_duration_ms(item, self.articulation_chain_items[index + 1])))
                 if transition_ms > 0:
-                    next_phoneme = self._apply_voice_source_to_phoneme(self.articulation_chain_items[index + 1].phoneme_for_render()).clamped()
-                    segments.append({"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme, "curve": item.transition_curve, "accentuation_db": float(item.accentuation_db), "next_accentuation_db": float(self.articulation_chain_items[index + 1].accentuation_db)})
+                    next_phoneme = (render_phonemes[index + 1] if render_phonemes is not None and index + 1 < len(render_phonemes) else self._apply_voice_source_to_phoneme(self.articulation_chain_items[index + 1].phoneme_for_render())).clamped()
+                    transition_segment = {"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": next_phoneme, "curve": item.transition_curve, "accentuation_db": float(item.accentuation_db), "next_accentuation_db": float(self.articulation_chain_items[index + 1].accentuation_db)}
+                    if (index, index + 1) in pair_diagnostics:
+                        transition_segment.update(pair_diagnostics[(index, index + 1)])
+                    segments.append(transition_segment)
                     cursor += transition_ms
         return segments, max(cursor, 1), stop_events, burst_events
 
@@ -10479,15 +10594,18 @@ class WaveToyWindow(QMainWindow):
             self.continuous_validation_results_label.setText("Validation results:\n" + "\n".join(lines))
 
     def _render_articulation_word_continuous(self) -> np.ndarray:
-        segments, total_ms, stop_events, burst_events = self._build_articulation_envelope_timeline()
+        base_render_phonemes = [self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped() for item in self.articulation_chain_items]
+        voice_source_applied_counts = [1 for _item in self.articulation_chain_items]
+        render_phonemes, coarticulation_item_diagnostics, coarticulation_pair_diagnostics = apply_neighbor_coarticulation(base_render_phonemes)
+        segments, total_ms, stop_events, burst_events = self._build_articulation_envelope_timeline(render_phonemes, coarticulation_item_diagnostics, coarticulation_pair_diagnostics)
         frame_ms = ARTICULATION_MOTION_FRAME_MS
         frame_samples = max(1, int(round(frame_ms * SAMPLE_RATE / 1000.0)))
         total_samples = max(1, int(round(total_ms * SAMPLE_RATE / 1000.0)))
         frame_count = max(1, int(math.ceil(total_samples / frame_samples)))
         transition_count = sum(1 for segment in segments if segment["kind"] == "transition")
         transition_duration_total = sum(int(segment["end"]) - int(segment["start"]) for segment in segments if segment["kind"] == "transition")
-        voiced_phoneme_count = sum(1 for item in self.articulation_chain_items if self._continuous_voiced_gain(self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()) > 0.0)
-        initial_voiced = [self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped() for item in self.articulation_chain_items if self._continuous_voiced_gain(self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()) > 0.0]
+        voiced_phoneme_count = sum(1 for phoneme in render_phonemes if self._continuous_voiced_gain(phoneme) > 0.0)
+        initial_voiced = [phoneme for phoneme in render_phonemes if self._continuous_voiced_gain(phoneme) > 0.0]
         last_voiced_pitch = float(np.clip(initial_voiced[0].voice_pitch if initial_voiced else 220.0, 60.0, 880.0))
         print(f"[WaveToy Envelope] render mode={ARTICULATION_WORD_RENDER_CONTINUOUS} phoneme_count={len(self.articulation_chain_items)} total_envelope_ms={total_ms} frame_count={frame_count}")
         for segment in segments:
@@ -10515,7 +10633,7 @@ class WaveToyWindow(QMainWindow):
         frame_debug: List[Dict[str, object]] = []
         source_cache: Dict[int, np.ndarray | None] = {}
         for index, item in enumerate(self.articulation_chain_items):
-            phoneme = self._apply_voice_source_to_phoneme(item.phoneme_for_render()).clamped()
+            phoneme = render_phonemes[index].clamped()
             if phoneme.source_mode == ARTICULATION_SOURCE_DEFAULT:
                 source_cache[index] = None
                 continue
@@ -10624,14 +10742,16 @@ class WaveToyWindow(QMainWindow):
             voiced_trace[start_sample:end_sample] = voiced_gain
             noise_trace[start_sample:end_sample] = noise_gain
             closure_trace[start_sample:end_sample] = closure
-            diphthong_frame = {key: active.get(key) for key in ("diphthong_start_vowel", "diphthong_end_vowel", "diphthong_progress", "diphthong_interpolation_curve") if key in active}
+            diphthong_frame = {key: active.get(key) for key in ("diphthong_profile", "glide_start_percent", "diphthong_start_vowel", "diphthong_end_vowel", "diphthong_progress", "diphthong_interpolation_curve") if key in active}
             if diphthong_frame:
                 diphthong_frame["frame_index"] = frame_index
                 diphthong_frame["active_phoneme"] = phoneme.name
                 diphthong_debug_frames.append(diphthong_frame)
+            coarticulation_frame = {key: active.get(key) for key in ("coarticulation_pair", "coarticulation_strength", "coarticulation_type", "anticipatory_tongue_shift", "carryover_closure", "lip_rounding_carryover", "nasal_carryover", "voicing_carryover") if key in active}
             frame_debug.append({
                 "frame_index": frame_index,
                 "active_phoneme": phoneme.name,
+                "voice_source_applied_count": int(voice_source_applied_counts[int(active.get("index", 0))]) if voice_source_applied_counts else 0,
                 "intended_pitch_hz": round(intended_pitch_hz, 3),
                 "measured_pitch_estimate_hz": 0.0,
                 "pitch_error_percent": 0.0,
@@ -10640,6 +10760,7 @@ class WaveToyWindow(QMainWindow):
                 "active_phoneme_accentuation_db": round(accent_db, 3),
                 "gain_applied": round(gain_applied, 6),
                 **diphthong_frame,
+                **coarticulation_frame,
             })
 
         smooth_samples = max(3, int(0.0015 * SAMPLE_RATE))
@@ -10672,7 +10793,7 @@ class WaveToyWindow(QMainWindow):
             end_sample = min(total_samples, int(round(float(event["end"]) * SAMPLE_RATE / 1000.0)))
             if end_sample <= start_sample:
                 continue
-            phoneme = self._apply_voice_source_to_phoneme(self.articulation_chain_items[int(event["index"])].phoneme_for_render()).clamped()
+            phoneme = render_phonemes[int(event["index"])].clamped()
             count = end_sample - start_sample
             params = _stop_burst_parameters(phoneme)
             burst = _stop_burst_noise(count, phoneme)
@@ -10798,11 +10919,18 @@ class WaveToyWindow(QMainWindow):
             "active_phoneme_accentuation_db": round(float(diagnostic_frames[0].get("active_phoneme_accentuation_db", 0.0)) if diagnostic_frames else float(frame_debug[0].get("active_phoneme_accentuation_db", 0.0)) if frame_debug else 0.0, 3),
             "max_accentuation_db": self._accentuation_summary()["max_accentuation_db"],
             "gain_applied": round(float(diagnostic_frames[0].get("gain_applied", 1.0)) if diagnostic_frames else float(frame_debug[0].get("gain_applied", 1.0)) if frame_debug else 1.0, 6),
+            "voice_source_applied_count": max(voice_source_applied_counts) if voice_source_applied_counts else 0,
+            "diphthong_profile": diphthong_debug_frames[0].get("diphthong_profile") if diphthong_debug_frames else None,
+            "glide_start_percent": diphthong_debug_frames[0].get("glide_start_percent") if diphthong_debug_frames else None,
             "diphthong_start_vowel": diphthong_debug_frames[0].get("diphthong_start_vowel") if diphthong_debug_frames else None,
             "diphthong_end_vowel": diphthong_debug_frames[0].get("diphthong_end_vowel") if diphthong_debug_frames else None,
             "diphthong_progress": diphthong_debug_frames[-1].get("diphthong_progress") if diphthong_debug_frames else None,
             "diphthong_interpolation_curve": diphthong_debug_frames[0].get("diphthong_interpolation_curve") if diphthong_debug_frames else None,
             "diphthong_debug_frames": diphthong_debug_frames[:24],
+            "coarticulation_debug_frames": [item for item in frame_debug if item.get("coarticulation_pair")][:24],
+            "coarticulation_pair": next((item.get("coarticulation_pair") for item in frame_debug if item.get("coarticulation_pair")), None),
+            "coarticulation_strength": next((item.get("coarticulation_strength") for item in frame_debug if item.get("coarticulation_pair")), None),
+            "coarticulation_type": next((item.get("coarticulation_type") for item in frame_debug if item.get("coarticulation_pair")), None),
         }
         self._report_continuous_render_debug(metrics)
         print(
