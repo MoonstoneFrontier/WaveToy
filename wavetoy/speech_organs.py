@@ -8,7 +8,7 @@ changing WaveToy's saved articulation-chain format.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 
@@ -18,6 +18,98 @@ def _clamp01(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         number = default
     return max(0.0, min(1.0, number))
+
+
+@dataclass(frozen=True)
+class VoiceBoxState:
+    """Non-destructive larynx/voice-box layer upstream of articulation."""
+
+    vocal_fold_length: float = 0.50
+    vocal_fold_thickness: float = 0.50
+    vocal_fold_tension: float = 0.50
+    vocal_fold_mass: float = 0.50
+    vocal_fold_symmetry: float = 0.50
+    glottal_closure: float = 0.55
+    glottal_leak: float = 0.10
+    breathiness: float = 0.18
+    rasp: float = 0.05
+    jitter: float = 0.02
+    shimmer: float = 0.02
+    vocal_damage: float = 0.0
+    age_looseness: float = 0.20
+    larynx_height: float = 0.50
+    vocal_tract_length: float = 0.50
+    resonance_depth: float = 0.50
+
+    @classmethod
+    def neutral(cls) -> "VoiceBoxState":
+        return cls()
+
+    @classmethod
+    def from_voice_source_profile(cls, profile: Any) -> "VoiceBoxState":
+        """Derive neutral voice-box defaults from a VoiceSourceProfile-like object."""
+
+        return cls(
+            vocal_fold_length=_clamp01(getattr(profile, "vocal_fold_length", 0.50), 0.50),
+            vocal_fold_thickness=_clamp01(getattr(profile, "vocal_fold_thickness", 0.50), 0.50),
+            vocal_fold_tension=_clamp01(getattr(profile, "vocal_fold_tension", 0.50), 0.50),
+            glottal_closure=_clamp01(getattr(profile, "glottal_closure", 0.55), 0.55),
+            breathiness=_clamp01(getattr(profile, "breathiness", 0.18), 0.18),
+            rasp=_clamp01(getattr(profile, "rasp", 0.05), 0.05),
+            jitter=_clamp01(getattr(profile, "jitter", 0.02), 0.02),
+            shimmer=_clamp01(getattr(profile, "shimmer", 0.02), 0.02),
+            age_looseness=_clamp01(getattr(profile, "age_looseness", 0.20), 0.20),
+            larynx_height=_clamp01(getattr(profile, "larynx_height", 0.50), 0.50),
+            vocal_tract_length=_clamp01(getattr(profile, "vocal_tract_length", 0.50), 0.50),
+        )
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, Any] | None) -> "VoiceBoxState":
+        source = dict(data or {})
+        values = {name: _clamp01(source.get(name, getattr(cls(), name)), getattr(cls(), name)) for name in cls.__dataclass_fields__}
+        return cls(**values)
+
+    def clamped(self) -> "VoiceBoxState":
+        return VoiceBoxState.from_json_dict(self.to_json_dict())
+
+    def to_json_dict(self) -> dict[str, float]:
+        return {key: _clamp01(value) for key, value in asdict(self).items()}
+
+    def pitch_bias(self) -> float:
+        """Return a small render-copy pitch multiplier bias, centered on neutral."""
+
+        tension = self.vocal_fold_tension - 0.50
+        length = self.vocal_fold_length - 0.50
+        thickness = self.vocal_fold_thickness - 0.50
+        mass = self.vocal_fold_mass - 0.50
+        age = self.age_looseness - 0.20
+        return tension * 0.22 - length * 0.16 - thickness * 0.10 - mass * 0.10 - age * 0.06
+
+    def formant_bias_metadata(self) -> dict[str, float]:
+        """Future-safe metadata for formant/resonance work without changing DSP here."""
+
+        return {
+            "larynx_height_bias": self.larynx_height - 0.50,
+            "vocal_tract_length_bias": self.vocal_tract_length - 0.50,
+            "resonance_depth_bias": self.resonance_depth - 0.50,
+        }
+
+    def apply_to_speech_organ_state(self, state: "SpeechOrganState") -> "SpeechOrganState":
+        """Map this upstream larynx state onto a render-copy speech-organ snapshot."""
+
+        vb = self.clamped()
+        leak_breath = _clamp01(vb.glottal_leak * 0.55 + vb.breathiness * 0.45, 0.0)
+        pitch = max(60.0, min(880.0, state.voice_pitch * (1.0 + vb.pitch_bias())))
+        airflow = _clamp01(state.airflow + leak_breath * 0.18, state.airflow)
+        open_bias = leak_breath * 0.45 + (1.0 - vb.glottal_closure) * 0.18
+        closure = _clamp01(state.glottal_closure * 0.45 + vb.glottal_closure * 0.55 - vb.glottal_leak * 0.18, state.glottal_closure)
+        return replace(
+            state,
+            glottal_closure=closure,
+            glottal_open=_clamp01(state.glottal_open * 0.55 + open_bias, state.glottal_open),
+            airflow=airflow,
+            voice_pitch=pitch,
+        ).clamped()
 
 
 @dataclass(frozen=True)

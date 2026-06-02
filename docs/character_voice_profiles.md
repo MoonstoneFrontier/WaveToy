@@ -1,17 +1,27 @@
 # Character Voice Profiles
 
-`CharacterVoiceProfile` is a creative delivery layer above phoneme controls. It can point at a `VoiceSourceProfile` and provide defaults for pitch bias, timing bias, and accentuation bias without replacing direct phoneme editing.
+Task 068 starts a bridge from character presets to `VoiceBoxState` mappings without replacing direct phoneme controls.
 
-The existing dropdown profiles remain available:
+## Presets
+
+The compact Voice Box panel provides these mapping presets:
 
 - Neutral
 - Child
-- Female
-- Male
+- Adult Narrator
+- Elder
+- Bright Feminine
+- Deep Masculine
+- Breathy
+- Raspy
 - Robot
-- Monster
-- Whisper
 
-Internally, those legacy profiles now map to character/source identifiers so future patches can migrate behavior gradually while preserving the current UI.
+Each preset updates the current `VoiceBoxState` defaults. Users can still adjust individual voice-box sliders afterward, and direct articulation sliders still control phoneme shaping.
 
-MBTI-style hints should only be broad creative delivery shortcuts, not rigid psychology. For example, an introversion hint might reduce projection and accentuation range, while a perceiving hint might loosen timing. These hints must remain optional and editable.
+## Legacy profile compatibility
+
+The existing Articulation Timeline legacy voice profile dropdown remains in place. It continues to support Neutral, Child, Female, Male, Robot, Monster, and Whisper mappings while Task 068 adds a separate larynx-layer preset bridge.
+
+## Future relevance
+
+The character bridge is intended to support future voice fonts, singing, timing, accentuation, and expressive delivery. It does not implement ML voice cloning and does not remove direct phoneme editing.

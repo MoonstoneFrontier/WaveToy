@@ -1,18 +1,25 @@
 # Animation Export Plan
 
-Animation export starts with generic JSON containing:
+Task 068 extends generic animation JSON for future Blender, VTuber, and rigging tools without adding target-specific code or dependencies.
 
-- frame rate
-- duration in milliseconds
-- phoneme timeline
-- viseme timeline
-- mouth-open curve
-- lip-rounding curve
-- tongue-height curve
-- tongue-frontness curve
-- nasal-open curve
-- closure curve
-- airflow curve
-- voicing curve
+## Human-readable schema fields
 
-Future targets may include Blender, Unity, Godot, Unreal, and VTuber rigs. The generic export should remain human-readable and should not require generated audio to be committed.
+Animation export now includes:
+
+- `speech_organ_state_frames`
+- `voice_box_state_frames`
+- `voice_source_profile`
+- `character_profile`
+- `render_mode`
+- `phoneme_sequence`
+- `timing_frames`
+
+The export remains generic JSON. Blender-specific add-ons can consume this later, but no Blender dependency is added.
+
+## Voice and speech state frames
+
+Speech-organ frames provide mouth/tongue/lip/velum/glottis snapshots. Voice-box frames provide the upstream larynx state plus future formant-bias metadata for larynx height, vocal tract length, and resonance depth.
+
+## Future singing and voice-font support
+
+The schema is suitable for future singing because pitch, voicing, timing, and larynx metadata can be aligned with phoneme frames. Voice-font support should remain consent-first and must not imply ML voice cloning.
