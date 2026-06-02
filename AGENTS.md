@@ -23,3 +23,12 @@ WaveToy is a Python desktop audio/sci-fi soundscape generator. The active applic
   ```
 
 - If dependency availability matters, report missing third-party packages rather than masking the issue.
+
+## Task 063 roadmap reminders
+
+- Voice Source is an upstream vocal-source/voice-box layer; keep it separate from mouth/nose articulation and do not implement ML voice cloning.
+- Character Voice Profiles may drive voice source, timing, accentuation, and expressive delivery, but must not replace direct phoneme controls.
+- Musical Timing is a future beat/measure architecture; current millisecond timing remains the default speech workflow.
+- Viseme Timeline and Animation Export should start with generic, human-readable JSON before target-specific add-ons such as Blender.
+- Continuous Mouth Motion quality remains the highest speech-rendering priority, but Clip Crossfade stays the stable default until Continuous is validated.
+- Keep Task 063 patches small, focused, and reviewable.
