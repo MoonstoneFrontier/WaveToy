@@ -45,7 +45,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from wavetoy.speech_organs import SpeechOrganState, VoiceBoxState
+from wavetoy.speech_organs import ResonanceTractState, SpeechOrganState, VoiceBoxState
 from wavetoy.svg import anatomical_mouth_svg, svg_metadata_for_clip, vocal_tract_side_svg
 
 import numpy as np
@@ -1330,6 +1330,8 @@ class VisemeFrame:
     transition_progress: float
     speech_organ_state: Dict[str, float] = field(default_factory=dict)
     voice_box_state: Dict[str, float] = field(default_factory=dict)
+    resonance_tract_state: Dict[str, float] = field(default_factory=dict)
+    formants: Dict[str, float] = field(default_factory=dict)
 
     def to_json_dict(self) -> Dict[str, object]:
         return asdict(self)
@@ -1359,6 +1361,18 @@ VOICE_BOX_CHARACTER_PRESETS: Dict[str, Dict[str, float]] = {
     "Breathy": {"glottal_closure": 0.42, "glottal_leak": 0.42, "breathiness": 0.68},
     "Raspy": {"rasp": 0.70, "vocal_damage": 0.32, "jitter": 0.20, "shimmer": 0.18, "vocal_fold_symmetry": 0.34},
     "Robot": {"vocal_fold_symmetry": 0.82, "glottal_closure": 0.74, "breathiness": 0.06, "rasp": 0.02, "jitter": 0.0, "shimmer": 0.0, "age_looseness": 0.0},
+}
+
+RESONANCE_CHARACTER_PRESETS: Dict[str, Dict[str, float]] = {
+    "Neutral": {},
+    "Child": {"vocal_tract_length": 0.32, "head_resonance": 0.68, "chest_resonance": 0.32, "brightness": 0.58},
+    "Adult Narrator": {"resonance_depth": 0.64, "chest_resonance": 0.58, "pharyngeal_volume": 0.58},
+    "Elder": {"resonance_depth": 0.38, "pharyngeal_tension": 0.32, "pharyngeal_volume": 0.56, "darkness": 0.56},
+    "Bright Feminine": {"vocal_tract_length": 0.40, "brightness": 0.70, "head_resonance": 0.68, "larynx_height": 0.62},
+    "Deep Masculine": {"vocal_tract_length": 0.68, "chest_resonance": 0.72, "darkness": 0.68, "larynx_height": 0.36, "resonance_depth": 0.68},
+    "Breathy": {"nasal_coupling": 0.18, "head_resonance": 0.58, "brightness": 0.56},
+    "Raspy": {"darkness": 0.58, "pharyngeal_tension": 0.44},
+    "Robot": {"formant_scale": 1.0, "brightness": 0.54, "darkness": 0.46, "pharyngeal_tension": 0.62},
 }
 
 @dataclass
@@ -1743,6 +1757,43 @@ def formants_from_articulation(phoneme: ArticulationPhoneme) -> Tuple[float, flo
     f2 = 850.0 + front * 1450.0 - rounding * 380.0
     f3 = 2300.0 + height * 650.0 - rounding * 280.0
     return max(180.0, f1), max(500.0, f2), max(1400.0, f3)
+
+
+def formants_from_articulation_with_resonance(
+    phoneme: ArticulationPhoneme,
+    resonance: ResonanceTractState | None = None,
+) -> Dict[str, float]:
+    """Return articulation formants plus conservative resonance-biased values.
+
+    The compatibility helper above remains unmodified. This function only works
+    on render-time copies and clamps F1/F2/F3 to sane speech-animation ranges.
+    """
+
+    base_f1, base_f2, base_f3 = formants_from_articulation(phoneme)
+    res = (resonance or ResonanceTractState.neutral()).clamped()
+    tract_scale = 1.0 - (res.vocal_tract_length - 0.50) * 0.18
+    tract_scale *= float(np.clip(res.formant_scale, 0.5, 1.5))
+    tract_scale = float(np.clip(tract_scale, 0.78, 1.22))
+    larynx = res.larynx_height - 0.50
+    bright = (res.brightness - 0.50) + (res.head_resonance - 0.50) * 0.70 + larynx * 0.55
+    dark = (res.darkness - 0.50) + (res.chest_resonance - 0.50) * 0.70 + (res.resonance_depth - 0.50) * 0.35 - larynx * 0.35
+    depth_scale = 1.0 - dark * 0.045 + bright * 0.035
+    f1 = base_f1 * tract_scale * (1.0 - dark * 0.035 + bright * 0.012) + res.formant_shift_f1 * 80.0
+    f2 = base_f2 * tract_scale * depth_scale * (1.0 + bright * 0.060 - dark * 0.035) + res.formant_shift_f2 * 180.0
+    f3 = base_f3 * tract_scale * depth_scale * (1.0 + bright * 0.085 - dark * 0.025) + res.formant_shift_f3 * 260.0
+    f1 = float(np.clip(f1, 180.0, 1200.0))
+    f2 = float(np.clip(f2, 500.0, 3500.0))
+    f3 = float(np.clip(f3, 1200.0, 5000.0))
+    return {
+        "base_f1": float(base_f1), "base_f2": float(base_f2), "base_f3": float(base_f3),
+        "f1": f1, "f2": f2, "f3": f3,
+        "resonance_formant_scale": float(tract_scale),
+        "resonance_brightness": float(np.clip(bright + 0.50, 0.0, 1.0)),
+        "resonance_darkness": float(np.clip(dark + 0.50, 0.0, 1.0)),
+        "nasal_coupling": float(res.nasal_coupling),
+        "chest_resonance": float(res.chest_resonance),
+        "head_resonance": float(res.head_resonance),
+    }
 
 
 def apply_simple_formant_layer(audio: np.ndarray, phoneme: ArticulationPhoneme) -> np.ndarray:
@@ -5622,6 +5673,7 @@ class VocalTractCanvas(QWidget):
         self.svg_view_kind = "mouth"
         self.show_airflow_overlay = True
         self.voice_box_state = VoiceBoxState.neutral()
+        self.resonance_tract_state = ResonanceTractState.neutral()
         self._svg_renderer_cache_key: tuple[object, ...] | None = None
         self._svg_renderer_cache_renderer: QSvgRenderer | None = None
         self.editable = False
@@ -5663,9 +5715,14 @@ class VocalTractCanvas(QWidget):
         self.voice_box_state = state.clamped()
         self.update()
 
+    def set_resonance_tract_state(self, state: ResonanceTractState) -> None:
+        self.resonance_tract_state = state.clamped()
+        self.update()
+
     def _svg_cache_key_for_state(self, state: SpeechOrganState, label: str) -> tuple[object, ...]:
         quantized = tuple(round(float(value), 2) for value in state.to_json_dict().values())
-        return (self.display_mode, self.svg_view_kind, self.show_airflow_overlay, quantized, label)
+        resonance = tuple(round(float(value), 2) for value in self.resonance_tract_state.to_json_dict().values())
+        return (self.display_mode, self.svg_view_kind, self.show_airflow_overlay, quantized, resonance, label)
 
     def _render_svg_view(self, painter: QPainter, rect: QRectF) -> bool:
         if self.display_mode != "Anatomical":
@@ -5676,7 +5733,7 @@ class VocalTractCanvas(QWidget):
         renderer = self._svg_renderer_cache_renderer if self._svg_renderer_cache_key == cache_key else None
         if renderer is None:
             svg = (
-                vocal_tract_side_svg(state, overlay=self.show_airflow_overlay, label=f"Vocal Tract Cutaway • {label}")
+                vocal_tract_side_svg(state, resonance=self.resonance_tract_state, overlay=self.show_airflow_overlay, label=f"Vocal Tract Cutaway • {label}")
                 if self.svg_view_kind == "side"
                 else anatomical_mouth_svg(state, overlay=self.show_airflow_overlay, label=f"Anatomical Mouth • {label}")
             )
@@ -6792,6 +6849,8 @@ class WaveToyWindow(QMainWindow):
         self.speech_diagnostics_text: QTextEdit | None = None
         self.voice_box_sliders: Dict[str, QSlider] = {}
         self.voice_box_value_labels: Dict[str, QLabel] = {}
+        self.resonance_sliders: Dict[str, QSlider] = {}
+        self.resonance_value_labels: Dict[str, QLabel] = {}
         self.voice_box_character_combo: QComboBox | None = None
         self.articulation_name_label: QLabel | None = None
         self.articulation_ipa_label: QLabel | None = None
@@ -6856,6 +6915,9 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_created_at: float | None = None
         self.voice_source_profile = DEFAULT_VOICE_SOURCE_PROFILE
         self.voice_box_state = VoiceBoxState.from_voice_source_profile(self.voice_source_profile)
+        self.resonance_tract_state = ResonanceTractState.from_voice_box_and_speech_organs(
+            self.voice_box_state, SpeechOrganState.from_articulation(self.current_phoneme)
+        )
         self.character_voice_profile = DEFAULT_CHARACTER_VOICE_PROFILE
         self.musical_timing_settings = DEFAULT_MUSICAL_TIMING_SETTINGS
         self.live_preview_enabled = False
@@ -6878,6 +6940,7 @@ class WaveToyWindow(QMainWindow):
             "voice_profile": "Neutral",
             "voice_source_profile": self.voice_source_profile.to_json_dict(),
             "voice_box_state": self.voice_box_state.to_json_dict(),
+            "resonance_tract_state": self.resonance_tract_state.to_json_dict(),
             "character_voice_profile": self.character_voice_profile.to_json_dict(),
             "legacy_voice_profile_map": dict(LEGACY_VOICE_PROFILE_CHARACTER_MAP["Neutral"]),
             "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
@@ -6977,10 +7040,41 @@ class WaveToyWindow(QMainWindow):
         voice_box_layout.addWidget(reset_button)
         dock_layout.addWidget(CollapsibleSection("Voice Box / Larynx Controls", voice_box, expanded=True))
 
+        resonance = QWidget()
+        resonance_layout = QVBoxLayout(resonance)
+        resonance_layout.setContentsMargins(0, 0, 0, 0)
+        resonance_layout.setSpacing(6)
+        resonance_basic = QWidget()
+        resonance_basic_layout = QGridLayout(resonance_basic)
+        resonance_basic_layout.setContentsMargins(0, 0, 0, 0)
+        resonance_basic_layout.setHorizontalSpacing(6)
+        resonance_basic_layout.setVerticalSpacing(3)
+        resonance_basic_fields = ["vocal_tract_length", "larynx_height", "resonance_depth", "chest_resonance", "head_resonance", "nasal_coupling"]
+        for row, field_name in enumerate(resonance_basic_fields):
+            self._add_resonance_slider_row(resonance_basic_layout, row, field_name)
+        resonance_layout.addWidget(resonance_basic)
+        resonance_advanced = QWidget()
+        resonance_advanced_layout = QGridLayout(resonance_advanced)
+        resonance_advanced_layout.setContentsMargins(0, 0, 0, 0)
+        resonance_advanced_layout.setHorizontalSpacing(6)
+        resonance_advanced_layout.setVerticalSpacing(3)
+        resonance_advanced_fields = [
+            "oral_cavity_length", "oral_cavity_width", "oral_cavity_height", "pharyngeal_volume", "pharyngeal_tension",
+            "brightness", "darkness", "formant_scale", "formant_shift_f1", "formant_shift_f2", "formant_shift_f3",
+        ]
+        for row, field_name in enumerate(resonance_advanced_fields):
+            self._add_resonance_slider_row(resonance_advanced_layout, row, field_name)
+        resonance_layout.addWidget(CollapsibleSection("Advanced Resonance", resonance_advanced, expanded=False))
+        reset_resonance_button = QPushButton("Reset Resonance")
+        reset_resonance_button.clicked.connect(self._reset_resonance_state)
+        resonance_layout.addWidget(reset_resonance_button)
+        dock_layout.addWidget(CollapsibleSection("Resonance Tract Controls", resonance, expanded=True))
+
         self.speech_diagnostics_dock.setWidget(dock_body)
         self.addDockWidget(Qt.RightDockWidgetArea, self.speech_diagnostics_dock)
         self.speech_diagnostics_dock.hide()
         self._sync_voice_box_controls()
+        self._sync_resonance_controls()
         self._update_speech_diagnostics_panel(self.current_phoneme)
 
     def _build_actions(self) -> None:
@@ -9000,6 +9094,31 @@ class WaveToyWindow(QMainWindow):
     def _voice_box_formant_metadata(self) -> Dict[str, float]:
         return self.voice_box_state.formant_bias_metadata()
 
+    def _resonance_state_for_phoneme(self, phoneme: ArticulationPhoneme) -> ResonanceTractState:
+        base = ResonanceTractState.from_voice_box_and_speech_organs(self.voice_box_state, self._speech_organ_state_for_phoneme(phoneme))
+        saved = getattr(self, "resonance_tract_state", base).to_json_dict()
+        base_values = base.to_json_dict()
+        for key, value in saved.items():
+            if key in base_values:
+                base_values[key] = value
+        return ResonanceTractState.from_json_dict(base_values)
+
+    def _formant_metrics_for_phoneme(self, phoneme: ArticulationPhoneme) -> Dict[str, float]:
+        return formants_from_articulation_with_resonance(phoneme, self._resonance_state_for_phoneme(phoneme))
+
+    def _resonance_formant_metadata(self, phoneme: ArticulationPhoneme | None = None) -> Dict[str, float]:
+        target = phoneme or self.current_phoneme
+        metrics = self._formant_metrics_for_phoneme(target)
+        return {
+            "resonance_formant_scale": metrics["resonance_formant_scale"],
+            "resonance_f1": metrics["f1"],
+            "resonance_f2": metrics["f2"],
+            "resonance_f3": metrics["f3"],
+            "resonance_brightness": metrics["resonance_brightness"],
+            "resonance_darkness": metrics["resonance_darkness"],
+            "nasal_coupling": metrics["nasal_coupling"],
+        }
+
     def _add_voice_box_slider_row(self, layout: QGridLayout, row: int, field_name: str) -> None:
         label_text = field_name.replace("_", " ")
         label = QLabel(label_text)
@@ -9027,6 +9146,71 @@ class WaveToyWindow(QMainWindow):
             if label is not None:
                 label.setText(f"{float(values.get(key, 0.5)):.2f}")
 
+    def _add_resonance_slider_row(self, layout: QGridLayout, row: int, field_name: str) -> None:
+        label = QLabel(field_name.replace("_", " "))
+        slider = QSlider(Qt.Horizontal)
+        if field_name.startswith("formant_shift_"):
+            slider.setRange(-100, 100)
+            default_label = "0.00"
+        elif field_name == "formant_scale":
+            slider.setRange(50, 150)
+            default_label = "1.00"
+        else:
+            slider.setRange(0, 100)
+            default_label = "0.50"
+        slider.setToolTip(f"ResonanceTractState.{field_name}: render-copy resonance control.")
+        value_label = QLabel(default_label)
+        value_label.setMinimumWidth(38)
+        slider.valueChanged.connect(lambda _value, key=field_name: self._resonance_slider_changed(key))
+        self.resonance_sliders[field_name] = slider
+        self.resonance_value_labels[field_name] = value_label
+        layout.addWidget(label, row, 0)
+        layout.addWidget(slider, row, 1)
+        layout.addWidget(value_label, row, 2)
+
+    def _resonance_slider_value(self, key: str, slider: QSlider) -> float:
+        if key.startswith("formant_shift_"):
+            return slider.value() / 100.0
+        return slider.value() / 100.0
+
+    def _sync_resonance_controls(self) -> None:
+        if not hasattr(self, "resonance_tract_state"):
+            return
+        values = self.resonance_tract_state.to_json_dict()
+        for key, slider in self.resonance_sliders.items():
+            value = float(values.get(key, 0.0 if key.startswith("formant_shift_") else (1.0 if key == "formant_scale" else 0.5)))
+            slider.blockSignals(True)
+            slider.setValue(int(round(value * 100)))
+            slider.blockSignals(False)
+            label = self.resonance_value_labels.get(key)
+            if label is not None:
+                label.setText(f"{value:.2f}")
+
+    def _resonance_slider_changed(self, key: str) -> None:
+        values = self.resonance_tract_state.to_json_dict()
+        slider = self.resonance_sliders.get(key)
+        if slider is not None:
+            values[key] = self._resonance_slider_value(key, slider)
+        self.resonance_tract_state = ResonanceTractState.from_json_dict(values)
+        self.articulation_word_render_settings["resonance_tract_state"] = self.resonance_tract_state.to_json_dict()
+        self._sync_resonance_controls()
+        self._push_voice_box_state_to_canvases()
+        self._update_articulation_preview(regenerate=False)
+        self._update_speech_diagnostics_panel(self.current_phoneme)
+        self._mark_articulation_word_dirty()
+
+    def _reset_resonance_state(self, checked: bool = False) -> None:
+        del checked
+        self.resonance_tract_state = ResonanceTractState.from_voice_box_and_speech_organs(
+            self.voice_box_state, self._speech_organ_state_for_phoneme(self.current_phoneme)
+        )
+        self.articulation_word_render_settings["resonance_tract_state"] = self.resonance_tract_state.to_json_dict()
+        self._sync_resonance_controls()
+        self._push_voice_box_state_to_canvases()
+        self._update_articulation_preview(regenerate=False)
+        self._update_speech_diagnostics_panel(self.current_phoneme)
+        self._mark_articulation_word_dirty()
+
     def _voice_box_slider_changed(self, key: str) -> None:
         values = self.voice_box_state.to_json_dict()
         slider = self.voice_box_sliders.get(key)
@@ -9034,7 +9218,12 @@ class WaveToyWindow(QMainWindow):
             values[key] = slider.value() / 100.0
         self.voice_box_state = VoiceBoxState.from_json_dict(values)
         self.articulation_word_render_settings["voice_box_state"] = self.voice_box_state.to_json_dict()
+        self.resonance_tract_state = ResonanceTractState.from_voice_box_and_speech_organs(
+            self.voice_box_state, self._speech_organ_state_for_phoneme(self.current_phoneme)
+        )
+        self.articulation_word_render_settings["resonance_tract_state"] = self.resonance_tract_state.to_json_dict()
         self._sync_voice_box_controls()
+        self._sync_resonance_controls()
         self._push_voice_box_state_to_canvases()
         self._update_speech_diagnostics_panel(self.current_phoneme)
         self._mark_articulation_word_dirty()
@@ -9047,7 +9236,12 @@ class WaveToyWindow(QMainWindow):
             self.voice_box_character_combo.setCurrentText("Neutral")
             self.voice_box_character_combo.blockSignals(False)
         self.articulation_word_render_settings["voice_box_state"] = self.voice_box_state.to_json_dict()
+        self.resonance_tract_state = ResonanceTractState.from_voice_box_and_speech_organs(
+            self.voice_box_state, self._speech_organ_state_for_phoneme(self.current_phoneme)
+        )
+        self.articulation_word_render_settings["resonance_tract_state"] = self.resonance_tract_state.to_json_dict()
         self._sync_voice_box_controls()
+        self._sync_resonance_controls()
         self._push_voice_box_state_to_canvases()
         self._update_speech_diagnostics_panel(self.current_phoneme)
         self._mark_articulation_word_dirty()
@@ -9056,6 +9250,11 @@ class WaveToyWindow(QMainWindow):
         base = VoiceBoxState.from_voice_source_profile(self.voice_source_profile).to_json_dict()
         base.update(VOICE_BOX_CHARACTER_PRESETS.get(preset_name, {}))
         self.voice_box_state = VoiceBoxState.from_json_dict(base)
+        resonance_base = ResonanceTractState.from_voice_box_and_speech_organs(
+            self.voice_box_state, self._speech_organ_state_for_phoneme(self.current_phoneme)
+        ).to_json_dict()
+        resonance_base.update(RESONANCE_CHARACTER_PRESETS.get(preset_name, {}))
+        self.resonance_tract_state = ResonanceTractState.from_json_dict(resonance_base)
         self.character_voice_profile = replace(
             self.character_voice_profile,
             profile_id=preset_name.lower().replace(" ", "_"),
@@ -9063,8 +9262,10 @@ class WaveToyWindow(QMainWindow):
             notes="Task 068 mapping preset; direct phoneme controls remain authoritative.",
         )
         self.articulation_word_render_settings["voice_box_state"] = self.voice_box_state.to_json_dict()
+        self.articulation_word_render_settings["resonance_tract_state"] = self.resonance_tract_state.to_json_dict()
         self.articulation_word_render_settings["character_voice_profile"] = self.character_voice_profile.to_json_dict()
         self._sync_voice_box_controls()
+        self._sync_resonance_controls()
         self._push_voice_box_state_to_canvases()
         self._update_speech_diagnostics_panel(self.current_phoneme)
         self._mark_articulation_word_dirty()
@@ -9076,6 +9277,8 @@ class WaveToyWindow(QMainWindow):
         ):
             if canvas is not None:
                 canvas.set_voice_box_state(self.voice_box_state)
+                if hasattr(canvas, "set_resonance_tract_state"):
+                    canvas.set_resonance_tract_state(self._resonance_state_for_phoneme(self.current_phoneme))
 
     def _update_speech_diagnostics_panel(
         self,
@@ -9088,8 +9291,10 @@ class WaveToyWindow(QMainWindow):
             return
         state = self._speech_organ_state_for_phoneme(phoneme)
         voice_box = self.voice_box_state.clamped()
+        resonance = self._resonance_state_for_phoneme(phoneme)
         character = self.character_voice_profile.name
         formant_bias = self._voice_box_formant_metadata()
+        formants = self._formant_metrics_for_phoneme(phoneme)
         metrics = {
             "active_phoneme": phoneme.name,
             "target_phoneme": target_name,
@@ -9113,21 +9318,52 @@ class WaveToyWindow(QMainWindow):
             "burst_strength": state.burst_strength,
             "voice_pitch": state.voice_pitch,
         }
-        lines = ["Speech Diagnostics (read-only)"]
-        for key, value in metrics.items():
-            if isinstance(value, float):
-                lines.append(f"{key}: {value:.2f}")
-            else:
-                lines.append(f"{key}: {value}")
+        lines = [
+            "Speech Diagnostics (read-only)",
+            "",
+            "Active Phoneme",
+            f"active_phoneme: {phoneme.name}",
+            f"target_phoneme: {target_name}",
+            f"transition_model: {transition_model}",
+            f"transition_progress: {float(np.clip(transition_progress, 0.0, 1.0)):.2f}",
+            "",
+            "Speech Organ State",
+        ]
+        for key in ("jaw_open", "lip_open", "lip_rounding", "tongue_body_height", "tongue_frontness", "velum_open", "nasal_airflow", "airflow", "closure_strength", "burst_strength", "voice_pitch"):
+            value = metrics[key]
+            lines.append(f"{key}: {value:.2f}" if isinstance(value, float) else f"{key}: {value}")
         lines.extend([
             "",
+            "Voice Box State",
             f"character_profile: {character}",
             f"voice_source_profile: {self.voice_source_profile.name}",
             f"voice_box_rasp: {voice_box.rasp:.2f}",
             f"voice_box_jitter: {voice_box.jitter:.2f}",
             f"voice_box_shimmer: {voice_box.shimmer:.2f}",
             f"voice_box_vocal_damage: {voice_box.vocal_damage:.2f}",
+            f"voice_box_larynx_height: {voice_box.larynx_height:.2f}",
+            f"voice_box_vocal_tract_length: {voice_box.vocal_tract_length:.2f}",
+            "",
+            "Resonance Tract State",
+            f"vocal_tract_length: {resonance.vocal_tract_length:.2f}",
+            f"larynx_height: {resonance.larynx_height:.2f}",
+            f"resonance_depth: {resonance.resonance_depth:.2f}",
+            f"chest_resonance: {resonance.chest_resonance:.2f}",
+            f"head_resonance: {resonance.head_resonance:.2f}",
+            f"nasal_coupling: {resonance.nasal_coupling:.2f}",
+            f"brightness: {resonance.brightness:.2f}",
+            f"darkness: {resonance.darkness:.2f}",
+            "",
+            "Formants",
+            f"base_f1: {formants['base_f1']:.0f} Hz → resonance_f1: {formants['f1']:.0f} Hz",
+            f"base_f2: {formants['base_f2']:.0f} Hz → resonance_f2: {formants['f2']:.0f} Hz",
+            f"base_f3: {formants['base_f3']:.0f} Hz → resonance_f3: {formants['f3']:.0f} Hz",
+            f"resonance_formant_scale: {formants['resonance_formant_scale']:.2f}",
             f"formant_bias_metadata: {json.dumps(formant_bias, sort_keys=True)}",
+            "",
+            "Render Mode",
+            f"word_render_mode: {self._articulation_word_render_mode()}",
+            f"bypass_formants: {bool(self.articulation_word_render_settings.get('continuous_debug_bypass_formants', False))}",
         ])
         self.speech_diagnostics_text.setPlainText("\n".join(lines))
 
@@ -9145,9 +9381,12 @@ class WaveToyWindow(QMainWindow):
         if self.graphical_vocal_canvas is not None:
             self.graphical_vocal_canvas.set_phoneme(p)
         summary = articulation_summary(p)
-        f1, f2, f3 = formants_from_articulation(p)
+        formants = self._formant_metrics_for_phoneme(p)
         if self.articulation_formant_label is not None:
-            self.articulation_formant_label.setText(f"Formants: F1 {f1:.0f} Hz • F2 {f2:.0f} Hz • F3 {f3:.0f} Hz")
+            self.articulation_formant_label.setText(
+                f"Formants: F1 {formants['f1']:.0f} Hz • F2 {formants['f2']:.0f} Hz • F3 {formants['f3']:.0f} Hz "
+                f"(base {formants['base_f1']:.0f}/{formants['base_f2']:.0f}/{formants['base_f3']:.0f})"
+            )
         if self.articulation_summary_label is not None:
             self.articulation_summary_label.setText(f"{p.name} /{p.ipa}/  |  {summary}")
         if self.articulation_mix_debug_label is not None:
@@ -10157,12 +10396,15 @@ class WaveToyWindow(QMainWindow):
             phoneme, _kind, _label, transition_progress, _duration_ms, _index, _in_transition = self._motion_state_at_ms(t)
             state = self._speech_organ_state_for_phoneme(phoneme)
             metrics = state.summary_metrics()
+            resonance = self._resonance_state_for_phoneme(phoneme)
+            formants = formants_from_articulation_with_resonance(phoneme, resonance)
             frame = VisemeFrame(
                 time_ms=round(t, 3), phoneme=phoneme.name, viseme=self._viseme_name_for_state(state, phoneme.phoneme_family),
                 mouth_open=float(state.jaw_open), lip_rounding=float(state.lip_rounding), tongue_height=float(metrics["tongue_height"]),
                 tongue_frontness=float(state.tongue_frontness), nasal_open=float(state.velum_open), closure=float(state.closure_strength),
                 voiced_gain=float(state.voiced_gain), airflow=float(state.airflow), transition_progress=float(transition_progress),
                 speech_organ_state=state.to_json_dict(), voice_box_state=self.voice_box_state.to_json_dict(),
+                resonance_tract_state=resonance.to_json_dict(), formants=formants,
             )
             frames.append(frame.to_json_dict())
             t += step_ms
@@ -10187,6 +10429,8 @@ class WaveToyWindow(QMainWindow):
             "render_mode": self._articulation_word_render_mode(),
             "phoneme_sequence": self._speech_display_sequence_for_chain(),
             "viseme_timeline": frames,
+            "resonance_tract_state_frames": [{"time_ms": f["time_ms"], "state": f.get("resonance_tract_state", {})} for f in frames],
+            "formant_frames": [{"time_ms": f["time_ms"], "formants": f.get("formants", {})} for f in frames],
         }
         Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         QMessageBox.information(self, "Export Viseme JSON", f"Exported {len(frames)} viseme frames to {filename}.")
@@ -10202,17 +10446,28 @@ class WaveToyWindow(QMainWindow):
         frames = self._build_viseme_frames()
         duration_ms = self._articulation_motion_timeline()[1]
         payload = {
-            "schema": "wavetoy.animation_export.v1", "version": "0.2-voice-box", "created_at": datetime.now(timezone.utc).isoformat(), "frame_rate": 24, "duration_ms": duration_ms, "render_mode": self._articulation_word_render_mode(), "phoneme_sequence": self._speech_display_sequence_for_chain(),
+            "schema": "wavetoy.animation_export.v1", "version": "0.3-resonance-tract", "created_at": datetime.now(timezone.utc).isoformat(), "frame_rate": 24, "duration_ms": duration_ms, "render_mode": self._articulation_word_render_mode(), "phoneme_sequence": self._speech_display_sequence_for_chain(),
             "voice_source_profile": self.voice_source_profile.to_json_dict(), "character_profile": self.character_voice_profile.to_json_dict(),
+            "resonance_profile": self.resonance_tract_state.to_json_dict(),
             "phoneme_timeline": [item.to_json_dict() for item in self.articulation_chain_items], "viseme_timeline": frames,
             "speech_organ_state_frames": [{"time_ms": f["time_ms"], "state": f.get("speech_organ_state", {})} for f in frames],
             "voice_box_state_frames": [{"time_ms": f["time_ms"], "state": f.get("voice_box_state", self.voice_box_state.to_json_dict()), "formant_bias_metadata": self._voice_box_formant_metadata()} for f in frames],
+            "resonance_tract_state_frames": [{"time_ms": f["time_ms"], "state": f.get("resonance_tract_state", self.resonance_tract_state.to_json_dict())} for f in frames],
+            "formant_frames": [{"time_ms": f["time_ms"], "formants": f.get("formants", {})} for f in frames],
             "viseme_frames": frames, "phoneme_frames": [item.to_json_dict() for item in self.articulation_chain_items],
             "timing_frames": [{"time_ms": f["time_ms"], "transition_progress": f["transition_progress"]} for f in frames],
             "mouth_open_curve": [[f["time_ms"], f["mouth_open"]] for f in frames], "lip_rounding_curve": [[f["time_ms"], f["lip_rounding"]] for f in frames],
             "tongue_height_curve": [[f["time_ms"], f["tongue_height"]] for f in frames], "tongue_frontness_curve": [[f["time_ms"], f["tongue_frontness"]] for f in frames],
             "nasal_open_curve": [[f["time_ms"], f["nasal_open"]] for f in frames], "closure_curve": [[f["time_ms"], f["closure"]] for f in frames],
             "airflow_curve": [[f["time_ms"], f["airflow"]] for f in frames], "voicing_curve": [[f["time_ms"], f["voiced_gain"]] for f in frames],
+            "resonance_curves": {
+                "f1_curve": [[f["time_ms"], f.get("formants", {}).get("f1", 0.0)] for f in frames],
+                "f2_curve": [[f["time_ms"], f.get("formants", {}).get("f2", 0.0)] for f in frames],
+                "f3_curve": [[f["time_ms"], f.get("formants", {}).get("f3", 0.0)] for f in frames],
+                "nasal_coupling_curve": [[f["time_ms"], f.get("resonance_tract_state", {}).get("nasal_coupling", 0.0)] for f in frames],
+                "chest_resonance_curve": [[f["time_ms"], f.get("resonance_tract_state", {}).get("chest_resonance", 0.0)] for f in frames],
+                "head_resonance_curve": [[f["time_ms"], f.get("resonance_tract_state", {}).get("head_resonance", 0.0)] for f in frames],
+            },
         }
         Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         QMessageBox.information(self, "Export Animation JSON", f"Exported generic animation data to {filename}.")
@@ -10878,17 +11133,19 @@ class WaveToyWindow(QMainWindow):
             return mono
         spectrum = np.fft.rfft(mono)
         freqs = np.fft.rfftfreq(mono.size, 1.0 / SAMPLE_RATE)
-        f1, f2, f3 = formants_from_articulation(phoneme)
+        formants = self._formant_metrics_for_phoneme(phoneme)
+        f1, f2, f3 = formants["f1"], formants["f2"], formants["f3"]
         target = np.ones_like(freqs, dtype=np.float64)
         for center, width, gain in ((f1, 220.0, 0.16), (f2, 420.0, 0.11), (f3, 680.0, 0.06)):
             target += gain * np.exp(-0.5 * ((freqs - center) / width) ** 2)
         if phoneme.nasal_open > 0.0:
-            nasal = float(np.clip(phoneme.nasal_open, 0.0, 1.0))
+            nasal = float(np.clip(max(phoneme.nasal_open, formants.get("nasal_coupling", 0.0) * 0.75), 0.0, 1.0))
             nasal_center = 260.0 + (1.0 - phoneme.tongue_frontness) * 180.0
             target += nasal * 0.08 * np.exp(-0.5 * ((freqs - nasal_center) / 220.0) ** 2)
             target *= 1.0 / (1.0 + nasal * 0.12 * (freqs / 3200.0) ** 2)
         target *= 1.0 - 0.05 * phoneme.lip_rounding * np.clip((freqs - 2000.0) / 5600.0, 0.0, 1.0)
-        envelope = 1.0 + (np.clip(target, 0.74, 1.08) - 1.0) * intensity
+        resonance_safety = float(np.clip(1.0 - abs(formants.get("resonance_formant_scale", 1.0) - 1.0) * 0.45, 0.82, 1.0))
+        envelope = 1.0 + (np.clip(target, 0.74, 1.08) - 1.0) * intensity * resonance_safety
         shaped = np.fft.irfft(spectrum * envelope, n=mono.size)
         input_rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
         shaped_rms = float(np.sqrt(np.mean(np.square(shaped)))) if shaped.size else 0.0
@@ -11482,6 +11739,7 @@ class WaveToyWindow(QMainWindow):
             distortion_status = "distorted"
         formant_input_rms = math.sqrt(formant_input_energy / formant_sample_count) if formant_sample_count > 0 else 0.0
         formant_output_rms = math.sqrt(formant_output_energy / formant_sample_count) if formant_sample_count > 0 else 0.0
+        resonance_debug = self._resonance_formant_metadata(self.current_phoneme)
         metrics = {
             "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
             "chain_length": len(self.articulation_chain_items),
@@ -11509,6 +11767,7 @@ class WaveToyWindow(QMainWindow):
             "formant_input_rms": round(formant_input_rms, 9),
             "formant_output_rms": round(formant_output_rms, 9),
             "formant_gain_ratio": round(formant_output_rms / max(1.0e-9, formant_input_rms), 6),
+            **{key: round(float(value), 6) for key, value in resonance_debug.items()},
             "frame_index": int(diagnostic_frames[0]["frame_index"]) if diagnostic_frames else 0,
             "active_phoneme": active_phoneme,
             "pitch_debug_frames": diagnostic_frames,
@@ -11660,6 +11919,7 @@ class WaveToyWindow(QMainWindow):
             "word_render_settings": dict(self.articulation_word_render_settings),
             "voice_source_profile": self.voice_source_profile.to_json_dict(),
             "voice_box_state": self.voice_box_state.to_json_dict(),
+            "resonance_tract_state": self.resonance_tract_state.to_json_dict(),
             "character_voice_profile": self.character_voice_profile.to_json_dict(),
             "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
         }
