@@ -1,45 +1,17 @@
 # Anatomical Visualization
 
-Task 067 introduces SVG-based anatomical visualization foundations while preserving the existing simple vocal-tract drawing.
+Task 068 keeps Simple visualization available and optional while improving Anatomical SVG mode.
 
-## Display modes
+## SVG render cache
 
-- **Simple** keeps the existing cartoon/symbolic visualizer.
-- **Anatomical** uses generated SVG driven by `SpeechOrganState`.
+`VocalTractCanvas` now keeps a lightweight `QSvgRenderer` cache for Anatomical mode. The cache key includes display mode, SVG view kind, airflow overlay visibility, quantized `SpeechOrganState` values, and the current/next label used in the SVG.
 
-## Anatomical mouth view
+Simple mode remains unaffected and continues to paint directly with Qt.
 
-The frontal anatomical mouth SVG includes:
+## Side cutaway refinements
 
-- upper lip and lower lip
-- upper teeth and lower teeth
-- tongue
-- palate
-- oral cavity
+The side-cutaway SVG now includes a clearer larynx/voice-box region, vocal-fold shapes, a glottal opening indicator, and a vibration ring driven by `voiced_gain`. Oral airflow, nasal airflow, and voice particles remain separate overlays.
 
-It is resolution-independent SVG and updates from the same interpolated state used by timeline scrubbing and word-motion playback.
+## Readability goals
 
-## Vocal tract side-cutaway
-
-The optional side-cutaway panel is collapsed by default. It shows:
-
-- lips, teeth, tongue, and palate
-- velum and nasal cavity
-- pharynx and larynx
-- oral, nasal, and voicing airflow particles
-
-## Airflow model
-
-SVG particle overlays use consistent colors:
-
-- oral airflow: blue
-- nasal airflow: green
-- stop burst: orange
-- frication: purple
-- voicing: red
-
-The overlay is lightweight and can be disabled from the Articulation Lab display controls.
-
-## Voice-source model
-
-Voice-source visualization is separate from articulation. The read-only diagnostics panel reports voice-source-style values including vocal fold tension, thickness, glottal closure, breathiness, rasp, jitter, and shimmer without changing audio synthesis.
+The anatomical views continue to emphasize readable lips, teeth, tongue, palate, velum, nasal cavity, oral airflow, nasal airflow, and larynx status for scrubbing and Word Motion playback.

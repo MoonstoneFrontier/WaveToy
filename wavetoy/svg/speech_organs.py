@@ -68,6 +68,8 @@ def vocal_tract_side_svg(state: SpeechOrganState, *, overlay: bool = True, label
     oral = _particles("#2d9cdb", state.airflow * (1.0 - state.closure_strength), 202, 167, lip_x + 48, 154, "side-oral") if overlay else ""
     nasal = _particles("#2ecc71", state.nasal_airflow, 193, 82, 310, 58, "side-nasal") if overlay else ""
     voice = _particles("#e74c3c", state.voiced_gain, 112, 242, 132, 202, "side-voice") if overlay else ""
+    glottis_gap = 4 + state.glottal_open * 18
+    vibration_opacity = 0.18 + state.voiced_gain * 0.62
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 300" role="img" aria-label="{escape(label)}">
   <rect width="420" height="300" rx="24" fill="#f7fbff"/>
   <path id="pharynx" d="M 128 78 C 108 120 111 204 132 252" fill="none" stroke="#8d6e63" stroke-width="18" stroke-linecap="round"/>
@@ -78,7 +80,11 @@ def vocal_tract_side_svg(state: SpeechOrganState, *, overlay: bool = True, label
   <path id="tongue" d="M 126 210 C 162 212 {_fmt(tongue_peak_x - 43)} {_fmt(tongue_peak_y + 28)} {_fmt(tongue_peak_x)} {_fmt(tongue_peak_y)} C {_fmt(tongue_peak_x + 64)} {_fmt(tongue_peak_y + 14)} 261 {_fmt(jaw_y)} 128 {_fmt(jaw_y)} Z" fill="#ff8fa3" stroke="#b23a48" stroke-width="4"/>
   <path id="teeth" d="M 296 130 L 323 140 M 296 168 L 322 159" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
   <path id="lips" d="M {_fmt(lip_x)} 136 C {_fmt(lip_x + 23)} 142 {_fmt(lip_x + 23)} 160 {_fmt(lip_x)} 167" fill="none" stroke="#d1495b" stroke-width="{_fmt(8 + state.lip_rounding * 7)}" stroke-linecap="round"/>
-  <ellipse id="larynx" cx="119" cy="246" rx="28" ry="24" fill="#ffe0bd" stroke="#e74c3c" stroke-width="{_fmt(2 + state.glottal_closure * 5)}"/>
+  <ellipse id="larynx" cx="119" cy="246" rx="30" ry="25" fill="#ffe0bd" stroke="#e74c3c" stroke-width="{_fmt(2 + state.glottal_closure * 5)}"/>
+  <path id="vocal_fold_left" d="M 106 246 C 111 239 116 239 121 {_fmt(246 - glottis_gap / 2)}" stroke="#8c1c13" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <path id="vocal_fold_right" d="M 106 252 C 113 257 118 257 121 {_fmt(246 + glottis_gap / 2)}" stroke="#8c1c13" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <ellipse id="vocal_fold_vibration" cx="122" cy="249" rx="{_fmt(10 + state.voiced_gain * 13)}" ry="{_fmt(6 + state.voiced_gain * 10)}" fill="none" stroke="#e74c3c" stroke-width="3" opacity="{_fmt(vibration_opacity)}"/>
+  <text x="74" y="286" fill="#8c1c13" font-size="10" font-weight="700">voice box / larynx</text>
   {oral}{nasal}{voice}
   <text x="18" y="27" fill="#1d3557" font-size="15" font-weight="700">{escape(label)}</text>
 </svg>'''
