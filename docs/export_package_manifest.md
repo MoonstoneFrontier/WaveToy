@@ -10,6 +10,7 @@ A future WaveToy export package should contain:
 - `recipe.json`
 - `articulation.json`
 - `diagnostics.json`
+- `viseme.json`
 - `provenance.manifest.json`
 
 ## Manifest metadata
@@ -24,6 +25,9 @@ A future WaveToy export package should contain:
 - `render_hash`
 - `phoneme_sequence`
 - `voice_profile`
+- `voice_source_profile`
+- `character_profile`
+- `musical_timing_settings`
 - `source_files`
 - `license`
 - `consent_notes`
@@ -41,6 +45,9 @@ A future WaveToy export package should contain:
   "render_hash": "",
   "phoneme_sequence": [],
   "voice_profile": "Neutral",
+  "voice_source_profile": {},
+  "character_profile": {},
+  "musical_timing_settings": {},
   "source_files": [],
   "license": "",
   "consent_notes": ""
@@ -53,3 +60,7 @@ A future WaveToy export package should contain:
 - Source-file and consent metadata should be explicit, especially for imported recordings or future voice-font experiments.
 - Continuous diagnostics should be included when Continuous Mouth Motion is used.
 - Publishing UI is future work and intentionally out of scope for this task.
+
+## Task 063 workflow note
+
+Task 063 starts feeding manifest-ready metadata from rendered speech workflows: render mode, phoneme sequence, legacy voice profile, upstream voice source profile, character profile, musical timing settings, render hash, and consent notes should remain human-readable where practical.

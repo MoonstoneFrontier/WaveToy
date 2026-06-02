@@ -888,6 +888,112 @@ class ArticulationChainItem:
 
 
 
+
+
+@dataclass
+class VoiceSourceProfile:
+    """Upstream voice-box/source settings applied before mouth articulation shapes sound."""
+
+    profile_id: str = "safe_default"
+    name: str = "Safe Default"
+    vocal_fold_length: float = 0.50
+    vocal_fold_thickness: float = 0.50
+    vocal_fold_tension: float = 0.50
+    glottal_closure: float = 0.55
+    breathiness: float = 0.18
+    rasp: float = 0.05
+    jitter: float = 0.02
+    shimmer: float = 0.02
+    larynx_height: float = 0.50
+    vocal_tract_length: float = 0.50
+    age_looseness: float = 0.20
+    notes: str = "Neutral upstream source; mouth articulation remains responsible for phoneme shaping."
+
+    def to_json_dict(self) -> Dict[str, object]:
+        data = asdict(self)
+        for key, value in list(data.items()):
+            if isinstance(value, float):
+                data[key] = float(np.clip(value, 0.0, 1.0))
+        return data
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "VoiceSourceProfile":
+        profile = cls(**{field_name: data[field_name] for field_name in cls.__dataclass_fields__ if field_name in data})
+        return VoiceSourceProfile(**profile.to_json_dict())
+
+
+@dataclass
+class CharacterVoiceProfile:
+    """Creative delivery layer that can point at source, timing, and accentuation defaults."""
+
+    profile_id: str = "neutral_character"
+    name: str = "Neutral"
+    age_group: str = "adult"
+    gender_presentation: str = "neutral"
+    body_size: str = "average"
+    personality_delivery: str = "balanced"
+    mbti_hint: str = "creative hint only"
+    voice_source_profile_id: str = "safe_default"
+    default_pitch_bias: float = 0.0
+    default_timing_bias: float = 0.0
+    default_accentuation_bias: float = 0.0
+    notes: str = "Broad delivery preset; does not replace phoneme controls."
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class MusicalTimingSettings:
+    """Future beat/measure timing layer; milliseconds remain the default workflow."""
+
+    enabled: bool = False
+    bpm: float = 120.0
+    time_signature_numerator: int = 4
+    time_signature_denominator: int = 4
+    snap_enabled: bool = False
+    snap_subdivision: str = "1/16"
+    swing_percent: float = 0.0
+    count_in_enabled: bool = False
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class VisemeFrame:
+    """Generic animation frame derived from existing phoneme/articulation state."""
+
+    time_ms: float
+    phoneme: str
+    viseme: str
+    mouth_open: float
+    lip_rounding: float
+    tongue_height: float
+    tongue_frontness: float
+    nasal_open: float
+    closure: float
+    voiced_gain: float
+    airflow: float
+    transition_progress: float
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+DEFAULT_VOICE_SOURCE_PROFILE = VoiceSourceProfile()
+DEFAULT_CHARACTER_VOICE_PROFILE = CharacterVoiceProfile()
+DEFAULT_MUSICAL_TIMING_SETTINGS = MusicalTimingSettings()
+LEGACY_VOICE_PROFILE_CHARACTER_MAP: Dict[str, Dict[str, object]] = {
+    "Neutral": {"character_profile_id": "neutral_character", "voice_source_profile_id": "safe_default"},
+    "Child": {"character_profile_id": "child_bright", "voice_source_profile_id": "child_source"},
+    "Female": {"character_profile_id": "female_presenting", "voice_source_profile_id": "lighter_source"},
+    "Male": {"character_profile_id": "male_presenting", "voice_source_profile_id": "deeper_source"},
+    "Robot": {"character_profile_id": "robotic_precise", "voice_source_profile_id": "synthetic_source"},
+    "Monster": {"character_profile_id": "monster_large", "voice_source_profile_id": "raspy_large_source"},
+    "Whisper": {"character_profile_id": "whisper_close", "voice_source_profile_id": "breathy_source"},
+}
+
 @dataclass
 class VoiceCapturePrompt:
     """Future capture prompt for consent-based voice-font recording workflows."""
@@ -6285,6 +6391,15 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_signature: str | None = None
         self.articulation_last_word_render_path: Path | None = None
         self.articulation_last_word_render_created_at: float | None = None
+        self.voice_source_profile = DEFAULT_VOICE_SOURCE_PROFILE
+        self.character_voice_profile = DEFAULT_CHARACTER_VOICE_PROFILE
+        self.musical_timing_settings = DEFAULT_MUSICAL_TIMING_SETTINGS
+        self.live_preview_enabled = False
+        self.live_preview_target = "selected_timeline_fragment"
+        self.live_preview_timer = QTimer(self)
+        self.live_preview_timer.setSingleShot(True)
+        self.live_preview_timer.timeout.connect(self._run_live_preview)
+        self.live_preview_debounce_ms = 320
         self.articulation_word_render_settings: Dict[str, object] = {
             "gap_after_ms": 0,
             "crossfade_ms": ARTICULATION_DEFAULT_WORD_CROSSFADE_MS,
@@ -6297,6 +6412,10 @@ class WaveToyWindow(QMainWindow):
             "word_fade_in_ms": 5,
             "word_fade_out_ms": 8,
             "voice_profile": "Neutral",
+            "voice_source_profile": self.voice_source_profile.to_json_dict(),
+            "character_voice_profile": self.character_voice_profile.to_json_dict(),
+            "legacy_voice_profile_map": dict(LEGACY_VOICE_PROFILE_CHARACTER_MAP["Neutral"]),
+            "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
             "continuous_debug_bypass_formants": False,
             "continuous_formant_intensity": 0.45,
             "continuous_pitch_smoothing_ms": 20,
@@ -7337,6 +7456,19 @@ class WaveToyWindow(QMainWindow):
             label.setObjectName("symbolHint")
             label.setWordWrap(True)
             layout.addWidget(label)
+            if section_title == "Recording Checklist":
+                workflow_row = QHBoxLayout()
+                import_button = self._make_story_button("📥", "Import Recording", "#b8f2e6", self._import_voice_font_recording)
+                record_button = self._make_story_button("●", "Record", "#ffadad", lambda checked=False: self._show_future_workflow_notice("Voice Font Record", "Recording is a disabled placeholder until an explicit capture backend is added."))
+                analyze_button = self._make_story_button("🔎", "Analyze", "#d7b9ff", lambda checked=False: self._show_future_workflow_notice("Voice Font Analyze", "Analysis is a disabled placeholder; no voice cloning or ML training is implemented."))
+                record_button.setEnabled(False)
+                record_button.setToolTip("Placeholder only: recording backend is not implemented yet.")
+                analyze_button.setEnabled(False)
+                analyze_button.setToolTip("Placeholder only: analysis backend is not implemented yet.")
+                for workflow_button in (import_button, record_button, analyze_button):
+                    workflow_button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+                    workflow_row.addWidget(workflow_button)
+                layout.addLayout(workflow_row)
             button = self._make_story_button("🧭", "Open Future Workflow Note", "#d7b9ff", lambda checked=False, st=section_title: self._show_future_workflow_notice(st, "Voice Font workflow is a consent-first foundation."))
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             layout.addWidget(button)
@@ -7693,6 +7825,18 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_status_label.setWordWrap(True)
         chain_layout.addWidget(self.articulation_word_status_label)
 
+        live_preview_row = QHBoxLayout()
+        live_preview_row.setSpacing(8)
+        self.live_preview_checkbox = QCheckBox("Live Preview")
+        self.live_preview_checkbox.setChecked(False)
+        self.live_preview_checkbox.setToolTip("Default off. When enabled, timing and articulation edits debounce for about 320 ms, stop any previous preview, and play the selected phoneme/fragment.")
+        self.live_preview_checkbox.toggled.connect(self._set_live_preview_enabled)
+        live_preview_row.addWidget(self.live_preview_checkbox)
+        live_preview_note = QLabel("Debounced edit audition; no overlapping preview playback.")
+        live_preview_note.setObjectName("symbolHint")
+        live_preview_row.addWidget(live_preview_note, 1)
+        chain_layout.addLayout(live_preview_row)
+
         self.articulation_smooth_transitions_checkbox = QCheckBox("Smooth Mouth Transitions")
         self.articulation_smooth_transitions_checkbox.setChecked(bool(self.articulation_word_render_settings.get("smooth_mouth_transitions", True)))
         self.articulation_smooth_transitions_checkbox.setToolTip("Create Word uses smoothstep slider motion between phoneme shapes when enabled.")
@@ -7717,6 +7861,11 @@ class WaveToyWindow(QMainWindow):
         validate_button.setCursor(Qt.PointingHandCursor)
         validate_button.setToolTip("Render known test chains with Continuous Mouth Motion and report whether audio, pitch stability, clipping, and distortion pass quality checks.")
         validate_button.clicked.connect(self._validate_continuous_render_chains)
+        stop_test_button = QPushButton("Run Stop Test")
+        stop_test_button.setObjectName("phonemeCardPrimaryAction")
+        stop_test_button.setCursor(Qt.PointingHandCursor)
+        stop_test_button.setToolTip("Render B/D/G/P/T/K stop test chains and print burst diagnostics.")
+        stop_test_button.clicked.connect(self._run_stop_consonant_tests)
         self.continuous_debug_bypass_formants_checkbox = QCheckBox("Bypass formants")
         self.continuous_debug_bypass_formants_checkbox.setChecked(bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)))
         self.continuous_debug_bypass_formants_checkbox.setToolTip("Diagnostic only: render Continuous Mouth Motion without formant coloration to isolate excitation pitch stability.")
@@ -7724,6 +7873,7 @@ class WaveToyWindow(QMainWindow):
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.articulation_word_render_mode_combo, 1)
         mode_row.addWidget(validate_button)
+        mode_row.addWidget(stop_test_button)
         mode_row.addWidget(self.continuous_debug_bypass_formants_checkbox)
         chain_layout.addLayout(mode_row)
 
@@ -7750,6 +7900,11 @@ class WaveToyWindow(QMainWindow):
         continuous_tuning_row.addWidget(self.continuous_formant_intensity_spin)
         continuous_tuning_row.addWidget(pitch_smoothing_label)
         continuous_tuning_row.addWidget(self.continuous_pitch_smoothing_spin)
+        reset_tuning_button = QPushButton("Reset Continuous Tuning")
+        reset_tuning_button.setObjectName("phonemeCardSecondaryAction")
+        reset_tuning_button.setCursor(Qt.PointingHandCursor)
+        reset_tuning_button.clicked.connect(self._reset_continuous_tuning)
+        continuous_tuning_row.addWidget(reset_tuning_button)
         continuous_tuning_row.addStretch(1)
         chain_layout.addLayout(continuous_tuning_row)
 
@@ -7831,9 +7986,10 @@ class WaveToyWindow(QMainWindow):
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
         for icon, label_text, color, callback in (
-            ("▶", "Preview Combination", "#b8f2e6", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Preview Combination is planned as a future CV/VC-library workflow.")),
-            ("➕", "Load Combination to Chain", "#caffbf", self._load_cv_vc_combination_to_chain),
-            ("➕", "Add to Speech Assets", "#ffc6ff", lambda checked=False: self._show_future_workflow_notice("CV / VC Library", "Add to Speech Assets is planned as a future CV/VC-library workflow.")),
+            ("▶", "Preview Combination", "#b8f2e6", self._preview_cv_vc_combination),
+            ("➕", "Append to Chain", "#caffbf", self._append_cv_vc_combination_to_chain),
+            ("↺", "Replace Chain", "#ffd166", self._load_cv_vc_combination_to_chain),
+            ("➕", "Add to Speech Assets", "#ffc6ff", self._add_cv_vc_combination_to_speech_assets),
             ("💾", "Export Library JSON", "#fdffb6", self._export_cv_vc_library_json),
         ):
             button = self._make_story_button(icon, label_text, color, callback)
@@ -7911,6 +8067,8 @@ class WaveToyWindow(QMainWindow):
             ("🔁", "Loop Word Motion", "#caffbf", self._loop_articulation_motion),
             ("⏹", "Stop Motion", "#ffadad", self._stop_articulation_motion),
             ("🐢", "Slow Motion Visual Only", "#ffd6a5", self._slow_articulation_motion),
+            ("💾", "Export Viseme JSON", "#fdffb6", self._export_viseme_json),
+            ("💾", "Export Animation JSON", "#e7c6ff", self._export_animation_json),
         ):
             button = self._make_story_button(icon, label, color, callback)
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
@@ -8259,6 +8417,7 @@ class WaveToyWindow(QMainWindow):
         del key
         self.current_phoneme = self._phoneme_from_articulation_ui()
         self._update_articulation_preview(regenerate=True)
+        self._schedule_live_preview("selected_phoneme")
         if self.phoneme_loop_enabled:
             self._play_phoneme_preview(rate_limit=False)
 
@@ -8394,8 +8553,20 @@ class WaveToyWindow(QMainWindow):
             QMessageBox.warning(self, "Articulation source", f"Waveform source could not be prepared, so Default Voice will play.\n\n{exc}")
         return None
 
+
+    def _apply_voice_source_to_phoneme(self, phoneme: ArticulationPhoneme) -> ArticulationPhoneme:
+        """Map the upstream Voice Source foundation onto a render phoneme without changing the editable mouth controls."""
+        profile = getattr(self, "voice_source_profile", DEFAULT_VOICE_SOURCE_PROFILE)
+        data = phoneme.to_json_dict()
+        pitch_bias = (float(profile.vocal_fold_tension) - 0.5) * 0.18 - (float(profile.vocal_fold_length) - 0.5) * 0.16 - (float(profile.vocal_fold_thickness) - 0.5) * 0.08
+        data["voice_pitch"] = float(np.clip(float(data.get("voice_pitch", 220.0)) * (1.0 + pitch_bias), 60.0, 880.0))
+        data["voice_strength"] = float(np.clip(float(data.get("voice_strength", 0.65)) * (0.85 + float(profile.glottal_closure) * 0.30), 0.0, 1.0))
+        data["air_pressure"] = float(np.clip(float(data.get("air_pressure", 0.45)) + float(profile.breathiness) * 0.12 + float(profile.rasp) * 0.06, 0.0, 1.0))
+        data["noise_color"] = float(np.clip(float(data.get("noise_color", 0.50)) + float(profile.breathiness) * 0.10 + float(profile.rasp) * 0.12, 0.0, 1.0))
+        return ArticulationPhoneme.from_json_dict(data)
+
     def _render_articulation_with_source(self, phoneme: ArticulationPhoneme) -> np.ndarray:
-        phoneme = phoneme.clamped()
+        phoneme = self._apply_voice_source_to_phoneme(phoneme).clamped()
         source_audio = self._resolve_articulation_source_audio(phoneme) if phoneme.source_mode != ARTICULATION_SOURCE_DEFAULT else None
         if source_audio is None:
             fallback = ArticulationPhoneme.from_json_dict({**phoneme.to_json_dict(), "source_mode": ARTICULATION_SOURCE_DEFAULT})
@@ -8625,6 +8796,7 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._scrub_articulation_playhead(self.articulation_playhead_ms)
+        self._schedule_live_preview("selected_timeline_fragment")
 
     def _set_chain_transition_curve(self, index: int, curve: str) -> None:
         if index < 0 or index >= len(self.articulation_chain_items) - 1:
@@ -8675,14 +8847,23 @@ class WaveToyWindow(QMainWindow):
         if source_index < 0 or source_index >= len(self.articulation_chain_items):
             return
         target_index = int(np.clip(target_index, 0, len(self.articulation_chain_items) - 1))
+        before_order = [item.phoneme.name for item in self.articulation_chain_items]
         if source_index == target_index:
+            print(f"[WaveToy Reorder] source_index={source_index} target_index={target_index} before_order={before_order} after_order={before_order}")
+            self.articulation_selected_chain_index = source_index
+            self._refresh_articulation_motion_timeline()
             return
         item = self.articulation_chain_items.pop(source_index)
         self.articulation_chain_items.insert(target_index, item)
         self.articulation_selected_chain_index = target_index
+        after_order = [chain_item.phoneme.name for chain_item in self.articulation_chain_items]
+        print(f"[WaveToy Reorder] source_index={source_index} target_index={target_index} before_order={before_order} after_order={after_order}")
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
+        self._refresh_articulation_motion_timeline()
         self._scrub_articulation_playhead(self.articulation_playhead_ms)
+        self._schedule_live_preview("selected_timeline_fragment")
+        self._schedule_live_preview("selected_transition")
 
     def _scrub_articulation_playhead(self, elapsed_ms: float) -> None:
         self.articulation_playhead_ms = float(max(0.0, elapsed_ms))
@@ -8774,6 +8955,7 @@ class WaveToyWindow(QMainWindow):
             self.selected_component_accent_spin.blockSignals(False)
         self._mark_articulation_word_dirty()
         self._refresh_articulation_motion_timeline()
+        self._schedule_live_preview("selected_transition")
 
     def _set_selected_component_phoneme_float(self, key: str, value: float) -> None:
         item = self._selected_chain_item()
@@ -8783,6 +8965,7 @@ class WaveToyWindow(QMainWindow):
         item.phoneme = item.phoneme.clamped()
         self._mark_articulation_word_dirty()
         self._refresh_articulation_motion_timeline()
+        self._schedule_live_preview("selected_timeline_fragment")
 
     def _remove_selected_component(self) -> None:
         index = self.articulation_selected_chain_index
@@ -8957,6 +9140,7 @@ class WaveToyWindow(QMainWindow):
         if profile == "Neutral" or not self.articulation_chain_items:
             self.articulation_word_render_settings.pop(self._voice_profile_baseline_key(), None)
             self.articulation_word_render_settings["voice_profile"] = profile
+            self.articulation_word_render_settings["legacy_voice_profile_map"] = dict(LEGACY_VOICE_PROFILE_CHARACTER_MAP.get(profile, LEGACY_VOICE_PROFILE_CHARACTER_MAP["Neutral"]))
             self._mark_articulation_word_dirty()
             self._refresh_articulation_chain_cards()
             return
@@ -8983,6 +9167,7 @@ class WaveToyWindow(QMainWindow):
                 data["air_pressure"] = float(np.clip(float(data.get("air_pressure", 0.45)) + 0.25, 0.0, 1.0))
             item.phoneme = ArticulationPhoneme.from_json_dict(data)
         self.articulation_word_render_settings["voice_profile"] = profile
+        self.articulation_word_render_settings["legacy_voice_profile_map"] = dict(LEGACY_VOICE_PROFILE_CHARACTER_MAP.get(profile, LEGACY_VOICE_PROFILE_CHARACTER_MAP["Neutral"]))
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 
@@ -9033,16 +9218,209 @@ class WaveToyWindow(QMainWindow):
 
     def _load_cv_vc_combination_to_chain(self, checked: bool = False) -> None:
         del checked
-        symbols = self._selected_cv_vc_symbols()
-        self.articulation_chain_items = [
-            ArticulationChainItem(phoneme=_phoneme_from_preset_symbol(symbol), duration_ms=_phoneme_from_preset_symbol(symbol).duration_ms)
-            for symbol in symbols
-        ]
+        self.articulation_chain_items = self._cv_vc_items_for_presets(self._selected_cv_vc_presets())
         self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
         self._update_articulation_word_status()
+        self._schedule_live_preview("selected_cv_vc_combination")
+
+
+    def _set_live_preview_enabled(self, checked: bool) -> None:
+        self.live_preview_enabled = bool(checked)
+        if not self.live_preview_enabled:
+            self.live_preview_timer.stop()
+            self._stop_phoneme_preview()
+        print(f"[WaveToy Live Preview] enabled={self.live_preview_enabled} debounce_ms={self.live_preview_debounce_ms}")
+
+    def _schedule_live_preview(self, target: str = "selected_timeline_fragment") -> None:
+        if not getattr(self, "live_preview_enabled", False):
+            return
+        self.live_preview_target = target
+        self.live_preview_timer.start(int(getattr(self, "live_preview_debounce_ms", 320)))
+
+    def _run_live_preview(self) -> None:
+        if not getattr(self, "live_preview_enabled", False):
+            return
+        if not self._can_start_playback():
+            self._schedule_live_preview(self.live_preview_target)
+            return
+        self._stop_phoneme_preview()
+        target = getattr(self, "live_preview_target", "selected_timeline_fragment")
+        audio = np.zeros((0, 2), dtype=np.float32)
+        if target in {"selected_timeline_fragment", "selected_transition"} and self._selected_chain_item() is not None:
+            item = self._selected_chain_item()
+            if item is not None:
+                audio = self._apply_chain_item_accentuation(self._render_articulation_with_source(item.phoneme_for_render()), item)
+        elif target == "selected_cv_vc_combination":
+            audio = self._render_cv_vc_combination_audio()
+        else:
+            self.current_phoneme = self._phoneme_from_articulation_ui()
+            audio = self._render_articulation_with_source(self.current_phoneme)
+        if audio.size:
+            print(f"[WaveToy Live Preview] target={target} samples={len(audio)}")
+            self._play_audio_array(audio)
+
+    def _selected_cv_vc_presets(self) -> List[PhonemeCombinationPreset]:
+        consonant = self.cv_vc_consonant_combo.currentText() if self.cv_vc_consonant_combo is not None else CV_VC_CONSONANTS[0]
+        vowel = self.cv_vc_vowel_combo.currentText() if self.cv_vc_vowel_combo is not None else CV_VC_VOWELS[0]
+        pattern = self.cv_vc_pattern_combo.currentText() if self.cv_vc_pattern_combo is not None else "CV"
+        wanted_patterns = ["CV", "VC"] if pattern == "All" else [pattern]
+        matches = [p for p in CV_VC_COMBINATION_LIBRARY if p.pattern_type in wanted_patterns and set(p.phoneme_sequence) == {consonant, vowel}]
+        return matches or [p for p in CV_VC_COMBINATION_LIBRARY if p.first_phoneme == consonant and p.second_phoneme == vowel][:1]
+
+    def _cv_vc_items_for_presets(self, presets: List[PhonemeCombinationPreset]) -> List[ArticulationChainItem]:
+        items: List[ArticulationChainItem] = []
+        for preset in presets:
+            for symbol in preset.phoneme_sequence:
+                phoneme = _phoneme_from_preset_symbol(symbol)
+                items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=phoneme.duration_ms, transition_to_next_ms=preset.transition_ms, transition_curve=preset.transition_curve))
+        if items:
+            items[-1].transition_to_next_ms = None
+        return items
+
+    def _render_cv_vc_combination_audio(self) -> np.ndarray:
+        saved_items = list(self.articulation_chain_items)
+        saved_selection = self.articulation_selected_chain_index
+        try:
+            self.articulation_chain_items = self._cv_vc_items_for_presets(self._selected_cv_vc_presets())
+            self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+            return self._render_articulation_word() if self.articulation_chain_items else np.zeros((0, 2), dtype=np.float32)
+        finally:
+            self.articulation_chain_items = saved_items
+            self.articulation_selected_chain_index = saved_selection
+
+    def _preview_cv_vc_combination(self, checked: bool = False) -> None:
+        del checked
+        if not self._can_start_playback():
+            return
+        self._stop_phoneme_preview()
+        audio = self._render_cv_vc_combination_audio()
+        if audio.size:
+            self._play_audio_array(audio)
+
+    def _append_cv_vc_combination_to_chain(self, checked: bool = False) -> None:
+        del checked
+        before = len(self.articulation_chain_items)
+        self.articulation_chain_items.extend(self._cv_vc_items_for_presets(self._selected_cv_vc_presets()))
+        self.articulation_selected_chain_index = before if len(self.articulation_chain_items) > before else self.articulation_selected_chain_index
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+        self._refresh_articulation_motion_timeline()
+        self._schedule_live_preview("selected_cv_vc_combination")
+
+    def _add_cv_vc_combination_to_speech_assets(self, checked: bool = False) -> None:
+        del checked
+        audio = self._render_cv_vc_combination_audio()
+        presets = self._selected_cv_vc_presets()
+        labels = ", ".join(p.label for p in presets)
+        metadata = {"cv_vc_presets": [asdict(preset) for preset in presets], "render_mode": self._articulation_word_render_mode(), "voice_source_profile": self.voice_source_profile.to_json_dict()}
+        sequence = " + ".join(symbol for preset in presets for symbol in preset.phoneme_sequence)
+        ipa = " ".join(f"/{_phoneme_from_preset_symbol(symbol).ipa}/" for preset in presets for symbol in preset.phoneme_sequence)
+        self._add_speech_bin_item(labels or "CV/VC Combination", "cv_vc", audio, ipa, sequence, metadata, "cv_vc_library")
+
+    def _reset_continuous_tuning(self, checked: bool = False) -> None:
+        del checked
+        self.articulation_word_render_settings["continuous_formant_intensity"] = 0.45
+        self.articulation_word_render_settings["continuous_pitch_smoothing_ms"] = 20
+        if self.continuous_formant_intensity_spin is not None:
+            self.continuous_formant_intensity_spin.setValue(0.45)
+        if self.continuous_pitch_smoothing_spin is not None:
+            self.continuous_pitch_smoothing_spin.setValue(20)
+        self._mark_articulation_word_dirty()
+
+    def _run_stop_consonant_tests(self, checked: bool = False) -> None:
+        del checked
+        tests = [["B", "AH"], ["D", "AH"], ["G", "AH"], ["P", "AH"], ["T", "AH"], ["K", "AH"], ["D", "AE", "D"], ["S", "T", "AA", "P"]]
+        saved_items = list(self.articulation_chain_items)
+        saved_selection = self.articulation_selected_chain_index
+        try:
+            for symbols in tests:
+                self.articulation_chain_items = [ArticulationChainItem(phoneme=_phoneme_from_preset_symbol(symbol)) for symbol in symbols]
+                audio = self._render_articulation_word_continuous()
+                peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+                rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
+                clipped = int(np.count_nonzero(np.abs(audio) >= 0.999)) if audio.size else 0
+                print(f"[WaveToy Stop Test] sequence={' '.join(symbols)} burst_peak={peak:.6f} burst_rms={rms:.6f} clipped_samples={clipped} stop_burst_status={'present' if peak > 0.003 else 'low'}")
+        finally:
+            self.articulation_chain_items = saved_items
+            self.articulation_selected_chain_index = saved_selection
+            self._refresh_articulation_chain_cards()
+            self._refresh_articulation_motion_timeline()
+
+    def _viseme_name_for_phoneme(self, phoneme: ArticulationPhoneme) -> str:
+        if phoneme.phoneme_family == "vowel":
+            return "open_vowel" if phoneme.mouth_open > 0.55 else "narrow_vowel"
+        if phoneme.phoneme_family == "nasal":
+            return "nasal"
+        if phoneme.phoneme_family in {"stop", "affricate"}:
+            return "closure"
+        if phoneme.lip_rounding > 0.55:
+            return "rounded"
+        return phoneme.phoneme_family or "neutral"
+
+    def _build_viseme_frames(self, frame_rate: float = 24.0) -> List[Dict[str, object]]:
+        segments, total_ms = self._articulation_motion_timeline()
+        if not segments:
+            return []
+        step_ms = 1000.0 / max(1.0, frame_rate)
+        frames: List[Dict[str, object]] = []
+        t = 0.0
+        while t <= max(1, total_ms) + 0.01:
+            phoneme, _kind, _label, transition_progress, _duration_ms, _index, _in_transition = self._motion_state_at_ms(t)
+            frame = VisemeFrame(
+                time_ms=round(t, 3), phoneme=phoneme.name, viseme=self._viseme_name_for_phoneme(phoneme),
+                mouth_open=float(phoneme.mouth_open), lip_rounding=float(phoneme.lip_rounding), tongue_height=float(phoneme.tongue_height),
+                tongue_frontness=float(phoneme.tongue_frontness), nasal_open=float(phoneme.nasal_open), closure=float(phoneme.closure),
+                voiced_gain=float(self._continuous_voiced_gain(phoneme)), airflow=float(phoneme.air_pressure), transition_progress=float(transition_progress),
+            )
+            frames.append(frame.to_json_dict())
+            t += step_ms
+        return frames
+
+    def _export_viseme_json(self, checked: bool = False) -> None:
+        del checked
+        filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Viseme JSON", "wave_toy_viseme_timeline.json", "JSON Files (*.json);;All Files (*)")
+        if not filename:
+            return
+        frames = self._build_viseme_frames()
+        payload = {"version": "0.1-foundation", "frame_rate": 24, "duration_ms": self._articulation_motion_timeline()[1], "phoneme_sequence": self._speech_display_sequence_for_chain(), "viseme_timeline": frames}
+        Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        QMessageBox.information(self, "Export Viseme JSON", f"Exported {len(frames)} viseme frames to {filename}.")
+
+    def _export_animation_json(self, checked: bool = False) -> None:
+        del checked
+        filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Animation JSON", "wave_toy_animation_export.json", "JSON Files (*.json);;All Files (*)")
+        if not filename:
+            return
+        frames = self._build_viseme_frames()
+        duration_ms = self._articulation_motion_timeline()[1]
+        payload = {
+            "version": "0.1-foundation", "frame_rate": 24, "duration_ms": duration_ms,
+            "phoneme_timeline": [item.to_json_dict() for item in self.articulation_chain_items], "viseme_timeline": frames,
+            "mouth_open_curve": [[f["time_ms"], f["mouth_open"]] for f in frames], "lip_rounding_curve": [[f["time_ms"], f["lip_rounding"]] for f in frames],
+            "tongue_height_curve": [[f["time_ms"], f["tongue_height"]] for f in frames], "tongue_frontness_curve": [[f["time_ms"], f["tongue_frontness"]] for f in frames],
+            "nasal_open_curve": [[f["time_ms"], f["nasal_open"]] for f in frames], "closure_curve": [[f["time_ms"], f["closure"]] for f in frames],
+            "airflow_curve": [[f["time_ms"], f["airflow"]] for f in frames], "voicing_curve": [[f["time_ms"], f["voiced_gain"]] for f in frames],
+        }
+        Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        QMessageBox.information(self, "Export Animation JSON", f"Exported generic animation data to {filename}.")
+
+    def _import_voice_font_recording(self, checked: bool = False) -> None:
+        del checked
+        filenames, _selected_filter = QFileDialog.getOpenFileNames(self, "Import Voice Font Recording", "", "Audio Files (*.wav *.ogg *.flac *.mp3);;All Files (*)")
+        if not filenames:
+            return
+        imported = []
+        for filename in filenames:
+            try:
+                audio, sample_rate = load_audio_file(Path(filename))
+                imported.append({"path": filename, "sample_rate": sample_rate, "duration_seconds": len(audio) / float(sample_rate), "status": "recorded"})
+            except Exception as exc:
+                imported.append({"path": filename, "status": "import_failed", "error": str(exc)})
+        print(f"[WaveToy Voice Font] imported recordings consent_required=True files={json.dumps(imported, ensure_ascii=False)}")
+        QMessageBox.information(self, "Voice Font Import", "Imported recording metadata for consent-first workflow. Record/Analyze remain disabled placeholders; no voice cloning is implemented.")
 
     def _articulation_smooth_transitions_enabled(self) -> bool:
         if self.articulation_smooth_transitions_checkbox is not None:
@@ -10373,6 +10751,9 @@ class WaveToyWindow(QMainWindow):
             "chain_items": [item.to_json_dict() for item in self.articulation_chain_items],
             "render_mode": self._articulation_word_render_mode(),
             "word_render_settings": dict(self.articulation_word_render_settings),
+            "voice_source_profile": self.voice_source_profile.to_json_dict(),
+            "character_voice_profile": self.character_voice_profile.to_json_dict(),
+            "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
