@@ -25,3 +25,18 @@ The existing Articulation Timeline legacy voice profile dropdown remains in plac
 ## Future relevance
 
 The character bridge is intended to support future voice fonts, singing, timing, accentuation, and expressive delivery. It does not implement ML voice cloning and does not remove direct phoneme editing.
+
+## Task 069 resonance mappings
+
+Character presets can now seed both `VoiceBoxState` and `ResonanceTractState` defaults. Direct resonance controls remain editable after preset selection.
+
+- Child: shorter vocal tract, higher head resonance, lower chest resonance.
+- Adult Narrator: moderate/high resonance depth and moderate chest resonance.
+- Elder: lower/looser resonance depth and lower pharyngeal tension.
+- Bright Feminine: shorter vocal tract, higher brightness, higher head resonance.
+- Deep Masculine: longer vocal tract, higher chest resonance, higher darkness.
+- Breathy: slightly higher nasal coupling and head resonance.
+- Raspy: slightly higher darkness plus pharyngeal-tension metadata.
+- Robot: neutral/stable formant scale, controlled brightness, low-variation intent.
+
+These mappings are metadata/control defaults only. They do not replace direct phoneme controls and do not implement ML voice cloning.

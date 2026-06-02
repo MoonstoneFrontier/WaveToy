@@ -23,3 +23,20 @@ Speech-organ frames provide mouth/tongue/lip/velum/glottis snapshots. Voice-box 
 ## Future singing and voice-font support
 
 The schema is suitable for future singing because pitch, voicing, timing, and larynx metadata can be aligned with phoneme frames. Voice-font support should remain consent-first and must not imply ML voice cloning.
+
+## Task 069 resonance schema additions
+
+Generic animation and viseme JSON now includes resonance-oriented data while preserving existing keys:
+
+- `resonance_tract_state_frames`
+- `formant_frames`
+- `resonance_profile`
+- `resonance_curves`
+  - `f1_curve`
+  - `f2_curve`
+  - `f3_curve`
+  - `nasal_coupling_curve`
+  - `chest_resonance_curve`
+  - `head_resonance_curve`
+
+The data remains human-readable JSON and does not require Blender or any target-specific dependency.

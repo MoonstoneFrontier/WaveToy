@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from html import escape
 
-from wavetoy.speech_organs import SpeechOrganState
+from wavetoy.speech_organs import ResonanceTractState, SpeechOrganState
 
 
 def _fmt(value: float) -> str:
@@ -56,10 +56,11 @@ def anatomical_mouth_svg(state: SpeechOrganState, *, overlay: bool = True, label
 </svg>'''
 
 
-def vocal_tract_side_svg(state: SpeechOrganState, *, overlay: bool = True, label: str = "Vocal Tract Cutaway") -> str:
-    """Return a side-cutaway SVG for lips, tongue, velum, nasal cavity, pharynx, and larynx."""
+def vocal_tract_side_svg(state: SpeechOrganState, *, resonance: ResonanceTractState | None = None, overlay: bool = True, label: str = "Vocal Tract Cutaway") -> str:
+    """Return a side-cutaway SVG for lips, tongue, velum, nasal cavity, pharynx, larynx, and resonance."""
 
     state = state.clamped()
+    resonance = (resonance or ResonanceTractState.neutral()).clamped()
     jaw_y = 172 + state.jaw_open * 42
     lip_x = 318 + state.lip_rounding * 14
     tongue_peak_x = 190 + state.tongue_frontness * 72
@@ -70,9 +71,29 @@ def vocal_tract_side_svg(state: SpeechOrganState, *, overlay: bool = True, label
     voice = _particles("#e74c3c", state.voiced_gain, 112, 242, 132, 202, "side-voice") if overlay else ""
     glottis_gap = 4 + state.glottal_open * 18
     vibration_opacity = 0.18 + state.voiced_gain * 0.62
+    oral_opacity = 0.10 + resonance.resonance_depth * 0.18
+    pharynx_opacity = 0.10 + resonance.chest_resonance * 0.16
+    nasal_opacity = 0.08 + resonance.nasal_coupling * 0.26
+    head_opacity = 0.08 + resonance.head_resonance * 0.18
+    f1_y = 210 - resonance.formant_shift_f1 * 18 - (resonance.darkness - 0.5) * 18
+    f2_y = 176 - resonance.formant_shift_f2 * 15 - (resonance.brightness - 0.5) * 16
+    f3_y = 145 - resonance.formant_shift_f3 * 12 - (resonance.head_resonance - 0.5) * 15
+    resonance_overlay = f'''
+  <ellipse id="oral_resonance_chamber" cx="235" cy="151" rx="{_fmt(54 + resonance.oral_cavity_width * 20)}" ry="{_fmt(18 + resonance.oral_cavity_height * 18)}" fill="#f9c74f" opacity="{_fmt(oral_opacity)}"/>
+  <ellipse id="pharyngeal_resonance_chamber" cx="128" cy="164" rx="{_fmt(20 + resonance.pharyngeal_volume * 18)}" ry="{_fmt(56 + resonance.resonance_depth * 20)}" fill="#9b5de5" opacity="{_fmt(pharynx_opacity)}"/>
+  <path id="nasal_coupling_path" d="M 178 103 C 215 92 255 82 311 64" fill="none" stroke="#2ecc71" stroke-width="{_fmt(2 + resonance.nasal_coupling * 7)}" opacity="{_fmt(nasal_opacity)}" stroke-linecap="round"/>
+  <circle id="head_resonance_indicator" cx="276" cy="47" r="{_fmt(9 + resonance.head_resonance * 13)}" fill="#00bbf9" opacity="{_fmt(head_opacity)}"/>
+  <circle id="chest_resonance_indicator" cx="103" cy="286" r="{_fmt(8 + resonance.chest_resonance * 12)}" fill="#6d4c41" opacity="{_fmt(pharynx_opacity)}"/>
+  <path id="formant_band_f1" d="M 140 {_fmt(f1_y)} C 190 {_fmt(f1_y - 12)} 250 {_fmt(f1_y - 10)} 325 {_fmt(f1_y - 2)}" fill="none" stroke="#ff6b6b" stroke-width="2" opacity="0.36"/>
+  <path id="formant_band_f2" d="M 150 {_fmt(f2_y)} C 205 {_fmt(f2_y - 11)} 263 {_fmt(f2_y - 7)} 334 {_fmt(f2_y)}" fill="none" stroke="#4d96ff" stroke-width="2" opacity="0.32"/>
+  <path id="formant_band_f3" d="M 162 {_fmt(f3_y)} C 215 {_fmt(f3_y - 9)} 276 {_fmt(f3_y - 6)} 340 {_fmt(f3_y + 2)}" fill="none" stroke="#f15bb5" stroke-width="2" opacity="0.28"/>
+  <text x="333" y="{_fmt(f1_y + 4)}" fill="#9d0208" font-size="9">F1</text>
+  <text x="344" y="{_fmt(f2_y + 4)}" fill="#1d4ed8" font-size="9">F2</text>
+  <text x="350" y="{_fmt(f3_y + 4)}" fill="#9d4edd" font-size="9">F3</text>'''
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 300" role="img" aria-label="{escape(label)}">
   <rect width="420" height="300" rx="24" fill="#f7fbff"/>
   <path id="pharynx" d="M 128 78 C 108 120 111 204 132 252" fill="none" stroke="#8d6e63" stroke-width="18" stroke-linecap="round"/>
+  {resonance_overlay}
   <path id="nasal_cavity" d="M 154 71 C 211 34 282 42 331 70 C 279 83 219 92 154 91 Z" fill="#d7f9e8" stroke="#2ecc71" stroke-width="4"/>
   <path id="palate" d="M 141 113 C 198 81 270 91 318 123" fill="none" stroke="#d29b6f" stroke-width="12" stroke-linecap="round"/>
   <path id="velum" d="M 178 112 C 194 {_fmt(velum_y)} 212 {_fmt(velum_y + 16)} 222 {_fmt(velum_y + 39)}" fill="none" stroke="#c77d5c" stroke-width="9" stroke-linecap="round"/>

@@ -12,6 +12,14 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 
+
+def _clamp(value: Any, minimum: float, maximum: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
+
 def _clamp01(value: Any, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -110,6 +118,97 @@ class VoiceBoxState:
             airflow=airflow,
             voice_pitch=pitch,
         ).clamped()
+
+
+@dataclass(frozen=True)
+class ResonanceTractState:
+    """Render-only resonance layer between voice box and final articulation.
+
+    Most fields are normalized 0..1 around the neutral value 0.50. Formant
+    shift fields are -1..1 offsets and ``formant_scale`` is a conservative
+    0.5..1.5 multiplier. The state is deliberately separate from phoneme data
+    so presets and diagnostics can color the voice without mutating saved
+    articulation chains.
+    """
+
+    oral_cavity_length: float = 0.50
+    oral_cavity_width: float = 0.50
+    oral_cavity_height: float = 0.50
+    pharyngeal_volume: float = 0.50
+    pharyngeal_tension: float = 0.50
+    nasal_coupling: float = 0.0
+    chest_resonance: float = 0.50
+    head_resonance: float = 0.50
+    larynx_height: float = 0.50
+    vocal_tract_length: float = 0.50
+    resonance_depth: float = 0.50
+    brightness: float = 0.50
+    darkness: float = 0.50
+    formant_scale: float = 1.0
+    formant_shift_f1: float = 0.0
+    formant_shift_f2: float = 0.0
+    formant_shift_f3: float = 0.0
+
+    @classmethod
+    def neutral(cls) -> "ResonanceTractState":
+        return cls()
+
+    @classmethod
+    def from_voice_box_and_speech_organs(cls, voice_box: Any, speech_state: Any | None = None) -> "ResonanceTractState":
+        """Derive a safe default from upstream voice-box plus current organs."""
+
+        speech_state = speech_state or SpeechOrganState.neutral()
+        vb = voice_box if voice_box is not None else VoiceBoxState.neutral()
+        mouth_open = _clamp01(getattr(speech_state, "jaw_open", 0.35), 0.35)
+        lip_rounding = _clamp01(getattr(speech_state, "lip_rounding", 0.10), 0.10)
+        tongue_frontness = _clamp01(getattr(speech_state, "tongue_frontness", 0.50), 0.50)
+        tongue_body = _clamp01(getattr(speech_state, "tongue_body_height", 0.50), 0.50)
+        velum = _clamp01(getattr(speech_state, "velum_open", 0.0), 0.0)
+        return cls(
+            oral_cavity_length=_clamp01(0.40 + (1.0 - lip_rounding) * 0.22 + (1.0 - tongue_frontness) * 0.12, 0.50),
+            oral_cavity_width=_clamp01(0.34 + mouth_open * 0.38 + (1.0 - lip_rounding) * 0.12, 0.50),
+            oral_cavity_height=_clamp01(0.32 + mouth_open * 0.48 + (1.0 - tongue_body) * 0.10, 0.50),
+            pharyngeal_volume=_clamp01(0.42 + _clamp01(getattr(vb, "resonance_depth", 0.50), 0.50) * 0.18 + _clamp01(getattr(vb, "age_looseness", 0.20), 0.20) * 0.08, 0.50),
+            pharyngeal_tension=_clamp01(0.42 + _clamp01(getattr(vb, "vocal_fold_tension", 0.50), 0.50) * 0.20 - _clamp01(getattr(vb, "age_looseness", 0.20), 0.20) * 0.08, 0.50),
+            nasal_coupling=_clamp01(velum * 0.80 + _clamp01(getattr(speech_state, "nasal_airflow", 0.0), 0.0) * 0.20, 0.0),
+            chest_resonance=_clamp01(0.42 + _clamp01(getattr(vb, "resonance_depth", 0.50), 0.50) * 0.20 + _clamp01(getattr(vb, "vocal_fold_thickness", 0.50), 0.50) * 0.08, 0.50),
+            head_resonance=_clamp01(0.40 + _clamp01(getattr(vb, "larynx_height", 0.50), 0.50) * 0.18 + tongue_frontness * 0.12, 0.50),
+            larynx_height=_clamp01(getattr(vb, "larynx_height", 0.50), 0.50),
+            vocal_tract_length=_clamp01(getattr(vb, "vocal_tract_length", 0.50), 0.50),
+            resonance_depth=_clamp01(getattr(vb, "resonance_depth", 0.50), 0.50),
+        ).clamped()
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, Any] | None) -> "ResonanceTractState":
+        source = dict(data or {})
+        values: dict[str, float] = {}
+        defaults = cls()
+        for name in cls.__dataclass_fields__:
+            default = getattr(defaults, name)
+            if name.startswith("formant_shift_"):
+                values[name] = _clamp(source.get(name, default), -1.0, 1.0, default)
+            elif name == "formant_scale":
+                values[name] = _clamp(source.get(name, default), 0.5, 1.5, default)
+            else:
+                values[name] = _clamp01(source.get(name, default), default)
+        return cls(**values)
+
+    def clamped(self) -> "ResonanceTractState":
+        return ResonanceTractState.from_json_dict(self.to_json_dict())
+
+    def to_json_dict(self) -> dict[str, float]:
+        data = asdict(self)
+        return ResonanceTractState.from_json_dict(data).__dict__.copy()
+
+    def bias_metadata(self) -> dict[str, float]:
+        return {
+            "resonance_formant_scale": self.formant_scale,
+            "resonance_brightness": self.brightness,
+            "resonance_darkness": self.darkness,
+            "nasal_coupling": self.nasal_coupling,
+            "chest_resonance": self.chest_resonance,
+            "head_resonance": self.head_resonance,
+        }
 
 
 @dataclass(frozen=True)
