@@ -1,60 +1,25 @@
 # Automation Tracks
 
-Automation tracks are persistent parameter lanes used by Performance assets and project snapshots.
+Automation tracks from Task 075 remain load-compatible but are now represented internally by unified timeline lanes.
 
-## AutomationPoint
+## Compatibility
 
-Each point stores:
+Legacy `AutomationTrack` / `AutomationPoint` JSON can still load from:
 
-- `time_ms`
-- `value`
-- `curve`
+- `performance.automation_tracks`
+- legacy top-level `automation_tracks` when no canonical timeline is present
+- `automation_curve` library assets
 
-Supported curve labels are `linear`, `hold`, and `smooth`.
+On load, legacy automation becomes `TimelineParameterTrack(track_kind="automation")` with `TimelineParameterPoint` entries.
 
-## AutomationTrack
+## New save behavior
 
-Each track stores:
+New project snapshots use the canonical `performance.timeline_tracks` schema. WaveToy does not write duplicate top-level `automation_tracks` in normal project snapshots, reducing synchronization risk.
 
-- `track_id`
-- `name`
-- `target_parameter`
-- `lane_type`
-- `points`
-- `muted`
-- `visible`
-- `color`
+## Active render targets
 
-## Target parameter groups
+`accentuation_db` remains non-destructive gain automation. `pitch_bias_cents` is now a second working target, implemented as a lightweight post-render pitch-bias hook and included in the word-render signature through canonical timeline tracks.
 
-### Articulation
+## Roadmap
 
-- `mouth_open`
-- `tongue_height`
-- `tongue_frontness`
-- `lip_rounding`
-- `nasal_open`
-
-### Voice box
-
-- `breathiness`
-- `rasp`
-- `glottal_closure`
-- `vocal_fold_tension`
-
-### Resonance
-
-- `resonance_depth`
-- `brightness`
-- `darkness`
-- `nasal_coupling`
-
-### Expression
-
-- `accentuation_db`
-- `timing_bias`
-- `pitch_bias_cents`
-
-## Waveform editor hook
-
-Task 075 does not add a waveform marker canvas. Automation point marker overlays should be added later when the waveform editor can expose a low-risk overlay API without changing playback or audio lifecycle behavior.
+Future automation work should extend the timeline-lane model rather than adding separate time-based containers. Candidate follow-ups include Bezier curves, richer voiced-region pitch integration, marker lanes, and DAW-style lane folding.
