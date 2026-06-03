@@ -42,3 +42,9 @@ Loading a library asset applies the most direct usable workflow:
 ## Metadata rules
 
 Library records retain descriptive fields such as name, tags, notes, favorite status, source path, creation time, modification time, and payload. Raw audio arrays are not embedded in JSON.
+
+## Task 075 performance assets
+
+The Speech Asset Library now recognizes `performance` and `automation_curve` asset types. A performance asset stores the current persistent automation tracks. An automation curve asset stores one selected track and its points. Existing library CRUD operations such as duplicate, rename, delete, favorite, import, and export continue to operate through the shared asset envelope.
+
+Loading a performance asset replaces the current performance tracks with a fresh imported performance UUID. Loading an automation curve appends the imported track with a fresh track UUID.
