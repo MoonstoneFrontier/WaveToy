@@ -1,54 +1,44 @@
-# Speech Asset Library
+# WaveToy Asset Library
 
-The Speech Asset Library is the global reusable library independent of any project.
+The persistent Speech Asset Library stores reusable WaveToy records as human-readable JSON under `WaveToyData/Assets`.
 
-## Categories
+## Asset table
 
-The storage foundation creates these categories:
+The Library tab shows selectable rows with these columns:
 
-- Phonemes
-- CV Combinations
-- VC Combinations
-- Words
-- Phrases
-- Voice Sources
-- Voice Boxes
-- Resonance Profiles
-- Character Profiles
-- Note Patterns
-- Pitch Curves
-- Waveform Analyses
-- Articulation Chains
-- Imported WAV
-- Generated WAV
-- Animation Exports
+- Favorite
+- Name
+- Asset type
+- Modified timestamp
+- Tags
+- Source path status
 
-## UI
+Search, category filtering, and sorting remain available above the table.
 
-The **Speech Asset Library** tab provides:
+## CRUD actions
 
-- Search across asset name, type, tags, description, and notes.
-- Category filtering.
-- Sorting by modified date, name, or type.
-- Import Library Entry.
-- Export Library Entry.
-- Save Current Profiles.
+Library buttons support:
 
-## Current save integrations
+- Load
+- Rename
+- Duplicate
+- Delete
+- Favorite/Unfavorite
+- Tags/Notes
+- Refresh, import, export, and save profile snapshots
 
-The following user actions now mirror entries into the persistent library:
+Rename and tag/note edits preserve the asset UUID. Duplicate and import create new UUIDs. Deleting an asset removes only the library metadata JSON and does not delete source audio files.
 
-- Save Phoneme.
-- Save Chain.
-- Create Word.
-- Export Word.
-- Timeline Import Sounds.
-- Timeline Export Mix.
-- Save generated sound.
-- Export Viseme JSON.
-- Export Animation JSON.
-- Save Current Profiles.
+## Load actions
 
-## Articulation chain metadata
+Loading a library asset applies the most direct usable workflow:
 
-Saved chain envelopes include the universal asset metadata plus chain payload metadata. `favorite`, `tags`, and `notes` are present on the envelope; dates are stored as `created_at` and `modified_at`.
+- `phoneme`: loads/selects the phoneme in Articulation Lab and adds it to saved phoneme choices if needed.
+- `articulation_chain`: replaces the current chain after confirmation.
+- `word`: restores chain metadata when available.
+- `voice_source`, `voice_box`, `resonance_profile`, `character_profile`: apply the corresponding profile/state.
+- `imported_wav`, `generated_wav`: add the source file to Audio Assets when the referenced path exists; otherwise WaveToy shows a missing-source warning.
+
+## Metadata rules
+
+Library records retain descriptive fields such as name, tags, notes, favorite status, source path, creation time, modification time, and payload. Raw audio arrays are not embedded in JSON.

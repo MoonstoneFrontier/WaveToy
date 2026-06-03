@@ -1,61 +1,24 @@
 # WaveToy Storage Layout
 
-WaveToy uses a predictable, cross-platform data root named `WaveToyData`.
+WaveToy uses a `WaveToyData` directory. The location can be overridden with `WAVETOY_DATA_DIR` for testing or portable runs.
 
-## Root selection
+## Default directories
 
-1. If `WAVETOY_DATA_DIR` is set, that directory is used. This supports portable/test runs.
-2. Windows: `%APPDATA%/WaveToyData`.
-3. macOS: `~/Library/Application Support/WaveToyData`.
-4. Linux/Unix: `$XDG_DATA_HOME/WaveToyData` or `~/.local/share/WaveToyData`.
+- `Projects/` — normal `.wavetoy-project.json` project files.
+- `Assets/` — reusable asset metadata JSON grouped by type.
+- `Exports/` — user-directed export metadata when applicable.
+- `Cache/` — generated temporary/support files such as speech-cache WAVs.
+- `Recovery/` — auto-save recovery project JSON.
+- `wavetoy_storage.json` — global metadata such as recent projects and last project path.
 
-## Directory tree
+## Asset subdirectories
 
-```text
-WaveToyData/
-  wavetoy_storage.json
-  Projects/
-  Assets/
-    Phonemes/
-    Chains/
-    Words/
-    Phrases/
-    VoiceSources/
-    VoiceBoxes/
-    Resonance/
-    Characters/
-    CVCombinations/
-    VCCombinations/
-    NotePatterns/
-    PitchCurves/
-    WaveformAnalyses/
-    ImportedWav/
-    GeneratedWav/
-    AnimationExports/
-  Exports/
-  Cache/
-  Recovery/
-```
+Asset JSON is grouped into stable subdirectories such as `Phonemes`, `Chains`, `Words`, `VoiceSources`, `VoiceBoxes`, `Resonance`, `Characters`, `ImportedWav`, and `GeneratedWav`.
 
-## File formats
+## Audio persistence policy
 
-- Projects use `*.wavetoy-project.json` and contain current workstation state without embedding audio arrays.
-- Assets use one JSON envelope per entry. Payloads preserve the existing WaveToy data shape where possible.
-- Recovery uses `Recovery/autosave_recovery.wavetoy-project.json` and is refreshed every five minutes by default while the app is running.
+Project and asset JSON keep source paths and metadata. They do not embed raw audio arrays. Imported and generated WAV-backed items are reloaded from `source_path` where possible. Missing source paths are reported in the UI and represented as missing/muted metadata rather than causing project load failure.
 
-## Metadata fields
+## Recovery file
 
-Every new asset envelope includes:
-
-- `uuid`
-- `asset_type`
-- `name`
-- `description`
-- `tags`
-- `created_at`
-- `modified_at`
-- `version`
-- `favorite`
-- `notes`
-- `source_path`
-- `payload`
+The recovery file is `Recovery/autosave_recovery.wavetoy-project.json`. It includes an `autosave` block with `created_at` and `source_project_path` so the startup recovery prompt can explain what is being restored.
