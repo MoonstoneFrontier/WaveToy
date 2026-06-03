@@ -6597,6 +6597,163 @@ class ArticulationTrackCanvas(QWidget):
         painter.end()
 
 
+class ArticulationWaveformDiagnosticsCanvas(QWidget):
+    """Waveform editor overlay for Continuous Mouth Motion render diagnostics."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.audio = np.zeros((0, 2), dtype=np.float32)
+        self.sample_rate = SAMPLE_RATE
+        self.metrics: Dict[str, object] = {}
+        self.overlays_visible = True
+        self.setMinimumHeight(260)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMouseTracking(True)
+        self.setToolTip(
+            "Articulation Lab waveform editor diagnostics. Toggle overlays to inspect clipping, stop bursts, transitions, diphthong glides, pitch instability, and formant processing."
+        )
+
+    def set_render(self, audio: np.ndarray, metrics: Dict[str, object] | None = None) -> None:
+        self.audio = np.asarray(audio, dtype=np.float32) if audio is not None and audio.size else np.zeros((0, 2), dtype=np.float32)
+        self.metrics = dict(metrics or {})
+        self.update()
+
+    def set_overlays_visible(self, visible: bool) -> None:
+        self.overlays_visible = bool(visible)
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(58, 32, -18, -42)
+
+    def _x_for_sample(self, sample: int) -> float:
+        plot = self._plot_rect()
+        length = max(1, len(self.audio))
+        return plot.left() + float(np.clip(sample, 0, length)) / length * plot.width()
+
+    def _region_samples(self, region: Dict[str, object]) -> Tuple[int, int]:
+        if "start_sample" in region or "end_sample" in region:
+            start = int(region.get("start_sample", 0) or 0)
+            end = int(region.get("end_sample", start) or start)
+        else:
+            start = int(round(float(region.get("start_ms", 0.0) or 0.0) * self.sample_rate / 1000.0))
+            end = int(round(float(region.get("end_ms", 0.0) or 0.0) * self.sample_rate / 1000.0))
+        return max(0, start), max(0, end)
+
+    def _region_at_x(self, x: float) -> str | None:
+        if not self.overlays_visible:
+            return None
+        for region in self.metrics.get("waveform_overlay_regions", []) or []:
+            if not isinstance(region, dict):
+                continue
+            start, end = self._region_samples(region)
+            left = self._x_for_sample(start)
+            right = self._x_for_sample(max(end, start + 1))
+            if left - 3.0 <= x <= right + 3.0:
+                return str(region.get("tooltip") or region.get("label") or region.get("kind") or "diagnostic region")
+        return None
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        tip = self._region_at_x(float(pos.x()))
+        if tip:
+            self.setToolTip(tip)
+        else:
+            self.setToolTip("Articulation Lab waveform editor diagnostics. Overlays are optional and do not affect playback.")
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#fff7e6"))
+        plot = self._plot_rect()
+        painter.setPen(QPen(QColor("#1d3557"), 1))
+        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        mode = str(self.metrics.get("active_render_mode", "not rendered") or "not rendered")
+        painter.drawText(QRectF(10, 6, self.width() - 20, 22), Qt.AlignLeft, f"Articulation Lab Waveform Editor • {mode}")
+        painter.setPen(QPen(QColor("#6c757d"), 1))
+        painter.setBrush(QColor("#f8f9fa"))
+        painter.drawRoundedRect(plot, 8, 8)
+        mid_y = plot.center().y()
+        painter.setPen(QPen(QColor("#adb5bd"), 1, Qt.DashLine))
+        painter.drawLine(QPointF(plot.left(), mid_y), QPointF(plot.right(), mid_y))
+        mono = self.audio.mean(axis=1) if self.audio.ndim == 2 and self.audio.size else self.audio.astype(np.float32, copy=False)
+        if mono.size:
+            bins = max(80, min(900, int(plot.width())))
+            step = max(1, int(math.ceil(len(mono) / bins)))
+            path_pos = QPainterPath()
+            path_neg = QPainterPath()
+            for i in range(0, len(mono), step):
+                chunk = mono[i:i + step]
+                if chunk.size == 0:
+                    continue
+                x = self._x_for_sample(i)
+                peak_pos = float(np.max(chunk))
+                peak_neg = float(np.min(chunk))
+                y_pos = mid_y - peak_pos * plot.height() * 0.47
+                y_neg = mid_y - peak_neg * plot.height() * 0.47
+                if i == 0:
+                    path_pos.moveTo(x, y_pos)
+                    path_neg.moveTo(x, y_neg)
+                else:
+                    path_pos.lineTo(x, y_pos)
+                    path_neg.lineTo(x, y_neg)
+            painter.setPen(QPen(QColor("#4361ee"), 2))
+            painter.drawPath(path_pos)
+            painter.setPen(QPen(QColor("#7209b7"), 2))
+            painter.drawPath(path_neg)
+        else:
+            painter.setPen(QPen(QColor("#6c757d"), 1))
+            painter.drawText(plot, Qt.AlignCenter, "Render or Play Word to populate waveform diagnostics.")
+        if self.overlays_visible:
+            colors = {
+                "clipping": QColor(230, 57, 70, 70),
+                "stop_burst": QColor(255, 183, 3, 85),
+                "transition": QColor(42, 157, 143, 65),
+                "diphthong_glide": QColor(155, 93, 229, 65),
+                "pitch_instability": QColor(239, 71, 111, 90),
+                "formant_processing": QColor(251, 133, 0, 48),
+            }
+            for region in self.metrics.get("waveform_overlay_regions", []) or []:
+                if not isinstance(region, dict):
+                    continue
+                start, end = self._region_samples(region)
+                left = self._x_for_sample(start)
+                right = self._x_for_sample(max(end, start + 1))
+                rect = QRectF(left, plot.top(), max(2.0, right - left), plot.height())
+                kind = str(region.get("kind", ""))
+                painter.setBrush(colors.get(kind, QColor(0, 0, 0, 35)))
+                painter.setPen(QPen(QColor("#1d3557"), 1, Qt.DashLine))
+                painter.drawRect(rect)
+                label = str(region.get("label", kind))
+                if rect.width() > 28:
+                    painter.setFont(QFont("Arial", 8, QFont.Bold))
+                    painter.drawText(rect.adjusted(2, 2, -2, -2), Qt.AlignTop | Qt.AlignHCenter, label[:18])
+            pitch_frames = [f for f in self.metrics.get("pitch_debug_frames", []) or [] if isinstance(f, dict)]
+            if pitch_frames:
+                painter.setPen(QPen(QColor("#023047"), 2))
+                prev_i = prev_e = None
+                for frame in pitch_frames:
+                    sample = int(frame.get("center_sample", 0) or 0)
+                    intended = float(frame.get("intended_pitch_hz", 0.0) or 0.0)
+                    estimated = float(frame.get("measured_pitch_estimate_hz", 0.0) or 0.0)
+                    if intended <= 0.0 or estimated <= 0.0:
+                        continue
+                    x = self._x_for_sample(sample)
+                    y_i = plot.bottom() - np.clip((intended - 60.0) / 820.0, 0.0, 1.0) * plot.height()
+                    y_e = plot.bottom() - np.clip((estimated - 60.0) / 820.0, 0.0, 1.0) * plot.height()
+                    if prev_i is not None:
+                        painter.setPen(QPen(QColor("#023047"), 2))
+                        painter.drawLine(prev_i, QPointF(x, y_i))
+                        painter.setPen(QPen(QColor("#e63946"), 1, Qt.DotLine))
+                        painter.drawLine(prev_e, QPointF(x, y_e))
+                    prev_i, prev_e = QPointF(x, y_i), QPointF(x, y_e)
+        legend = "Optional overlays: red clipping/pitch risk • yellow stop bursts • teal transitions • purple diphthongs • orange formants • pitch: navy intended vs red dotted estimated"
+        painter.setPen(QPen(QColor("#1d3557"), 1))
+        painter.setFont(QFont("Arial", 8))
+        painter.drawText(QRectF(10, self.height() - 34, self.width() - 20, 28), Qt.AlignLeft | Qt.TextWordWrap, legend)
+        painter.end()
+
+
 class GraphicalWaveLayerCanvas(QWidget):
     """Compact direct-manipulation editor for one mix layer's level envelope."""
 
@@ -7096,6 +7253,8 @@ class WaveToyWindow(QMainWindow):
         self.continuous_diagnostics_status_label: QLabel | None = None
         self.continuous_diagnostics_metrics_label: QLabel | None = None
         self.continuous_validation_results_label: QLabel | None = None
+        self.articulation_waveform_diagnostics_canvas: ArticulationWaveformDiagnosticsCanvas | None = None
+        self.continuous_waveform_overlays_checkbox: QCheckBox | None = None
         self.continuous_formant_intensity_spin: QDoubleSpinBox | None = None
         self.continuous_pitch_smoothing_spin: QSpinBox | None = None
         self.cv_vc_search_edit: QLineEdit | None = None
@@ -8817,13 +8976,20 @@ class WaveToyWindow(QMainWindow):
         self.continuous_diagnostics_metrics_label = QLabel("Render with Continuous Mouth Motion to populate active mode, duration, peak, RMS buses, transitions, buffer length, and voiced count.")
         self.continuous_diagnostics_metrics_label.setObjectName("symbolHint")
         self.continuous_diagnostics_metrics_label.setWordWrap(True)
+        diagnostics_layout.addWidget(self.continuous_diagnostics_status_label)
+        diagnostics_layout.addWidget(self.continuous_diagnostics_metrics_label)
+        self.continuous_waveform_overlays_checkbox = QCheckBox("Show waveform diagnostic overlays")
+        self.continuous_waveform_overlays_checkbox.setChecked(True)
+        self.continuous_waveform_overlays_checkbox.setToolTip("Optional overlays only; does not change render or playback. Shows clipping, stop bursts, transitions, diphthong glides, pitch instability, and formant-processing regions.")
+        self.continuous_waveform_overlays_checkbox.toggled.connect(self._toggle_continuous_waveform_overlays)
+        diagnostics_layout.addWidget(self.continuous_waveform_overlays_checkbox)
+        self.articulation_waveform_diagnostics_canvas = ArticulationWaveformDiagnosticsCanvas()
+        diagnostics_layout.addWidget(self.articulation_waveform_diagnostics_canvas)
         self.continuous_validation_results_label = QLabel("Validation results: not run")
         self.continuous_validation_results_label.setObjectName("symbolHint")
         self.continuous_validation_results_label.setWordWrap(True)
-        diagnostics_layout.addWidget(self.continuous_diagnostics_status_label)
-        diagnostics_layout.addWidget(self.continuous_diagnostics_metrics_label)
         diagnostics_layout.addWidget(self.continuous_validation_results_label)
-        chain_layout.addWidget(CollapsibleSection("Continuous diagnostics", diagnostics_card, expanded=False))
+        chain_layout.addWidget(CollapsibleSection("Continuous diagnostics + waveform editor", diagnostics_card, expanded=False))
 
         continuous_tests = ", ".join(" ".join(chain) for chain in CONTINUOUS_RENDER_TEST_CHAINS)
         continuous_test_label = QLabel(f"Continuous validation chains: {continuous_tests}")
@@ -9370,6 +9536,9 @@ class WaveToyWindow(QMainWindow):
         target = phoneme or self.current_phoneme
         metrics = self._formant_metrics_for_phoneme(target)
         return {
+            "base_f1": metrics["base_f1"],
+            "base_f2": metrics["base_f2"],
+            "base_f3": metrics["base_f3"],
             "resonance_formant_scale": metrics["resonance_formant_scale"],
             "resonance_f1": metrics["f1"],
             "resonance_f2": metrics["f2"],
@@ -11658,15 +11827,109 @@ class WaveToyWindow(QMainWindow):
         lag = min_lag + int(np.argmax(correlations))
         return float(SAMPLE_RATE / lag)
 
+    def _continuous_pitch_debug_frames(self, mono: np.ndarray, frame_debug: List[Dict[str, object]], frame_samples: int) -> List[Dict[str, object]]:
+        """Compare intended vs estimated pitch in coarse voiced windows for the waveform editor."""
+        frames: List[Dict[str, object]] = []
+        if mono.size == 0 or not frame_debug:
+            return frames
+        window = max(int(0.040 * SAMPLE_RATE), frame_samples * 3)
+        stride = max(1, len(frame_debug) // 80)
+        for item in frame_debug[::stride]:
+            intended = float(item.get("intended_pitch_hz", 0.0) or 0.0)
+            voiced_gain = float(item.get("voiced_gain", 0.0) or 0.0)
+            if intended <= 0.0 or voiced_gain <= 0.05:
+                continue
+            center = int(item.get("frame_index", 0) or 0) * frame_samples + frame_samples // 2
+            start = max(0, center - window // 2)
+            end = min(len(mono), start + window)
+            if end - start < max(64, window // 3):
+                continue
+            estimated = self._estimate_continuous_pitch_hz(mono[start:end], intended)
+            error = abs((estimated - intended) / intended * 100.0) if estimated > 0.0 else 0.0
+            frames.append({
+                "frame_index": int(item.get("frame_index", 0) or 0),
+                "start_sample": start,
+                "end_sample": end,
+                "center_sample": center,
+                "intended_pitch_hz": round(intended, 3),
+                "measured_pitch_estimate_hz": round(estimated, 3),
+                "pitch_error_percent": round(error, 3),
+                "active_phoneme": item.get("active_phoneme", ""),
+            })
+        return frames[:120]
+
+    def _continuous_waveform_overlay_regions(
+        self,
+        mono: np.ndarray,
+        segments: List[Dict[str, object]],
+        burst_events: List[Dict[str, object]],
+        pitch_frames: List[Dict[str, object]],
+        stop_debug_events: List[Dict[str, object]],
+    ) -> List[Dict[str, object]]:
+        """Build optional waveform-editor regions without changing audio playback."""
+        regions: List[Dict[str, object]] = []
+        for segment in segments:
+            start_ms = float(segment.get("start", 0.0) or 0.0)
+            end_ms = float(segment.get("end", start_ms) or start_ms)
+            if segment.get("kind") == "transition":
+                left = segment.get("from")
+                right = segment.get("to")
+                label = f"transition {getattr(left, 'name', '?')}→{getattr(right, 'name', '?')}"
+                regions.append({"kind": "transition", "start_ms": start_ms, "end_ms": end_ms, "label": "transition", "tooltip": f"Continuous transition window: {label}; curve {segment.get('curve')}"})
+            elif "diphthong_start_vowel" in segment or diphthong_profile_for_symbol(getattr(segment.get("from"), "name", "")):
+                left = str(segment.get("diphthong_start_vowel") or "start")
+                right = str(segment.get("diphthong_end_vowel") or "end")
+                regions.append({"kind": "diphthong_glide", "start_ms": start_ms, "end_ms": end_ms, "label": f"{left}→{right}", "tooltip": f"Diphthong glide region: {left} to {right}; one timeline item is preserved."})
+            phoneme = segment.get("from")
+            if isinstance(phoneme, ArticulationPhoneme) and self._continuous_formant_intensity() > 0.0:
+                formants = self._formant_metrics_for_phoneme(phoneme)
+                regions.append({
+                    "kind": "formant_processing", "start_ms": start_ms, "end_ms": end_ms, "label": "F1/F2/F3",
+                    "tooltip": f"Formant region {phoneme.name}: base F1/F2/F3 {formants['base_f1']:.0f}/{formants['base_f2']:.0f}/{formants['base_f3']:.0f} Hz → resonance {formants['f1']:.0f}/{formants['f2']:.0f}/{formants['f3']:.0f} Hz.",
+                })
+        debug_by_name: Dict[str, Dict[str, object]] = {str(e.get("stop_name")): e for e in stop_debug_events}
+        for event in burst_events:
+            name = str(event.get("phoneme", "stop"))
+            details = debug_by_name.get(name, {})
+            regions.append({
+                "kind": "stop_burst", "start_ms": float(event.get("start", 0.0) or 0.0), "end_ms": float(event.get("end", 0.0) or 0.0),
+                "label": f"burst {name}",
+                "tooltip": f"Stop burst {name}: burst_peak={details.get('burst_peak', 0.0)}, burst_rms={details.get('burst_rms', 0.0)}, burst_duration_ms={details.get('burst_duration_ms', 0.0)}, burst_status={'present' if float(details.get('burst_peak', 0.0) or 0.0) > 0.003 else 'low'}.",
+            })
+        if mono.size:
+            clipped = np.flatnonzero(np.abs(mono) >= 0.985)
+            if clipped.size:
+                groups = np.split(clipped, np.where(np.diff(clipped) > max(1, int(0.002 * SAMPLE_RATE)))[0] + 1)
+                for group in groups[:24]:
+                    regions.append({"kind": "clipping", "start_sample": int(group[0]), "end_sample": int(group[-1] + 1), "label": "clip", "tooltip": f"High-peak/clipping risk: {len(group)} samples near full scale."})
+            peak_window = max(1, int(0.012 * SAMPLE_RATE))
+            if len(mono) > peak_window:
+                for start in range(0, len(mono), peak_window):
+                    chunk = mono[start:start + peak_window]
+                    if chunk.size and float(np.max(np.abs(chunk))) >= 0.90:
+                        regions.append({"kind": "clipping", "start_sample": start, "end_sample": min(len(mono), start + peak_window), "label": "peak", "tooltip": f"High peak region: peak={float(np.max(np.abs(chunk))):.3f}; safer limiter protects against harsh clipping."})
+        for frame in pitch_frames:
+            if float(frame.get("pitch_error_percent", 0.0) or 0.0) > 8.0:
+                regions.append({"kind": "pitch_instability", "start_sample": int(frame.get("start_sample", 0) or 0), "end_sample": int(frame.get("end_sample", 0) or 0), "label": "pitch", "tooltip": f"Pitch instability: intended {frame.get('intended_pitch_hz')} Hz vs estimated {frame.get('measured_pitch_estimate_hz')} Hz ({frame.get('pitch_error_percent')}% error)."})
+        return regions[:220]
+
     def _continuous_soft_limit(self, mono: np.ndarray, target_peak: float = 0.86) -> np.ndarray:
         if mono.size == 0:
             return mono
         peak = float(np.max(np.abs(mono)))
         if peak <= target_peak or peak <= 1.0e-8:
             return mono
-        drive = peak / target_peak
-        limited = np.tanh(mono * drive) / np.tanh(drive)
-        limited_peak = float(np.max(np.abs(limited)))
+        knee = target_peak * 0.72
+        sign = np.sign(mono)
+        abs_mono = np.abs(mono)
+        limited_abs = abs_mono.copy()
+        over = abs_mono > knee
+        if np.any(over):
+            span = max(1.0e-9, peak - knee)
+            amount = (abs_mono[over] - knee) / span
+            limited_abs[over] = knee + (target_peak - knee) * np.tanh(amount * 1.55) / np.tanh(1.55)
+        limited = sign * limited_abs
+        limited_peak = float(np.max(np.abs(limited))) if limited.size else 0.0
         if limited_peak > target_peak and limited_peak > 1.0e-8:
             limited = limited / limited_peak * target_peak
         return limited
@@ -11714,6 +11977,18 @@ class WaveToyWindow(QMainWindow):
             return "DISTORTED", "#b00020"
         return "PASS_AUDIO_PRESENT", "#0b7a2a"
 
+    def _toggle_continuous_waveform_overlays(self, visible: bool) -> None:
+        if self.articulation_waveform_diagnostics_canvas is not None:
+            self.articulation_waveform_diagnostics_canvas.set_overlays_visible(bool(visible))
+
+    def _update_articulation_waveform_diagnostics_canvas(self) -> None:
+        if self.articulation_waveform_diagnostics_canvas is None:
+            return
+        self.articulation_waveform_diagnostics_canvas.set_render(
+            self.articulation_word_render_audio,
+            self.continuous_diagnostics_latest if self._articulation_word_render_mode() == ARTICULATION_WORD_RENDER_CONTINUOUS else {"active_render_mode": self._articulation_word_render_mode()},
+        )
+
     def _update_continuous_diagnostics_panel(self) -> None:
         metrics = dict(self.continuous_diagnostics_latest or {})
         if not metrics:
@@ -11737,6 +12012,12 @@ class WaveToyWindow(QMainWindow):
             "pitch_error",
             "formant_intensity",
             "formant_gain_ratio",
+            "base_f1",
+            "base_f2",
+            "base_f3",
+            "resonance_f1",
+            "resonance_f2",
+            "resonance_f3",
             "continuous_pitch_smoothing_ms",
             "transition_progress",
             "transition_model",
@@ -11774,6 +12055,7 @@ class WaveToyWindow(QMainWindow):
         metrics = dict(metrics)
         metrics["status"] = status
         self.continuous_diagnostics_latest = metrics
+        self._update_articulation_waveform_diagnostics_canvas()
         ordered_keys = (
             "active_render_mode",
             "chain_length",
@@ -11800,6 +12082,13 @@ class WaveToyWindow(QMainWindow):
             "formant_input_rms",
             "formant_output_rms",
             "formant_gain_ratio",
+            "base_f1",
+            "base_f2",
+            "base_f3",
+            "resonance_f1",
+            "resonance_f2",
+            "resonance_f3",
+            "waveform_overlay_region_count",
             "voiced_rms",
             "noise_rms",
             "source_rms",
@@ -12167,6 +12456,7 @@ class WaveToyWindow(QMainWindow):
                 "burst_peak": round(float(np.max(np.abs(burst_component))) if burst_component.size else 0.0, 9),
                 "burst_rms": round(float(np.sqrt(np.mean(np.square(burst_component)))) if burst_component.size else 0.0, 9),
                 "voicing_overlap_ms": round(float(params.get("voiced_onset_gain", 0.0)) * float(params["closure_samples"]) / SAMPLE_RATE * 1000.0, 3),
+                "burst_status": "present" if (float(np.max(np.abs(burst_component))) if burst_component.size else 0.0) > 0.003 else "low",
             })
             burst_bus[start_sample:end_sample] += burst_component
             noise_bus[start_sample:end_sample] += burst_component
@@ -12227,6 +12517,9 @@ class WaveToyWindow(QMainWindow):
         formant_input_rms = math.sqrt(formant_input_energy / formant_sample_count) if formant_sample_count > 0 else 0.0
         formant_output_rms = math.sqrt(formant_output_energy / formant_sample_count) if formant_sample_count > 0 else 0.0
         resonance_debug = self._resonance_formant_metadata(self.current_phoneme)
+        waveform_pitch_frames = self._continuous_pitch_debug_frames(final_mono, frame_debug, frame_samples)
+        pitch_debug_frames = waveform_pitch_frames or diagnostic_frames
+        waveform_overlay_regions = self._continuous_waveform_overlay_regions(final_mono, segments, burst_events, pitch_debug_frames, stop_debug_events)
         metrics = {
             "active_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
             "chain_length": len(self.articulation_chain_items),
@@ -12257,7 +12550,9 @@ class WaveToyWindow(QMainWindow):
             **{key: round(float(value), 6) for key, value in resonance_debug.items()},
             "frame_index": int(diagnostic_frames[0]["frame_index"]) if diagnostic_frames else 0,
             "active_phoneme": active_phoneme,
-            "pitch_debug_frames": diagnostic_frames,
+            "pitch_debug_frames": pitch_debug_frames,
+            "waveform_overlay_regions": waveform_overlay_regions,
+            "waveform_overlay_region_count": len(waveform_overlay_regions),
             "distortion_status": distortion_status,
             "continuous_debug_bypass_formants": bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)),
             "voiced_rms": round(float(np.sqrt(np.mean(np.square(voiced_bus)))) if voiced_bus.size else 0.0, 9),
@@ -12434,6 +12729,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_created_at = time.time()
         self.articulation_last_word_render_path = None
         self._update_articulation_word_status()
+        self._update_articulation_waveform_diagnostics_canvas()
         return self.articulation_word_render_audio
 
     def _create_articulation_word(self, checked: bool = False) -> np.ndarray:
