@@ -9307,6 +9307,7 @@ class WaveToyWindow(QMainWindow):
             "tongue_tip_height": state.tongue_tip_height,
             "tongue_blade_height": state.tongue_blade_height,
             "tongue_body_height": state.tongue_body_height,
+            "tongue_frontness": state.tongue_frontness,
             "tongue_back_height": state.tongue_back_height,
             "velum_open": state.velum_open,
             "nasal_airflow": state.nasal_airflow,
