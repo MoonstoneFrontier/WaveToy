@@ -1297,19 +1297,178 @@ class CharacterVoiceProfile:
 
 @dataclass
 class MusicalTimingSettings:
-    """Future beat/measure timing layer; milliseconds remain the default workflow."""
+    """Optional beat/measure timing layer; milliseconds remain the default workflow."""
 
     enabled: bool = False
     bpm: float = 120.0
     time_signature_numerator: int = 4
     time_signature_denominator: int = 4
     snap_enabled: bool = False
-    snap_subdivision: str = "1/16"
+    snap_subdivision: str = "Off"
     swing_percent: float = 0.0
     count_in_enabled: bool = False
+    grid_visible: bool = False
+    beat_unit_ms: float = 500.0
+    bars_visible: bool = True
+
+    def clamped(self) -> "MusicalTimingSettings":
+        bpm = float(np.clip(self.bpm, 20.0, 320.0))
+        numerator = int(np.clip(self.time_signature_numerator, 1, 16))
+        denominator = int(self.time_signature_denominator if self.time_signature_denominator in {2, 4, 8, 16} else 4)
+        beat_unit_ms = 60000.0 / max(1.0, bpm)
+        return MusicalTimingSettings(
+            enabled=bool(self.enabled),
+            bpm=bpm,
+            time_signature_numerator=numerator,
+            time_signature_denominator=denominator,
+            snap_enabled=bool(self.snap_enabled),
+            snap_subdivision=str(self.snap_subdivision if self.snap_subdivision in MUSICAL_SNAP_SUBDIVISIONS else "Off"),
+            swing_percent=float(np.clip(self.swing_percent, 0.0, 75.0)),
+            count_in_enabled=bool(self.count_in_enabled),
+            grid_visible=bool(self.grid_visible),
+            beat_unit_ms=beat_unit_ms,
+            bars_visible=bool(self.bars_visible),
+        )
 
     def to_json_dict(self) -> Dict[str, object]:
-        return asdict(self)
+        return asdict(self.clamped())
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "MusicalTimingSettings":
+        return cls(**{field_name: data[field_name] for field_name in cls.__dataclass_fields__ if field_name in data}).clamped()
+
+
+MUSICAL_SNAP_SUBDIVISIONS: Dict[str, float | None] = {
+    "Off": None,
+    "1/4": 1.0,
+    "1/8": 0.5,
+    "1/16": 0.25,
+    "1/32": 0.125,
+    "1/8 triplet": 1.0 / 3.0,
+    "1/16 triplet": 1.0 / 6.0,
+}
+
+
+def beat_to_ms(beat: float, settings: MusicalTimingSettings) -> float:
+    timing = settings.clamped()
+    return float(beat) * timing.beat_unit_ms
+
+
+def ms_to_beat(ms: float, settings: MusicalTimingSettings) -> float:
+    timing = settings.clamped()
+    return float(ms) / max(1.0, timing.beat_unit_ms)
+
+
+def note_value_to_ms(note_value: str, settings: MusicalTimingSettings) -> float:
+    timing = settings.clamped()
+    beats = MUSICAL_SNAP_SUBDIVISIONS.get(note_value)
+    if beats is None:
+        beats = 1.0
+    return float(beats) * timing.beat_unit_ms
+
+
+def quantize_ms_to_grid(ms: float, settings: MusicalTimingSettings) -> float:
+    timing = settings.clamped()
+    if not timing.enabled or not timing.snap_enabled:
+        return float(ms)
+    grid_ms = note_value_to_ms(timing.snap_subdivision, timing)
+    if grid_ms <= 0.0:
+        return float(ms)
+    return float(round(float(ms) / grid_ms) * grid_ms)
+
+
+def midi_note_to_name(midi: int) -> str:
+    midi = int(np.clip(midi, 0, 127))
+    return f"{NOTE_NAMES[midi % 12]}{midi // 12 - 1}"
+
+
+def midi_note_to_hz(midi: int, cents: float = 0.0) -> float:
+    return 440.0 * (2.0 ** ((float(midi) + float(cents) / 100.0 - 69.0) / 12.0))
+
+
+@dataclass
+class NoteEvent:
+    """Optional singing note target; empty note_events means normal speech."""
+
+    note_id: str = field(default_factory=lambda: f"note_{uuid.uuid4().hex[:8]}")
+    start_ms: float = 0.0
+    duration_ms: float = 500.0
+    midi_note: int = 60
+    note_name: str = "C4"
+    target_pitch_hz: float = 261.63
+    lyric: str = ""
+    phoneme_indices: List[int] = field(default_factory=list)
+    velocity: float = 0.8
+    pitch_bend_cents: float = 0.0
+    vibrato_depth_cents: float = 0.0
+    vibrato_rate_hz: float = 5.0
+    portamento_ms: float = 0.0
+
+    def clamped(self) -> "NoteEvent":
+        midi = int(np.clip(self.midi_note, 0, 127))
+        bend = float(np.clip(self.pitch_bend_cents, -2400.0, 2400.0))
+        pitch = float(self.target_pitch_hz or midi_note_to_hz(midi, bend))
+        if pitch <= 0.0:
+            pitch = midi_note_to_hz(midi, bend)
+        return NoteEvent(
+            note_id=str(self.note_id or f"note_{uuid.uuid4().hex[:8]}"),
+            start_ms=max(0.0, float(self.start_ms)),
+            duration_ms=max(1.0, float(self.duration_ms)),
+            midi_note=midi,
+            note_name=str(self.note_name or midi_note_to_name(midi)),
+            target_pitch_hz=pitch,
+            lyric=str(self.lyric),
+            phoneme_indices=[int(i) for i in self.phoneme_indices],
+            velocity=float(np.clip(self.velocity, 0.0, 1.0)),
+            pitch_bend_cents=bend,
+            vibrato_depth_cents=float(np.clip(self.vibrato_depth_cents, 0.0, 200.0)),
+            vibrato_rate_hz=float(np.clip(self.vibrato_rate_hz, 0.1, 12.0)),
+            portamento_ms=float(np.clip(self.portamento_ms, 0.0, 2000.0)),
+        )
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self.clamped())
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "NoteEvent":
+        return cls(**{field_name: data[field_name] for field_name in cls.__dataclass_fields__ if field_name in data}).clamped()
+
+
+@dataclass
+class PitchAutomationPoint:
+    """Pitch-performance point for diagnostics and generic animation export."""
+
+    time_ms: float
+    pitch_hz: float
+    curve: str = "linear"
+    source: str = "manual"
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {"time_ms": float(self.time_ms), "pitch_hz": float(self.pitch_hz), "curve": str(self.curve), "source": str(self.source)}
+
+
+@dataclass
+class SyllableStressMarker:
+    """Manual expression marker for future lyric phrasing and animation emphasis."""
+
+    marker_id: str = field(default_factory=lambda: f"stress_{uuid.uuid4().hex[:8]}")
+    start_ms: float = 0.0
+    end_ms: float = 0.0
+    label: str = ""
+    stress_level: float = 0.5
+    accentuation_db: float = 0.0
+    timing_bias: float = 0.0
+    pitch_bias_cents: float = 0.0
+
+    def to_json_dict(self) -> Dict[str, object]:
+        data = asdict(self)
+        data["start_ms"] = max(0.0, float(self.start_ms))
+        data["end_ms"] = max(data["start_ms"], float(self.end_ms))
+        data["stress_level"] = float(np.clip(self.stress_level, 0.0, 1.0))
+        data["accentuation_db"] = float(np.clip(self.accentuation_db, -24.0, 24.0))
+        data["timing_bias"] = float(np.clip(self.timing_bias, -1.0, 1.0))
+        data["pitch_bias_cents"] = float(np.clip(self.pitch_bias_cents, -1200.0, 1200.0))
+        return data
 
 
 @dataclass
@@ -5996,7 +6155,12 @@ class ArticulationTimelineCanvas(QWidget):
         self.setMinimumHeight(210)
         self.setMinimumWidth(900)
         self.setMouseTracking(True)
+        self.musical_timing_settings = DEFAULT_MUSICAL_TIMING_SETTINGS
         self.setToolTip("Ctrl/Shift + wheel zooms. Drag the red playhead to scrub, block bodies to reorder, block edges for duration, and dashed transition wedges for boundary length.")
+
+    def set_musical_timing_settings(self, settings: MusicalTimingSettings) -> None:
+        self.musical_timing_settings = settings.clamped()
+        self.update()
 
     def set_timeline(self, items: List[ArticulationChainItem], total_ms: int, playhead_ms: float) -> None:
         self.items = list(items)
@@ -6116,6 +6280,8 @@ class ArticulationTimelineCanvas(QWidget):
                 if self.drag_mode.startswith("duration") and kind == "block":
                     raw = (x - rect.left()) / self._px_per_ms() if self.drag_mode == "duration_right" else (rect.right() - x) / self._px_per_ms()
                     value = int(np.clip(round(raw / 10.0) * 10, 80, 5000))
+                    if self.musical_timing_settings.enabled and self.musical_timing_settings.snap_enabled:
+                        value = int(np.clip(round(quantize_ms_to_grid(value, self.musical_timing_settings)), 80, 5000))
                     self.live_value_text = f"Duration {value} ms"
                     self.setToolTip(self.live_value_text)
                     self.durationEdited.emit(index, value)
@@ -6123,6 +6289,9 @@ class ArticulationTimelineCanvas(QWidget):
                 if self.drag_mode == "transition" and kind == "transition":
                     raw = (x - rect.left()) / self._px_per_ms()
                     value = int(np.clip(round(raw / 5.0) * 5, 0, 250))
+                    # Transition windows are articulation timing, not musical note timing.
+                    # Keep them millisecond/manual so coarticulation, stop releases,
+                    # fricative holds, and diphthong movement keep their speech shape.
                     self.live_value_text = f"Transition {value} ms"
                     self.setToolTip(self.live_value_text)
                     self.transitionEdited.emit(index, value)
@@ -6157,6 +6326,33 @@ class ArticulationTimelineCanvas(QWidget):
                 )
             return
         self.setToolTip("Ctrl/Shift + wheel zooms. Drag the red playhead to scrub, block bodies to reorder, block edges for duration, and dashed transition wedges for boundary length.")
+
+    def _draw_musical_beat_grid(self, painter: QPainter, lane: QRectF) -> None:
+        timing = self.musical_timing_settings.clamped()
+        if not (timing.enabled and timing.grid_visible):
+            return
+        beat_ms = max(1.0, timing.beat_unit_ms)
+        beats_per_bar = max(1, timing.time_signature_numerator)
+        total_beats = int(math.ceil(self.total_ms / beat_ms)) + 1
+        painter.save()
+        painter.setFont(QFont("Arial", 8, QFont.Bold))
+        for beat_index in range(total_beats + 1):
+            ms = beat_index * beat_ms
+            x = lane.left() + ms * self._px_per_ms()
+            if x > lane.right() + 2:
+                break
+            is_bar = beat_index % beats_per_bar == 0
+            if is_bar and timing.bars_visible:
+                painter.setPen(QPen(QColor(123, 44, 191, 145), 2))
+                painter.drawLine(QPointF(x, lane.top() - 26), QPointF(x, lane.bottom() + 34))
+                label = f"M{beat_index // beats_per_bar + 1}.1"
+            else:
+                painter.setPen(QPen(QColor(69, 123, 157, 95), 1, Qt.DashLine))
+                painter.drawLine(QPointF(x, lane.top() - 18), QPointF(x, lane.bottom() + 26))
+                label = f"{beat_index // beats_per_bar + 1}.{beat_index % beats_per_bar + 1}"
+            painter.setPen(QPen(QColor("#1d3557"), 1))
+            painter.drawText(QRectF(x + 3, lane.top() - 24, 70, 18), Qt.AlignLeft, label)
+        painter.restore()
 
     def _transition_ms_for_item(self, item: ArticulationChainItem, next_item: ArticulationChainItem | None = None) -> int:
         if item.transition_to_next_ms is not None:
@@ -6232,6 +6428,7 @@ class ArticulationTimelineCanvas(QWidget):
             painter.setPen(QPen(QColor(29, 53, 87, 70), 1))
             painter.drawLine(QPointF(x, lane.top() - 18), QPointF(x, lane.bottom() + 26))
             painter.drawText(QRectF(x + 3, lane.bottom() + 4, 80, 18), Qt.AlignLeft, f"{mark} ms")
+        self._draw_musical_beat_grid(painter, lane)
         for kind, index, rect in self._segment_rects():
             item = self.items[index]
             phoneme = item.phoneme_for_render().clamped()
@@ -6865,6 +7062,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_chain_widget: QWidget | None = None
         self.articulation_timeline_canvas: ArticulationTimelineCanvas | None = None
         self.articulation_timeline_scroll: QScrollArea | None = None
+        self.pitch_lane_preview_label: QLabel | None = None
         self.articulation_timeline_zoom = 1.0
         self.articulation_playhead_ms = 0.0
         self.articulation_scrub_label: QLabel | None = None
@@ -6887,6 +7085,13 @@ class WaveToyWindow(QMainWindow):
         self.articulation_smooth_transitions_checkbox: QCheckBox | None = None
         self.continuous_debug_bypass_formants_checkbox: QCheckBox | None = None
         self.articulation_word_render_mode_combo: QComboBox | None = None
+        self.musical_timing_enabled_checkbox: QCheckBox | None = None
+        self.musical_bpm_spin: QDoubleSpinBox | None = None
+        self.musical_time_signature_combo: QComboBox | None = None
+        self.musical_snap_combo: QComboBox | None = None
+        self.musical_count_in_checkbox: QCheckBox | None = None
+        self.musical_grid_checkbox: QCheckBox | None = None
+        self.singing_mode_checkbox: QCheckBox | None = None
         self.continuous_diagnostics_latest: Dict[str, object] = {}
         self.continuous_diagnostics_status_label: QLabel | None = None
         self.continuous_diagnostics_metrics_label: QLabel | None = None
@@ -6919,7 +7124,7 @@ class WaveToyWindow(QMainWindow):
             self.voice_box_state, SpeechOrganState.from_articulation(self.current_phoneme)
         )
         self.character_voice_profile = DEFAULT_CHARACTER_VOICE_PROFILE
-        self.musical_timing_settings = DEFAULT_MUSICAL_TIMING_SETTINGS
+        self.musical_timing_settings = MusicalTimingSettings()
         self.live_preview_enabled = False
         self.live_preview_target = "selected_timeline_fragment"
         self.live_preview_timer = QTimer(self)
@@ -6949,7 +7154,11 @@ class WaveToyWindow(QMainWindow):
             "continuous_pitch_smoothing_ms": 20,
             "pitch_envelopes": [],
             "note_events": [],
+            "singing_mode_enabled": False,
         }
+        self.note_events: List[NoteEvent] = []
+        self.pitch_automation_points: List[PitchAutomationPoint] = []
+        self.syllable_stress_markers: List[SyllableStressMarker] = []
         self.articulation_syllable_markers: List[Dict[str, object]] = []
         self.articulation_phrase_markers: List[Dict[str, object]] = []
         self.phoneme_cards_widget: QWidget | None = None
@@ -8481,6 +8690,52 @@ class WaveToyWindow(QMainWindow):
         live_preview_row.addWidget(live_preview_note, 1)
         chain_layout.addLayout(live_preview_row)
 
+        musical_section = self._toy_group("Musical Timing + Singing Preview")
+        musical_layout = QVBoxLayout(musical_section)
+        musical_layout.setContentsMargins(10, 16, 10, 10)
+        musical_layout.setSpacing(6)
+        musical_row = QHBoxLayout()
+        musical_row.setSpacing(6)
+        self.musical_timing_enabled_checkbox = QCheckBox("Musical Timing")
+        self.musical_timing_enabled_checkbox.setChecked(self.musical_timing_settings.enabled)
+        self.musical_timing_enabled_checkbox.setToolTip("Default off: keep millisecond timing unless explicitly enabled.")
+        self.musical_timing_enabled_checkbox.toggled.connect(self._set_musical_timing_enabled)
+        self.musical_bpm_spin = QDoubleSpinBox()
+        self.musical_bpm_spin.setRange(20.0, 320.0)
+        self.musical_bpm_spin.setSingleStep(1.0)
+        self.musical_bpm_spin.setDecimals(1)
+        self.musical_bpm_spin.setValue(self.musical_timing_settings.bpm)
+        self.musical_bpm_spin.setToolTip("Tempo for beat conversion, quantize, labels, and animation export.")
+        self.musical_bpm_spin.valueChanged.connect(self._set_musical_bpm)
+        self.musical_time_signature_combo = QComboBox()
+        self.musical_time_signature_combo.addItems(["2/4", "3/4", "4/4", "5/4", "6/8", "7/8", "12/8"])
+        self.musical_time_signature_combo.setCurrentText(f"{self.musical_timing_settings.time_signature_numerator}/{self.musical_timing_settings.time_signature_denominator}")
+        self.musical_time_signature_combo.currentTextChanged.connect(self._set_musical_time_signature)
+        self.musical_snap_combo = QComboBox()
+        self.musical_snap_combo.addItems(list(MUSICAL_SNAP_SUBDIVISIONS.keys()))
+        self.musical_snap_combo.setCurrentText(self.musical_timing_settings.snap_subdivision if self.musical_timing_settings.snap_enabled else "Off")
+        self.musical_snap_combo.setToolTip("When not Off, phoneme duration drags snap to this beat grid. Transition timing stays in milliseconds for articulation safety.")
+        self.musical_snap_combo.currentTextChanged.connect(self._set_musical_snap_subdivision)
+        self.musical_count_in_checkbox = QCheckBox("Count-in")
+        self.musical_count_in_checkbox.setChecked(self.musical_timing_settings.count_in_enabled)
+        self.musical_count_in_checkbox.toggled.connect(self._set_musical_count_in_enabled)
+        self.musical_grid_checkbox = QCheckBox("Show Beat Grid")
+        self.musical_grid_checkbox.setChecked(self.musical_timing_settings.grid_visible)
+        self.musical_grid_checkbox.toggled.connect(self._set_musical_grid_visible)
+        self.singing_mode_checkbox = QCheckBox("Singing Preview")
+        self.singing_mode_checkbox.setChecked(False)
+        self.singing_mode_checkbox.setToolTip("Default off. Applies optional note pitch targets to voiced phonemes while preserving consonant noise/bursts.")
+        self.singing_mode_checkbox.toggled.connect(self._set_singing_mode_enabled)
+        for widget in (self.musical_timing_enabled_checkbox, QLabel("BPM"), self.musical_bpm_spin, self.musical_time_signature_combo, QLabel("Snap"), self.musical_snap_combo, self.musical_count_in_checkbox, self.musical_grid_checkbox, self.singing_mode_checkbox):
+            musical_row.addWidget(widget)
+        musical_row.addStretch(1)
+        musical_layout.addLayout(musical_row)
+        musical_hint = QLabel("Optional foundations only: empty note events keep normal speech; Singing Preview creates a simple C4 guide note for voiced phonemes when needed.")
+        musical_hint.setObjectName("symbolHint")
+        musical_hint.setWordWrap(True)
+        musical_layout.addWidget(musical_hint)
+        chain_layout.addWidget(CollapsibleSection("Musical timing", musical_section, expanded=False))
+
         self.articulation_smooth_transitions_checkbox = QCheckBox("Smooth Mouth Transitions")
         self.articulation_smooth_transitions_checkbox.setChecked(bool(self.articulation_word_render_settings.get("smooth_mouth_transitions", True)))
         self.articulation_smooth_transitions_checkbox.setToolTip("Create Word uses smoothstep slider motion between phoneme shapes when enabled.")
@@ -8659,6 +8914,7 @@ class WaveToyWindow(QMainWindow):
         chain_layout.addLayout(timeline_header)
 
         self.articulation_timeline_canvas = ArticulationTimelineCanvas()
+        self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
         self.articulation_timeline_canvas.blockSelected.connect(self._select_articulation_chain_item)
         self.articulation_timeline_canvas.durationEdited.connect(self._set_chain_item_duration_ms)
         self.articulation_timeline_canvas.transitionEdited.connect(self._set_chain_transition_to_next_ms)
@@ -8678,6 +8934,10 @@ class WaveToyWindow(QMainWindow):
         track_hint.setObjectName("symbolHint")
         track_hint.setWordWrap(True)
         track_layout.addWidget(track_hint)
+        self.pitch_lane_preview_label = QLabel("Pitch lane preview: no note events yet; Singing Preview stays vowel-anchored and default off.")
+        self.pitch_lane_preview_label.setObjectName("symbolHint")
+        self.pitch_lane_preview_label.setWordWrap(True)
+        track_layout.addWidget(self.pitch_lane_preview_label)
         track_layout.addWidget(self.articulation_timeline_scroll)
         chain_layout.addWidget(track_shell)
 
@@ -9295,6 +9555,11 @@ class WaveToyWindow(QMainWindow):
         character = self.character_voice_profile.name
         formant_bias = self._voice_box_formant_metadata()
         formants = self._formant_metrics_for_phoneme(phoneme)
+        timing = self.musical_timing_settings.clamped()
+        current_beat = ms_to_beat(self.articulation_playhead_ms, timing) if timing.enabled else 0.0
+        current_measure = int(current_beat // max(1, timing.time_signature_numerator)) + 1 if timing.enabled else 0
+        active_note = self._active_note_at_ms(self.articulation_playhead_ms)
+        pitch_curve_pitch = self._pitch_at_ms(self.articulation_playhead_ms)
         metrics = {
             "active_phoneme": phoneme.name,
             "target_phoneme": target_name,
@@ -9318,6 +9583,16 @@ class WaveToyWindow(QMainWindow):
             "closure_strength": state.closure_strength,
             "burst_strength": state.burst_strength,
             "voice_pitch": state.voice_pitch,
+            "musical_timing_enabled": timing.enabled,
+            "bpm": timing.bpm,
+            "current_beat": current_beat,
+            "current_measure": current_measure,
+            "active_note": active_note.note_name if active_note is not None else "—",
+            "target_pitch_hz": active_note.target_pitch_hz if active_note is not None else 0.0,
+            "pitch_curve_pitch_hz": pitch_curve_pitch or 0.0,
+            "vibrato_depth": active_note.vibrato_depth_cents if active_note is not None else 0.0,
+            "portamento_ms": active_note.portamento_ms if active_note is not None else 0.0,
+            "singing_mode_enabled": self._singing_mode_enabled(),
         }
         lines = [
             "Speech Diagnostics (read-only)",
@@ -9365,6 +9640,18 @@ class WaveToyWindow(QMainWindow):
             "Render Mode",
             f"word_render_mode: {self._articulation_word_render_mode()}",
             f"bypass_formants: {bool(self.articulation_word_render_settings.get('continuous_debug_bypass_formants', False))}",
+            "",
+            "Musical Timing + Singing",
+            f"musical_timing_enabled: {metrics['musical_timing_enabled']}",
+            f"bpm: {metrics['bpm']:.1f}",
+            f"current_beat: {metrics['current_beat']:.2f}",
+            f"current_measure: {metrics['current_measure']}",
+            f"active_note: {metrics['active_note']}",
+            f"target_pitch_hz: {metrics['target_pitch_hz']:.2f}",
+            f"pitch_curve_pitch_hz: {metrics['pitch_curve_pitch_hz']:.2f}",
+            f"vibrato_depth: {metrics['vibrato_depth']:.1f} cents",
+            f"portamento_ms: {metrics['portamento_ms']:.0f}",
+            f"singing_mode_enabled: {metrics['singing_mode_enabled']}",
         ])
         self.speech_diagnostics_text.setPlainText("\n".join(lines))
 
@@ -10469,6 +10756,13 @@ class WaveToyWindow(QMainWindow):
                 "chest_resonance_curve": [[f["time_ms"], f.get("resonance_tract_state", {}).get("chest_resonance", 0.0)] for f in frames],
                 "head_resonance_curve": [[f["time_ms"], f.get("resonance_tract_state", {}).get("head_resonance", 0.0)] for f in frames],
             },
+            "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
+            "note_events": self._note_events_json(),
+            "pitch_curve": self._pitch_curve_json(duration_ms),
+            "syllable_stress_markers": self._syllable_stress_json(),
+            "beat_grid": self._beat_grid_json(duration_ms),
+            "tempo_map": self._tempo_map_json(),
+            "singing_mode_enabled": self._singing_mode_enabled(),
         }
         Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         QMessageBox.information(self, "Export Animation JSON", f"Exported generic animation data to {filename}.")
@@ -10487,6 +10781,143 @@ class WaveToyWindow(QMainWindow):
                 imported.append({"path": filename, "status": "import_failed", "error": str(exc)})
         print(f"[WaveToy Voice Font] imported recordings consent_required=True files={json.dumps(imported, ensure_ascii=False)}")
         QMessageBox.information(self, "Voice Font Import", "Imported recording metadata for consent-first workflow. Record/Analyze remain disabled placeholders; no voice cloning is implemented.")
+
+
+    def _sync_musical_timing_to_timeline(self) -> None:
+        self.musical_timing_settings = self.musical_timing_settings.clamped()
+        self.articulation_word_render_settings["musical_timing_settings"] = self.musical_timing_settings.to_json_dict()
+        if self.articulation_timeline_canvas is not None:
+            self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
+        self._mark_articulation_word_dirty()
+        self._update_speech_diagnostics_panel(self.current_phoneme)
+
+    def _set_musical_timing_enabled(self, enabled: bool) -> None:
+        self.musical_timing_settings.enabled = bool(enabled)
+        self._sync_musical_timing_to_timeline()
+
+    def _set_musical_bpm(self, bpm: float) -> None:
+        self.musical_timing_settings.bpm = float(bpm)
+        self._sync_musical_timing_to_timeline()
+
+    def _set_musical_time_signature(self, text: str) -> None:
+        try:
+            numerator_text, denominator_text = str(text).split("/", 1)
+            self.musical_timing_settings.time_signature_numerator = int(numerator_text)
+            self.musical_timing_settings.time_signature_denominator = int(denominator_text)
+        except Exception:
+            self.musical_timing_settings.time_signature_numerator = 4
+            self.musical_timing_settings.time_signature_denominator = 4
+        self._sync_musical_timing_to_timeline()
+
+    def _set_musical_snap_subdivision(self, text: str) -> None:
+        self.musical_timing_settings.snap_subdivision = str(text)
+        self.musical_timing_settings.snap_enabled = str(text) != "Off"
+        self._sync_musical_timing_to_timeline()
+
+    def _set_musical_count_in_enabled(self, enabled: bool) -> None:
+        self.musical_timing_settings.count_in_enabled = bool(enabled)
+        self._sync_musical_timing_to_timeline()
+
+    def _set_musical_grid_visible(self, enabled: bool) -> None:
+        self.musical_timing_settings.grid_visible = bool(enabled)
+        self._sync_musical_timing_to_timeline()
+
+    def _set_singing_mode_enabled(self, enabled: bool) -> None:
+        self.articulation_word_render_settings["singing_mode_enabled"] = bool(enabled)
+        self._mark_articulation_word_dirty()
+        self._update_speech_diagnostics_panel(self.current_phoneme)
+
+    def _singing_mode_enabled(self) -> bool:
+        if self.singing_mode_checkbox is not None:
+            return bool(self.singing_mode_checkbox.isChecked())
+        return bool(self.articulation_word_render_settings.get("singing_mode_enabled", False))
+
+    def _note_events_json(self) -> List[Dict[str, object]]:
+        return [note.to_json_dict() for note in self.note_events]
+
+    def _syllable_stress_json(self) -> List[Dict[str, object]]:
+        return [marker.to_json_dict() for marker in self.syllable_stress_markers]
+
+    def _ensure_default_note_event(self) -> None:
+        if self.note_events or not self.articulation_chain_items:
+            return
+        duration_ms = max(1.0, float(self._articulation_motion_timeline()[1]))
+        voiced_indices = [i for i, item in enumerate(self.articulation_chain_items) if item.phoneme_for_render().voiced and item.phoneme_for_render().phoneme_family not in {"fricative", "affricate", "stop"}]
+        self.note_events.append(NoteEvent(start_ms=0.0, duration_ms=duration_ms, midi_note=60, note_name="C4", target_pitch_hz=midi_note_to_hz(60), lyric="preview", phoneme_indices=voiced_indices).clamped())
+        self.articulation_word_render_settings["note_events"] = self._note_events_json()
+
+    def _pitch_curve_from_note_events(self, duration_ms: float | None = None) -> List[PitchAutomationPoint]:
+        del duration_ms
+        notes = [note.clamped() for note in self.note_events]
+        if not notes:
+            self.pitch_automation_points = []
+            return []
+        points: List[PitchAutomationPoint] = []
+        for note in sorted(notes, key=lambda event: event.start_ms):
+            pitch = float(note.target_pitch_hz or midi_note_to_hz(note.midi_note, note.pitch_bend_cents))
+            start = note.start_ms
+            # Safety pass: keep pitch automation lightweight. Vibrato and portamento
+            # values remain serialized on NoteEvent for future tasks, but the active
+            # preview/export curve exposes only stable note targets for now.
+            points.append(PitchAutomationPoint(start, pitch, "hold", "note_event"))
+            points.append(PitchAutomationPoint(start + note.duration_ms, pitch, "hold", "note_event"))
+        self.pitch_automation_points = sorted(points, key=lambda point: point.time_ms)
+        return self.pitch_automation_points
+
+    def _pitch_curve_json(self, duration_ms: float | None = None) -> List[Dict[str, object]]:
+        return [point.to_json_dict() for point in self._pitch_curve_from_note_events(duration_ms)]
+
+    def _pitch_at_ms(self, elapsed_ms: float) -> float | None:
+        curve = self._pitch_curve_from_note_events()
+        if not curve:
+            return None
+        before = curve[0]
+        for point in curve:
+            if point.time_ms > elapsed_ms:
+                break
+            before = point
+        return max(20.0, before.pitch_hz)
+
+    def _active_note_at_ms(self, elapsed_ms: float) -> NoteEvent | None:
+        for note in self.note_events:
+            n = note.clamped()
+            if n.start_ms <= elapsed_ms <= n.start_ms + n.duration_ms:
+                return n
+        return None
+
+    def _beat_grid_json(self, duration_ms: float) -> List[Dict[str, object]]:
+        timing = self.musical_timing_settings.clamped()
+        if not timing.enabled:
+            return []
+        beat_ms = max(1.0, timing.beat_unit_ms)
+        beats_per_bar = max(1, timing.time_signature_numerator)
+        grid = []
+        for beat_index in range(int(math.ceil(duration_ms / beat_ms)) + 1):
+            grid.append({
+                "time_ms": beat_index * beat_ms,
+                "beat": beat_index + 1,
+                "measure": beat_index // beats_per_bar + 1,
+                "beat_in_measure": beat_index % beats_per_bar + 1,
+                "is_bar": beat_index % beats_per_bar == 0,
+            })
+        return grid
+
+    def _tempo_map_json(self) -> List[Dict[str, object]]:
+        timing = self.musical_timing_settings.clamped()
+        return [{"start_ms": 0.0, "bpm": timing.bpm, "time_signature": f"{timing.time_signature_numerator}/{timing.time_signature_denominator}", "beat_unit_ms": timing.beat_unit_ms}]
+
+    def _refresh_pitch_lane_preview(self) -> None:
+        if self.pitch_lane_preview_label is None:
+            return
+        curve = self._pitch_curve_from_note_events()
+        if not curve:
+            self.pitch_lane_preview_label.setText("Pitch lane preview: no note events yet; Singing Preview stays vowel-anchored and default off.")
+            return
+        preview = ", ".join(f"{point.time_ms:.0f} ms → {point.pitch_hz:.1f} Hz" for point in curve[:6])
+        if len(curve) > 6:
+            preview += ", …"
+        self.pitch_lane_preview_label.setText(f"Read-only pitch lane: {preview}")
+
 
     def _articulation_smooth_transitions_enabled(self) -> bool:
         if self.articulation_smooth_transitions_checkbox is not None:
@@ -10526,11 +10957,13 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_motion_canvas is not None:
             self.articulation_motion_canvas.set_motion_timeline(blocks)
         if self.articulation_timeline_canvas is not None:
+            self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
             self.articulation_timeline_canvas.set_zoom(self.articulation_timeline_zoom)
             self.articulation_timeline_canvas.set_timeline(self.articulation_chain_items, total_ms, self.articulation_playhead_ms)
             selected_index = self.articulation_selected_chain_index
             self.articulation_timeline_canvas.selected_index = selected_index if isinstance(selected_index, int) and 0 <= selected_index < len(self.articulation_chain_items) else None
             self.articulation_timeline_canvas.update()
+        self._refresh_pitch_lane_preview()
         if self.articulation_envelope_canvas is not None:
             self.articulation_envelope_canvas.set_timeline(segments, total_ms, self.articulation_playhead_ms)
         if self.articulation_formant_canvas is not None:
@@ -10961,6 +11394,59 @@ class WaveToyWindow(QMainWindow):
             "max_accentuation_db": round(float(max_db), 3),
             "gain_applied": round(self._accentuation_gain_for_db(active_db), 6),
         }
+
+
+    def _singing_pitch_follow_strength(self, phoneme: ArticulationPhoneme) -> float:
+        family = str(phoneme.phoneme_family)
+        if family == "vowel":
+            return 1.0
+        if family == "glide" and phoneme.voiced:
+            return 0.75
+        if family == "liquid" and phoneme.voiced:
+            return 0.70
+        if family == "nasal" and phoneme.voiced:
+            return 0.55
+        if family == "fricative" and phoneme.voiced:
+            return 0.25
+        return 0.0
+
+
+    def _chain_item_start_times_ms(self) -> List[float]:
+        starts: List[float] = []
+        cursor = 0.0
+        for index, item in enumerate(self.articulation_chain_items):
+            starts.append(cursor)
+            cursor += int(item.duration_ms or item.phoneme.duration_ms)
+            if index < len(self.articulation_chain_items) - 1:
+                cursor += self._chain_transition_duration_ms(item, self.articulation_chain_items[index + 1])
+        return starts
+
+    def _phoneme_with_singing_pitch(self, item: ArticulationChainItem, start_ms: float) -> ArticulationPhoneme:
+        phoneme = item.phoneme_for_render().clamped()
+        if not self._singing_mode_enabled():
+            return phoneme
+        strength = self._singing_pitch_follow_strength(phoneme)
+        if strength <= 0.0:
+            return phoneme
+        target_pitch = self._pitch_at_ms(start_ms + max(0.0, phoneme.duration_ms * 0.5))
+        if target_pitch is None:
+            return phoneme
+        target_pitch = float(np.clip(target_pitch, 55.0, 1400.0))
+        anchored_pitch = float(phoneme.voice_pitch + (target_pitch - phoneme.voice_pitch) * strength)
+        return replace(phoneme, voice_pitch=anchored_pitch)
+
+    def _render_articulation_word_singing_preview(self) -> np.ndarray:
+        self._ensure_default_note_event()
+        starts = self._chain_item_start_times_ms()
+        original_items = self.articulation_chain_items
+        adjusted_items: List[ArticulationChainItem] = []
+        for item, start_ms in zip(original_items, starts):
+            adjusted_items.append(replace(item, phoneme=self._phoneme_with_singing_pitch(item, start_ms)))
+        self.articulation_chain_items = adjusted_items
+        try:
+            return self._render_articulation_word_clip_crossfade()
+        finally:
+            self.articulation_chain_items = original_items
 
     def _render_articulation_word_plain(self) -> np.ndarray:
         word = np.zeros((0, 2), dtype=np.float32)
@@ -11884,6 +12370,9 @@ class WaveToyWindow(QMainWindow):
     def _render_articulation_word(self) -> np.ndarray:
         mode = self._articulation_word_render_mode()
         print(f"[WaveToy Word] selected render_mode={mode}")
+        if self._singing_mode_enabled():
+            print("[WaveToy Singing] Singing Preview enabled; applying optional note pitch targets to voiced phonemes")
+            return self._render_articulation_word_singing_preview()
         if mode == ARTICULATION_WORD_RENDER_PLAIN:
             return self._render_articulation_word_plain()
         if mode == ARTICULATION_WORD_RENDER_CLIP_CROSSFADE:
@@ -11923,6 +12412,10 @@ class WaveToyWindow(QMainWindow):
             "resonance_tract_state": self.resonance_tract_state.to_json_dict(),
             "character_voice_profile": self.character_voice_profile.to_json_dict(),
             "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
+            "note_events": self._note_events_json(),
+            "pitch_curve": self._pitch_curve_json(),
+            "syllable_stress_markers": self._syllable_stress_json(),
+            "singing_mode_enabled": self._singing_mode_enabled(),
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
