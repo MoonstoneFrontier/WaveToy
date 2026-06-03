@@ -48,3 +48,4 @@ articulation_chain.json
 
 # WaveToy local speech render cache
 .wavetoy_speech_cache/
+task_071.patch

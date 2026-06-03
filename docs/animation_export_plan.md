@@ -40,3 +40,17 @@ Generic animation and viseme JSON now includes resonance-oriented data while pre
   - `head_resonance_curve`
 
 The data remains human-readable JSON and does not require Blender or any target-specific dependency.
+
+## Task 070 musical timing and singing additions
+
+The generic animation export now also includes singing-ready and beat-aware fields while preserving the existing speech-organ, voice-box, resonance, formant, and viseme keys:
+
+- `musical_timing_settings`
+- `note_events`
+- `pitch_curve`
+- `syllable_stress_markers`
+- `beat_grid`
+- `tempo_map`
+- `singing_mode_enabled`
+
+These additions remain plain JSON. MIDI, Blender, DAW, and game-engine adapters should consume this generic schema later instead of adding dependencies to WaveToy's core export path.
