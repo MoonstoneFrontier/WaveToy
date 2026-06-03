@@ -31,3 +31,7 @@ WaveToy writes a recovery JSON file under `WaveToyData/Recovery/autosave_recover
 - Delete Recovery
 
 The prompt displays the recovery timestamp and source project path. Restored recovery data is loaded without silently overwriting the current project path, and the user is offered a normal project save location.
+
+## Task 075 performance automation persistence
+
+Project snapshots now include a `performance` object plus a top-level `automation_tracks` compatibility list. These structures are JSON-safe and do not embed raw audio arrays. Autosave recovery writes the same snapshot shape, so recovery includes performance automation tracks alongside articulation chains, timing, profiles, and timeline metadata.

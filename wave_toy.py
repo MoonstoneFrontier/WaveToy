@@ -127,6 +127,8 @@ def wavetoy_data_root() -> Path:
 
 
 WAVETOY_ASSET_CATEGORIES: Dict[str, str] = {
+    "performance": "Performances",
+    "automation_curve": "AutomationCurves",
     "phoneme": "Phonemes",
     "cv_combination": "CVCombinations",
     "vc_combination": "VCCombinations",
@@ -144,6 +146,127 @@ WAVETOY_ASSET_CATEGORIES: Dict[str, str] = {
     "generated_wav": "GeneratedWav",
     "animation_export": "AnimationExports",
 }
+
+
+AUTOMATION_TARGET_PARAMETERS: Dict[str, List[str]] = {
+    "articulation": ["mouth_open", "tongue_height", "tongue_frontness", "lip_rounding", "nasal_open"],
+    "voice_box": ["breathiness", "rasp", "glottal_closure", "vocal_fold_tension"],
+    "resonance": ["resonance_depth", "brightness", "darkness", "nasal_coupling"],
+    "expression": ["accentuation_db", "timing_bias", "pitch_bias_cents"],
+}
+AUTOMATION_TARGET_TO_LANE: Dict[str, str] = {
+    target: lane for lane, targets in AUTOMATION_TARGET_PARAMETERS.items() for target in targets
+}
+AUTOMATION_CURVES = ["linear", "hold", "smooth"]
+AUTOMATION_DEFAULT_COLORS = ["#ffd166", "#5cdb95", "#24d7ff", "#f1c0e8", "#d7b9ff", "#ffadad"]
+
+
+@dataclass
+class AutomationPoint:
+    """One editable automation value at a millisecond timestamp."""
+
+    time_ms: int = 0
+    value: float = 0.0
+    curve: str = "linear"
+
+    def __post_init__(self) -> None:
+        self.time_ms = int(max(0, round(float(self.time_ms))))
+        self.value = float(self.value)
+        if self.curve not in AUTOMATION_CURVES:
+            self.curve = "linear"
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {"time_ms": int(self.time_ms), "value": float(self.value), "curve": self.curve}
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "AutomationPoint":
+        return cls(
+            time_ms=int(float(data.get("time_ms", 0) or 0)),
+            value=float(data.get("value", 0.0) or 0.0),
+            curve=str(data.get("curve", "linear") or "linear"),
+        )
+
+
+@dataclass
+class AutomationTrack:
+    """Persistent performance lane targeting one articulation, voice, resonance, or expression parameter."""
+
+    track_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Accentuation"
+    target_parameter: str = "accentuation_db"
+    lane_type: str = "expression"
+    points: List[AutomationPoint] = field(default_factory=list)
+    muted: bool = False
+    visible: bool = True
+    color: str = "#ffd166"
+
+    def __post_init__(self) -> None:
+        self.track_id = str(self.track_id or uuid.uuid4())
+        self.name = str(self.name or self.target_parameter or "Automation Track")
+        self.target_parameter = str(self.target_parameter or "accentuation_db")
+        self.lane_type = str(self.lane_type or AUTOMATION_TARGET_TO_LANE.get(self.target_parameter, "expression"))
+        self.points = sorted([p if isinstance(p, AutomationPoint) else AutomationPoint.from_json_dict(p) for p in self.points], key=lambda p: p.time_ms)
+        self.muted = bool(self.muted)
+        self.visible = bool(self.visible)
+        self.color = str(self.color or "#ffd166")
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "track_id": self.track_id,
+            "name": self.name,
+            "target_parameter": self.target_parameter,
+            "lane_type": self.lane_type,
+            "points": [point.to_json_dict() for point in self.points],
+            "muted": self.muted,
+            "visible": self.visible,
+            "color": self.color,
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "AutomationTrack":
+        return cls(
+            track_id=str(data.get("track_id") or uuid.uuid4()),
+            name=str(data.get("name", "Automation Track") or "Automation Track"),
+            target_parameter=str(data.get("target_parameter", "accentuation_db") or "accentuation_db"),
+            lane_type=str(data.get("lane_type", "") or AUTOMATION_TARGET_TO_LANE.get(str(data.get("target_parameter", "accentuation_db")), "expression")),
+            points=[AutomationPoint.from_json_dict(item) for item in data.get("points", []) if isinstance(item, dict)] if isinstance(data.get("points", []), list) else [],
+            muted=bool(data.get("muted", False)),
+            visible=bool(data.get("visible", True)),
+            color=str(data.get("color", "#ffd166") or "#ffd166"),
+        )
+
+
+@dataclass
+class PerformanceAsset:
+    """Serializable performance snapshot made of persistent automation tracks."""
+
+    performance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Untitled Performance"
+    automation_tracks: List[AutomationTrack] = field(default_factory=list)
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+    version: int = 1
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "performance_id": self.performance_id,
+            "name": self.name,
+            "automation_tracks": [track.to_json_dict() for track in self.automation_tracks],
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+            "version": self.version,
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object], *, fresh_uuid: bool = False) -> "PerformanceAsset":
+        return cls(
+            performance_id=str(uuid.uuid4()) if fresh_uuid else str(data.get("performance_id") or uuid.uuid4()),
+            name=str(data.get("name", "Untitled Performance") or "Untitled Performance"),
+            automation_tracks=[AutomationTrack.from_json_dict(item) for item in data.get("automation_tracks", []) if isinstance(item, dict)] if isinstance(data.get("automation_tracks", []), list) else [],
+            created_at=_utc_now_iso() if fresh_uuid else str(data.get("created_at") or _utc_now_iso()),
+            modified_at=_utc_now_iso(),
+            version=int(data.get("version", 1) or 1),
+        )
 
 
 @dataclass
@@ -7289,6 +7412,12 @@ class WaveToyWindow(QMainWindow):
         self.asset_library_search: QLineEdit | None = None
         self.asset_library_category_combo: QComboBox | None = None
         self.asset_library_sort_combo: QComboBox | None = None
+        self.performance_asset = PerformanceAsset(name="Current Performance")
+        self.automation_tracks: List[AutomationTrack] = self.performance_asset.automation_tracks
+        self.selected_automation_track_id: str | None = None
+        self.automation_track_table: QTableWidget | None = None
+        self.automation_points_table: QTableWidget | None = None
+        self.automation_status_label: QLabel | None = None
         self.auto_save_interval_ms = 5 * 60 * 1000
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self._auto_save_project_recovery)
@@ -7710,6 +7839,8 @@ class WaveToyWindow(QMainWindow):
                 phrase_markers=list(self.articulation_phrase_markers),
             ).to_json_dict() | {"selected_chain_index": self.articulation_selected_chain_index},
             "phoneme_assets": [phoneme.to_json_dict() for phoneme in self.saved_phonemes],
+            "performance": self._performance_asset_snapshot().to_json_dict(),
+            "automation_tracks": self._automation_tracks_json(),
             "profiles": {
                 "voice_source_profile": self.voice_source_profile.to_json_dict(),
                 "voice_box_state": self.voice_box_state.to_json_dict(),
@@ -7755,6 +7886,17 @@ class WaveToyWindow(QMainWindow):
             self.articulation_phrase_markers = list(chain.get("phrase_markers", [])) if isinstance(chain.get("phrase_markers", []), list) else []
             if isinstance(chain.get("word_render_settings"), dict):
                 self.articulation_word_render_settings.update(chain["word_render_settings"])
+        performance = data.get("performance", {})
+        if isinstance(performance, dict):
+            self.performance_asset = PerformanceAsset.from_json_dict(performance)
+            self.automation_tracks = list(self.performance_asset.automation_tracks)
+        else:
+            self.performance_asset = PerformanceAsset(name="Current Performance")
+            self.automation_tracks = []
+        if isinstance(data.get("automation_tracks", []), list):
+            self.automation_tracks = [AutomationTrack.from_json_dict(item) for item in data.get("automation_tracks", []) if isinstance(item, dict)]
+            self.performance_asset.automation_tracks = self.automation_tracks
+        self.selected_automation_track_id = self.automation_tracks[0].track_id if self.automation_tracks else None
         profiles = data.get("profiles", {})
         if isinstance(profiles, dict):
             if isinstance(profiles.get("voice_source_profile"), dict):
@@ -7791,6 +7933,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_signature = None
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._refresh_performance_tables()
         self._timeline_refresh_palette_cards()
         self._timeline_update_duration()
         if self.timeline_canvas is not None:
@@ -8029,6 +8172,23 @@ class WaveToyWindow(QMainWindow):
             self._mark_articulation_word_dirty()
             self._refresh_articulation_chain_cards()
             self._refresh_articulation_motion_timeline()
+            return
+        if record.asset_type == "performance":
+            performance = PerformanceAsset.from_json_dict(payload, fresh_uuid=True)
+            self.performance_asset = performance
+            self.automation_tracks = list(performance.automation_tracks)
+            self.selected_automation_track_id = self.automation_tracks[0].track_id if self.automation_tracks else None
+            self._refresh_performance_tables()
+            return
+        if record.asset_type == "automation_curve":
+            track_payload = payload.get("track") if isinstance(payload.get("track"), dict) else payload
+            track = AutomationTrack.from_json_dict(track_payload)
+            track.track_id = str(uuid.uuid4())
+            track.name = f"{track.name} Import"
+            self.automation_tracks.append(track)
+            self.performance_asset.automation_tracks = self.automation_tracks
+            self.selected_automation_track_id = track.track_id
+            self._refresh_performance_tables()
             return
         if record.asset_type == "voice_source":
             self.voice_source_profile = VoiceSourceProfile.from_json_dict(payload)
@@ -9173,6 +9333,7 @@ class WaveToyWindow(QMainWindow):
         self._build_articulation_tab()
         self._build_voice_font_tab()
         self._build_articulation_timeline_tab()
+        self._build_performance_tab()
         self._build_graphical_editor_tab()
         self._build_timeline_tab()
         self._build_library_tab()
@@ -10552,6 +10713,7 @@ class WaveToyWindow(QMainWindow):
             "vibrato_depth": active_note.vibrato_depth_cents if active_note is not None else 0.0,
             "portamento_ms": active_note.portamento_ms if active_note is not None else 0.0,
             "singing_mode_enabled": self._singing_mode_enabled(),
+            "automation_tracks": self._automation_tracks_json(),
         }
         lines = [
             "Speech Diagnostics (read-only)",
@@ -11067,6 +11229,7 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._refresh_performance_tables()
         self._timeline_refresh_palette_cards()
         self._timeline_update_duration()
         if self.timeline_canvas is not None:
@@ -11439,6 +11602,7 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._refresh_performance_tables()
         self._timeline_refresh_palette_cards()
         self._timeline_update_duration()
         if self.timeline_canvas is not None:
@@ -11555,6 +11719,7 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._refresh_performance_tables()
         self._timeline_refresh_palette_cards()
         self._timeline_update_duration()
         if self.timeline_canvas is not None:
@@ -11738,6 +11903,7 @@ class WaveToyWindow(QMainWindow):
             "beat_grid": self._beat_grid_json(duration_ms),
             "tempo_map": self._tempo_map_json(),
             "singing_mode_enabled": self._singing_mode_enabled(),
+            "automation_tracks": self._automation_tracks_json(),
         }
         Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         self._save_library_asset("animation_export", Path(filename).stem, payload, description="Generic animation JSON export", source_path=str(filename))
@@ -13475,14 +13641,14 @@ class WaveToyWindow(QMainWindow):
         print(f"[WaveToy Word] selected render_mode={mode}")
         if self._singing_mode_enabled():
             print("[WaveToy Singing] Singing Preview enabled; applying optional note pitch targets to voiced phonemes")
-            return self._render_articulation_word_singing_preview()
-        if mode == ARTICULATION_WORD_RENDER_PLAIN:
-            return self._render_articulation_word_plain()
-        if mode == ARTICULATION_WORD_RENDER_CLIP_CROSSFADE:
-            return self._render_articulation_word_clip_crossfade()
-        if mode == ARTICULATION_WORD_RENDER_CONTINUOUS:
+            audio = self._render_articulation_word_singing_preview()
+        elif mode == ARTICULATION_WORD_RENDER_PLAIN:
+            audio = self._render_articulation_word_plain()
+        elif mode == ARTICULATION_WORD_RENDER_CLIP_CROSSFADE:
+            audio = self._render_articulation_word_clip_crossfade()
+        elif mode == ARTICULATION_WORD_RENDER_CONTINUOUS:
             try:
-                return self._render_articulation_word_continuous()
+                audio = self._render_articulation_word_continuous()
             except Exception as exc:
                 print(f"[WaveToy Envelope] error continuous renderer failed without Clip Crossfade fallback: {exc}")
                 self._report_continuous_render_debug({
@@ -13500,8 +13666,10 @@ class WaveToyWindow(QMainWindow):
                     "voiced_phoneme_count": 0,
                     "exception": str(exc),
                 })
-                return np.zeros((0, 2), dtype=np.float32)
-        return self._render_articulation_word_clip_crossfade()
+                audio = np.zeros((0, 2), dtype=np.float32)
+        else:
+            audio = self._render_articulation_word_clip_crossfade()
+        return self._apply_performance_automation_to_audio(audio)
 
     def _current_word_render_signature(self) -> str:
         payload = {
@@ -13519,6 +13687,7 @@ class WaveToyWindow(QMainWindow):
             "pitch_curve": self._pitch_curve_json(),
             "syllable_stress_markers": self._syllable_stress_json(),
             "singing_mode_enabled": self._singing_mode_enabled(),
+            "automation_tracks": self._automation_tracks_json(),
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
@@ -13685,6 +13854,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_signature = None
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._refresh_performance_tables()
         self._timeline_refresh_palette_cards()
         self._timeline_update_duration()
         if self.timeline_canvas is not None:
@@ -14511,6 +14681,308 @@ class WaveToyWindow(QMainWindow):
             filters.addTab(page, label)
         layout.addWidget(filters, 1)
         return panel
+
+    def _performance_asset_snapshot(self) -> PerformanceAsset:
+        self.performance_asset.automation_tracks = list(self.automation_tracks)
+        self.performance_asset.modified_at = _utc_now_iso()
+        return self.performance_asset
+
+    def _automation_tracks_json(self) -> List[Dict[str, object]]:
+        return [track.to_json_dict() for track in self.automation_tracks]
+
+    def _selected_automation_track(self) -> AutomationTrack | None:
+        if self.selected_automation_track_id:
+            for track in self.automation_tracks:
+                if track.track_id == self.selected_automation_track_id:
+                    return track
+        if self.automation_tracks:
+            self.selected_automation_track_id = self.automation_tracks[0].track_id
+            return self.automation_tracks[0]
+        return None
+
+    def _mark_performance_dirty(self, reason: str = "performance automation changed") -> None:
+        self._mark_project_dirty(reason)
+        self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_word_render_signature = None
+        self.articulation_last_word_render_path = None
+        self.articulation_last_word_render_created_at = None
+        self._update_articulation_word_status()
+        self._update_performance_status()
+
+    def _default_automation_track_name(self, target_parameter: str) -> str:
+        return target_parameter.replace("_", " ").title()
+
+    def _add_automation_track(self, checked: bool = False) -> None:
+        del checked
+        targets = [target for lane_targets in AUTOMATION_TARGET_PARAMETERS.values() for target in lane_targets]
+        target, ok = QInputDialog.getItem(self, "Add Automation Track", "Target parameter:", targets, targets.index("accentuation_db"), False)
+        if not ok or not target:
+            return
+        color = AUTOMATION_DEFAULT_COLORS[len(self.automation_tracks) % len(AUTOMATION_DEFAULT_COLORS)]
+        track = AutomationTrack(
+            name=self._default_automation_track_name(target),
+            target_parameter=target,
+            lane_type=AUTOMATION_TARGET_TO_LANE.get(target, "expression"),
+            color=color,
+        )
+        if target == "accentuation_db":
+            track.points.append(AutomationPoint(time_ms=0, value=0.0, curve="linear"))
+        self.automation_tracks.append(track)
+        self.selected_automation_track_id = track.track_id
+        self._refresh_performance_tables()
+        self._mark_performance_dirty("automation track added")
+
+    def _delete_selected_automation_track(self, checked: bool = False) -> None:
+        del checked
+        track = self._selected_automation_track()
+        if track is None:
+            QMessageBox.information(self, "Performance", "Select an automation track first.")
+            return
+        self.automation_tracks = [item for item in self.automation_tracks if item.track_id != track.track_id]
+        self.performance_asset.automation_tracks = self.automation_tracks
+        self.selected_automation_track_id = self.automation_tracks[0].track_id if self.automation_tracks else None
+        self._refresh_performance_tables()
+        self._mark_performance_dirty("automation track deleted")
+
+    def _add_automation_point(self, checked: bool = False) -> None:
+        del checked
+        track = self._selected_automation_track()
+        if track is None:
+            QMessageBox.information(self, "Performance", "Add or select an automation track first.")
+            return
+        next_time = (track.points[-1].time_ms + 250) if track.points else 0
+        track.points.append(AutomationPoint(time_ms=next_time, value=0.0, curve="linear"))
+        track.points.sort(key=lambda point: point.time_ms)
+        self._refresh_performance_tables()
+        self._mark_performance_dirty("automation point added")
+
+    def _remove_selected_automation_point(self, checked: bool = False) -> None:
+        del checked
+        track = self._selected_automation_track()
+        row = self.automation_points_table.currentRow() if self.automation_points_table is not None else -1
+        if track is None or row < 0 or row >= len(track.points):
+            QMessageBox.information(self, "Performance", "Select an automation point first.")
+            return
+        del track.points[row]
+        self._refresh_performance_tables()
+        self._mark_performance_dirty("automation point removed")
+
+    def _automation_track_row_selected(self, row: int, column: int = 0) -> None:
+        del column
+        if 0 <= row < len(self.automation_tracks):
+            self.selected_automation_track_id = self.automation_tracks[row].track_id
+            self._refresh_automation_points_table()
+            self._update_performance_status()
+
+    def _automation_track_table_changed(self, row: int, column: int) -> None:
+        if not (0 <= row < len(self.automation_tracks)):
+            return
+        item = self.automation_track_table.item(row, column) if self.automation_track_table is not None else None
+        if item is None:
+            return
+        track = self.automation_tracks[row]
+        if column == 1:
+            track.name = item.text().strip() or track.name
+        elif column == 4:
+            track.muted = item.checkState() == Qt.Checked
+        elif column == 5:
+            track.visible = item.checkState() == Qt.Checked
+        self._mark_performance_dirty("automation track edited")
+
+    def _automation_point_table_changed(self, row: int, column: int) -> None:
+        track = self._selected_automation_track()
+        if track is None or not (0 <= row < len(track.points)):
+            return
+        item = self.automation_points_table.item(row, column) if self.automation_points_table is not None else None
+        if item is None:
+            return
+        point = track.points[row]
+        try:
+            if column == 0:
+                point.time_ms = int(max(0, round(float(item.text()))))
+            elif column == 1:
+                point.value = float(item.text())
+            elif column == 2:
+                curve = item.text().strip().lower()
+                point.curve = curve if curve in AUTOMATION_CURVES else "linear"
+        except ValueError:
+            self._refresh_automation_points_table()
+            return
+        track.points.sort(key=lambda p: p.time_ms)
+        self._refresh_automation_points_table()
+        self._mark_performance_dirty("automation point edited")
+
+    def _refresh_performance_tables(self) -> None:
+        self._refresh_automation_track_table()
+        self._refresh_automation_points_table()
+        self._update_performance_status()
+
+    def _refresh_automation_track_table(self) -> None:
+        if self.automation_track_table is None:
+            return
+        self.automation_track_table.blockSignals(True)
+        self.automation_track_table.setRowCount(len(self.automation_tracks))
+        for row, track in enumerate(self.automation_tracks):
+            values = [track.color, track.name, track.target_parameter, track.lane_type, "", "", str(len(track.points))]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column in {0, 2, 3, 6}:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if column == 4:
+                    item.setFlags((item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable)
+                    item.setCheckState(Qt.Checked if track.muted else Qt.Unchecked)
+                    item.setText("Muted")
+                if column == 5:
+                    item.setFlags((item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable)
+                    item.setCheckState(Qt.Checked if track.visible else Qt.Unchecked)
+                    item.setText("Visible")
+                self.automation_track_table.setItem(row, column, item)
+        selected_row = next((idx for idx, track in enumerate(self.automation_tracks) if track.track_id == self.selected_automation_track_id), -1)
+        if selected_row >= 0:
+            self.automation_track_table.selectRow(selected_row)
+        self.automation_track_table.resizeColumnsToContents()
+        self.automation_track_table.blockSignals(False)
+
+    def _refresh_automation_points_table(self) -> None:
+        if self.automation_points_table is None:
+            return
+        track = self._selected_automation_track()
+        points = track.points if track is not None else []
+        self.automation_points_table.blockSignals(True)
+        self.automation_points_table.setRowCount(len(points))
+        for row, point in enumerate(points):
+            for column, value in enumerate([point.time_ms, point.value, point.curve]):
+                item = QTableWidgetItem(str(value))
+                self.automation_points_table.setItem(row, column, item)
+        self.automation_points_table.resizeColumnsToContents()
+        self.automation_points_table.blockSignals(False)
+
+    def _update_performance_status(self) -> None:
+        if self.automation_status_label is None:
+            return
+        track = self._selected_automation_track()
+        accent_tracks = [item for item in self.automation_tracks if item.target_parameter == "accentuation_db" and not item.muted]
+        selected = f"Selected: {track.name} → {track.target_parameter}" if track is not None else "No selected track"
+        self.automation_status_label.setText(
+            f"{len(self.automation_tracks)} automation track(s). {selected}. "
+            f"Preview applies {len(accent_tracks)} active accentuation_db track(s) non-destructively; other targets are persisted for future render hooks."
+        )
+
+    def _save_current_performance_to_library(self, checked: bool = False) -> None:
+        del checked
+        name, ok = QInputDialog.getText(self, "Save Performance", "Performance asset name:", text=self.performance_asset.name or self.current_project_name)
+        if not ok:
+            return
+        performance = self._performance_asset_snapshot()
+        performance.name = name.strip() or "Untitled Performance"
+        payload = performance.to_json_dict()
+        self._save_library_asset("performance", performance.name, payload, description="Performance automation track snapshot")
+        self._mark_performance_dirty("performance saved to library")
+        QMessageBox.information(self, "Performance Library", f"Saved performance asset: {performance.name}")
+
+    def _save_selected_automation_curve_to_library(self, checked: bool = False) -> None:
+        del checked
+        track = self._selected_automation_track()
+        if track is None:
+            QMessageBox.information(self, "Performance", "Select an automation track first.")
+            return
+        payload = {"track": track.to_json_dict(), "points": [point.to_json_dict() for point in track.points]}
+        self._save_library_asset("automation_curve", track.name, payload, description=f"Automation curve for {track.target_parameter}")
+
+    def _automation_value_at_ms(self, track: AutomationTrack, time_ms: np.ndarray) -> np.ndarray:
+        if not track.points:
+            return np.zeros_like(time_ms, dtype=np.float32)
+        points = sorted(track.points, key=lambda point: point.time_ms)
+        envelope = np.full_like(time_ms, float(points[0].value), dtype=np.float32)
+        if len(points) == 1:
+            envelope[time_ms < points[0].time_ms] = 0.0
+            return envelope
+        envelope[time_ms < points[0].time_ms] = 0.0
+        for left, right in zip(points, points[1:]):
+            mask = (time_ms >= left.time_ms) & (time_ms <= right.time_ms)
+            if not np.any(mask):
+                continue
+            if left.curve == "hold":
+                envelope[mask] = float(left.value)
+            else:
+                span = max(1.0, float(right.time_ms - left.time_ms))
+                t = np.clip((time_ms[mask] - float(left.time_ms)) / span, 0.0, 1.0)
+                if left.curve == "smooth":
+                    t = t * t * (3.0 - 2.0 * t)
+                envelope[mask] = float(left.value) + (float(right.value) - float(left.value)) * t
+        envelope[time_ms > points[-1].time_ms] = float(points[-1].value)
+        return envelope.astype(np.float32)
+
+    def _apply_performance_automation_to_audio(self, audio: np.ndarray) -> np.ndarray:
+        if audio.size == 0:
+            return audio.astype(np.float32)
+        active_tracks = [track for track in self.automation_tracks if track.target_parameter == "accentuation_db" and not track.muted and track.points]
+        if not active_tracks:
+            return audio.astype(np.float32)
+        rendered = np.array(audio, dtype=np.float32, copy=True)
+        time_ms = (np.arange(len(rendered), dtype=np.float32) * 1000.0) / float(SAMPLE_RATE)
+        db_envelope = np.zeros(len(rendered), dtype=np.float32)
+        for track in active_tracks:
+            db_envelope += self._automation_value_at_ms(track, time_ms)
+        gain = np.power(10.0, np.clip(db_envelope, -24.0, 24.0) / 20.0).astype(np.float32)
+        rendered *= gain[:, None]
+        return np.clip(rendered, -1.0, 1.0).astype(np.float32)
+
+    def _build_performance_tab(self) -> None:
+        if self.tabs is None:
+            return
+        tab = QWidget()
+        tab.setObjectName("performanceTab")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(10)
+        header = QLabel("Performance")
+        header.setObjectName("timelineInspectorTitle")
+        body = QLabel("Persistent performance automation tracks. This foundation stores all listed target parameters, while preview render safely applies accentuation_db only on render copies.")
+        body.setObjectName("timelineInspectorText")
+        body.setWordWrap(True)
+        layout.addWidget(header)
+        layout.addWidget(body)
+
+        button_row = QHBoxLayout()
+        for label, callback in (
+            ("Add Track", self._add_automation_track),
+            ("Delete Track", self._delete_selected_automation_track),
+            ("Add Point", self._add_automation_point),
+            ("Remove Point", self._remove_selected_automation_point),
+            ("Save Performance", self._save_current_performance_to_library),
+            ("Save Curve", self._save_selected_automation_curve_to_library),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            button_row.addWidget(button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        tables = QHBoxLayout()
+        self.automation_track_table = QTableWidget(0, 7)
+        self.automation_track_table.setHorizontalHeaderLabels(["Color", "Name", "Target", "Lane", "Muted", "Visible", "Points"])
+        self.automation_track_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.automation_track_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.automation_track_table.horizontalHeader().setStretchLastSection(True)
+        self.automation_track_table.cellClicked.connect(self._automation_track_row_selected)
+        self.automation_track_table.itemChanged.connect(lambda item: self._automation_track_table_changed(item.row(), item.column()))
+        tables.addWidget(self.automation_track_table, 3)
+
+        self.automation_points_table = QTableWidget(0, 3)
+        self.automation_points_table.setHorizontalHeaderLabels(["time_ms", "value", "curve"])
+        self.automation_points_table.setToolTip("Curve values: linear, hold, smooth")
+        self.automation_points_table.horizontalHeader().setStretchLastSection(True)
+        self.automation_points_table.itemChanged.connect(lambda item: self._automation_point_table_changed(item.row(), item.column()))
+        tables.addWidget(self.automation_points_table, 2)
+        layout.addLayout(tables, 1)
+
+        self.automation_status_label = QLabel("No automation tracks yet.")
+        self.automation_status_label.setObjectName("symbolHint")
+        self.automation_status_label.setWordWrap(True)
+        layout.addWidget(self.automation_status_label)
+        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "Performance")
+        self._refresh_performance_tables()
 
     def _build_library_tab(self) -> None:
         if self.tabs is None:
