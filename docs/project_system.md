@@ -1,37 +1,33 @@
 # WaveToy Project System
 
-Task 073 introduces explicit projects as the durable container for a speech workstation session.
+WaveToy projects are human-readable `.wavetoy-project.json` files stored by default under `WaveToyData/Projects`. Project JSON stores workstation state and references source audio paths, but it does not embed raw audio arrays.
 
-## User operations
+## Saved project state
 
-The File menu now exposes:
+Projects capture:
 
-- **New Project**: creates a named project under `WaveToyData/Projects/` and clears active timeline/chain session lists.
-- **Open Project**: loads a `*.wavetoy-project.json` file.
-- **Save Project**: writes the current project snapshot.
-- **Save Project As**: writes the snapshot to a user-selected project path.
-- **Recent Projects**: repopulates from `WaveToyData/wavetoy_storage.json`.
-
-The active project path is visible below the global command bar.
-
-## Project contents
-
-A project snapshot stores JSON-safe references and metadata for:
-
-- Synthesis settings/recipe metadata.
-- Active articulation chain and markers.
-- Saved phoneme snapshots available in the project context.
-- Voice Source, Voice Box, Resonance, and Character profiles.
+- Current synthesizer recipe/settings.
+- Active Articulation Chain, selected chain item, render settings, syllable markers, and phrase markers.
+- Saved phoneme snapshots.
+- Voice Source, Voice Box, Resonance Tract, and Character Voice Profile state.
 - Musical timing settings, note events, pitch curves, and stress markers.
-- Timeline lanes, palette metadata, speech bin metadata, clip metadata, and last export paths.
-- Window size and active tab index.
+- Timeline lanes, snap settings, Audio Assets metadata, Speech Assets metadata, clips, and timeline palette metadata.
+- Window metadata including the selected tab.
 
-## Auto-save and recovery
+## Restore behavior
 
-WaveToy writes a recovery project file every five minutes by default:
+Opening a project restores chain/profile/timing/timeline metadata and switches back to the saved tab when that tab index is available. Imported audio palette items and imported/generated timeline clips are rehydrated from `source_path` when the file still exists. Missing audio sources are represented visibly as muted timeline clips rather than crashing or silently disappearing.
 
-```text
-WaveToyData/Recovery/autosave_recovery.wavetoy-project.json
-```
+## Dirty state and prompts
 
-Startup restore uses `wavetoy_storage.json` to reopen the previous project when enabled. If a recovery file exists, WaveToy logs its path for recovery awareness; the next pass can add a blocking startup prompt once more crash-state UX is validated.
+Changes to articulation chains, profiles, timing-related state, library assets, and timeline edits mark the project dirty. The window title and project label show an unsaved marker. New Project, Open Project, and Exit prompt the user to save, discard, or cancel when unsaved changes exist. Recovery auto-save does not clear dirty state.
+
+## Recovery workflow
+
+WaveToy writes a recovery JSON file under `WaveToyData/Recovery/autosave_recovery.wavetoy-project.json`. On startup, if that file exists, WaveToy prompts with:
+
+- Restore Recovery
+- Ignore This Time
+- Delete Recovery
+
+The prompt displays the recovery timestamp and source project path. Restored recovery data is loaded without silently overwriting the current project path, and the user is offered a normal project save location.

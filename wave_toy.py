@@ -80,6 +80,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QAbstractItemView,
+    QHeaderView,
     QSlider,
     QStyle,
     QStackedWidget,
@@ -90,6 +92,8 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QSizePolicy,
     QTextEdit,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -7280,6 +7284,8 @@ class WaveToyWindow(QMainWindow):
         self.recent_project_actions: List[QAction] = []
         self.project_path_label: QLabel | None = None
         self.asset_library_summary: QTextEdit | None = None
+        self.asset_library_table: QTableWidget | None = None
+        self.asset_library_rows: List[Tuple[Path, AssetLibraryRecord]] = []
         self.asset_library_search: QLineEdit | None = None
         self.asset_library_category_combo: QComboBox | None = None
         self.asset_library_sort_combo: QComboBox | None = None
@@ -7653,12 +7659,37 @@ class WaveToyWindow(QMainWindow):
     def _project_status_text(self) -> str:
         if self.current_project_path is None:
             return "Project: Unsaved — no project file yet"
-        return f"Project: {self.current_project_path}"
+        marker = " *" if self.project_dirty else ""
+        return f"Project: {self.current_project_path}{marker}"
+
+    def _mark_project_dirty(self, reason: str = "project change") -> None:
+        if not self.project_dirty:
+            print(f"[WaveToy Project] dirty: {reason}")
+        self.project_dirty = True
+        self._update_project_path_label()
+
+    def _confirm_discard_dirty_project(self, action: str) -> bool:
+        if not self.project_dirty:
+            return True
+        result = QMessageBox.question(
+            self,
+            "Unsaved Project",
+            f"Save changes before {action}?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if result == QMessageBox.Cancel:
+            return False
+        if result == QMessageBox.Save:
+            self._save_project()
+            return not self.project_dirty
+        return True
 
     def _update_project_path_label(self) -> None:
         if self.project_path_label is not None:
             self.project_path_label.setText(self._project_status_text())
-        self.setWindowTitle(f"WaveToy - Visual Sound and Articulation Lab — {self.current_project_name}")
+        marker = "*" if self.project_dirty else ""
+        self.setWindowTitle(f"{marker}WaveToy - Visual Sound and Articulation Lab — {self.current_project_name}")
 
     def _project_snapshot(self) -> Dict[str, object]:
         """Collect persistent, JSON-safe workstation state without embedding audio arrays."""
@@ -7677,7 +7708,7 @@ class WaveToyWindow(QMainWindow):
                 word_render_settings=dict(self.articulation_word_render_settings),
                 syllable_markers=list(self.articulation_syllable_markers),
                 phrase_markers=list(self.articulation_phrase_markers),
-            ).to_json_dict(),
+            ).to_json_dict() | {"selected_chain_index": self.articulation_selected_chain_index},
             "phoneme_assets": [phoneme.to_json_dict() for phoneme in self.saved_phonemes],
             "profiles": {
                 "voice_source_profile": self.voice_source_profile.to_json_dict(),
@@ -7718,7 +7749,8 @@ class WaveToyWindow(QMainWindow):
         chain = data.get("articulation_chain", {})
         if isinstance(chain, dict):
             self.articulation_chain_items = [ArticulationChainItem.from_json_dict(item) for item in chain.get("items", []) if isinstance(item, dict)]
-            self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+            selected_index = chain.get("selected_chain_index")
+            self.articulation_selected_chain_index = int(selected_index) if isinstance(selected_index, int) and 0 <= selected_index < len(self.articulation_chain_items) else (0 if self.articulation_chain_items else None)
             self.articulation_syllable_markers = list(chain.get("syllable_markers", [])) if isinstance(chain.get("syllable_markers", []), list) else []
             self.articulation_phrase_markers = list(chain.get("phrase_markers", [])) if isinstance(chain.get("phrase_markers", []), list) else []
             if isinstance(chain.get("word_render_settings"), dict):
@@ -7740,6 +7772,16 @@ class WaveToyWindow(QMainWindow):
             self.note_events = [NoteEvent.from_json_dict(item) for item in timing.get("note_events", []) if isinstance(item, dict)] if isinstance(timing.get("note_events", []), list) else []
             self.pitch_automation_points = [PitchAutomationPoint.from_json_dict(item) for item in timing.get("pitch_curve", []) if isinstance(item, dict)] if isinstance(timing.get("pitch_curve", []), list) else []
             self.syllable_stress_markers = [SyllableStressMarker.from_json_dict(item) for item in timing.get("stress_markers", []) if isinstance(item, dict)] if isinstance(timing.get("stress_markers", []), list) else []
+        timeline = data.get("timeline", {})
+        if isinstance(timeline, dict):
+            self.timeline_lane_names = list(timeline.get("lane_names", self.timeline_lane_names)) if isinstance(timeline.get("lane_names", []), list) else self.timeline_lane_names
+            self.timeline_lane_count = max(1, len(self.timeline_lane_names))
+            self.timeline_snap_enabled = bool(timeline.get("snap_enabled", self.timeline_snap_enabled))
+            self.timeline_snap_seconds = float(timeline.get("snap_seconds", self.timeline_snap_seconds) or self.timeline_snap_seconds)
+            self.timeline_audio_palette = self._rehydrate_audio_palette(timeline.get("audio_palette", []))
+            self.timeline_clips = self._rehydrate_timeline_clips(timeline.get("clips", []))
+            self.timeline_next_palette_item_id = max([item.item_id for item in self.timeline_audio_palette] or [0]) + 1
+            self.timeline_next_clip_id = max([clip.clip_id for clip in self.timeline_clips] or [0]) + 1
         window = data.get("window", {})
         if isinstance(window, dict) and self.tabs is not None:
             index = int(window.get("active_tab", self.tabs.currentIndex()) or 0)
@@ -7749,12 +7791,19 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_signature = None
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._timeline_refresh_palette_cards()
+        self._timeline_update_duration()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
         self._sync_voice_box_controls()
         self._sync_resonance_controls()
         self._update_project_path_label()
 
     def _new_project(self, checked: bool = False) -> None:
         del checked
+        if not self._confirm_discard_dirty_project("creating a new project"):
+            return
         name, ok = QInputDialog.getText(self, "New Project", "Project name:", text="Untitled WaveToy Project")
         if not ok:
             return
@@ -7773,6 +7822,8 @@ class WaveToyWindow(QMainWindow):
 
     def _open_project(self, checked: bool = False, path: str | None = None) -> None:
         del checked
+        if not self._confirm_discard_dirty_project("opening another project"):
+            return
         filename = path
         if not filename:
             filename, _ = QFileDialog.getOpenFileName(self, "Open WaveToy Project", str(self.storage.projects_dir), "WaveToy Project (*.wavetoy-project.json *.json);;All Files (*)")
@@ -7786,6 +7837,8 @@ class WaveToyWindow(QMainWindow):
             self.storage.add_recent_project(project_path)
             self._refresh_recent_project_menu()
             self.storage.update_metadata(last_project_path=str(project_path))
+            self.project_dirty = False
+            self._update_project_path_label()
             QMessageBox.information(self, "Project Opened", f"Opened project:\n{project_path}")
         except Exception as exc:
             QMessageBox.warning(self, "Could not open project", str(exc))
@@ -7837,7 +7890,41 @@ class WaveToyWindow(QMainWindow):
         metadata = self.storage.metadata()
         recovery_path = self.storage.recovery_path
         if recovery_path.exists():
-            print(f"[WaveToy Storage] Recovery file available: {recovery_path}")
+            try:
+                recovery_data = self.storage.read_json(recovery_path)
+                autosave = recovery_data.get("autosave", {}) if isinstance(recovery_data.get("autosave", {}), dict) else {}
+                timestamp = str(autosave.get("created_at") or recovery_data.get("saved_at") or "unknown")
+                source_project = str(autosave.get("source_project_path") or "Unsaved project")
+                box = QMessageBox(self)
+                box.setWindowTitle("Recovery Available")
+                box.setText("A WaveToy recovery file is available.")
+                box.setInformativeText(f"Recovery timestamp: {timestamp}\nSource project: {source_project}\n\nChoose whether to restore it without overwriting your current project.")
+                restore_button = box.addButton("Restore Recovery", QMessageBox.AcceptRole)
+                ignore_button = box.addButton("Ignore This Time", QMessageBox.RejectRole)
+                delete_button = box.addButton("Delete Recovery", QMessageBox.DestructiveRole)
+                box.setDefaultButton(restore_button)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked == delete_button:
+                    recovery_path.unlink(missing_ok=True)
+                elif clicked == restore_button:
+                    self.current_project_path = None
+                    self._apply_project_snapshot(recovery_data)
+                    self.project_dirty = True
+                    self._update_project_path_label()
+                    default_path = self.storage.default_project_path(f"{self.current_project_name} Recovery")
+                    filename, _ = QFileDialog.getSaveFileName(self, "Save Restored Recovery As", str(default_path), "WaveToy Project (*.wavetoy-project.json);;JSON (*.json)")
+                    if filename:
+                        path = Path(filename)
+                        if not path.name.endswith(".wavetoy-project.json"):
+                            path = path.with_suffix(".wavetoy-project.json")
+                        self.current_project_path = path
+                        self._save_project_to_path(path, show_message=True)
+                    return
+                else:
+                    del ignore_button
+            except Exception as exc:
+                print(f"[WaveToy Storage] Recovery prompt failed: {exc}")
         if not bool(metadata.get("restore_previous_session", True)):
             return
         last_path = metadata.get("last_project_path")
@@ -7845,6 +7932,8 @@ class WaveToyWindow(QMainWindow):
             try:
                 self.current_project_path = Path(str(last_path))
                 self._apply_project_snapshot(self.storage.read_json(self.current_project_path))
+                self.project_dirty = False
+                self._update_project_path_label()
             except Exception as exc:
                 print(f"[WaveToy Storage] Startup restore failed: {exc}")
 
@@ -7868,7 +7957,162 @@ class WaveToyWindow(QMainWindow):
         record = AssetLibraryRecord(asset_type=asset_type, name=name, payload=payload, description=description, tags=list(tags or []), notes=notes, source_path=source_path)
         path = self.storage.save_asset(record)
         self._refresh_asset_library_view()
+        self._mark_project_dirty("library asset saved")
         return path
+
+    def _selected_library_entry(self) -> Tuple[Path, AssetLibraryRecord] | None:
+        if self.asset_library_table is None:
+            return None
+        row = self.asset_library_table.currentRow()
+        if row < 0 or row >= len(self.asset_library_rows):
+            QMessageBox.information(self, "Speech Asset Library", "Select a library row first.")
+            return None
+        return self.asset_library_rows[row]
+
+    def _delete_library_path_for_record(self, current_path: Path, record: AssetLibraryRecord) -> None:
+        if current_path.exists():
+            current_path.unlink()
+        for path, loaded in self.storage.iter_assets():
+            if path != current_path and loaded.uuid == record.uuid:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def _update_library_record(self, current_path: Path, record: AssetLibraryRecord) -> Path:
+        old_uuid = record.uuid
+        self._delete_library_path_for_record(current_path, record)
+        record.uuid = old_uuid
+        return self.storage.save_asset(record)
+
+    def _source_status_for_record(self, record: AssetLibraryRecord) -> str:
+        source = record.source_path or str(record.payload.get("source_path") or record.payload.get("audio_path") or "") if isinstance(record.payload, dict) else ""
+        if not source:
+            return "—"
+        return "OK" if Path(source).exists() else "Missing"
+
+    def _load_selected_library_entry(self, checked: bool = False) -> None:
+        del checked
+        selected = self._selected_library_entry()
+        if selected is None:
+            return
+        _path, record = selected
+        try:
+            self._load_library_record(record)
+            self._mark_project_dirty(f"loaded library asset {record.name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Load Library Asset", str(exc))
+
+    def _load_library_record(self, record: AssetLibraryRecord) -> None:
+        payload = dict(record.payload or {})
+        if record.asset_type == "phoneme":
+            phoneme = ArticulationPhoneme.from_json_dict(payload)
+            self._set_articulation_ui_from_phoneme(phoneme)
+            if all(saved.name.lower() != phoneme.name.lower() for saved in self.saved_phonemes):
+                self.saved_phonemes.append(phoneme)
+                self._refresh_phoneme_cards()
+            if self.tabs is not None:
+                self.tabs.setCurrentIndex(1)
+            return
+        if record.asset_type in {"articulation_chain", "word"}:
+            chain_payload = payload.get("articulation_metadata") if record.asset_type == "word" and isinstance(payload.get("articulation_metadata"), dict) else payload
+            if self.articulation_chain_items:
+                result = QMessageBox.question(self, "Replace Articulation Chain", "Replace the current articulation chain with this library asset?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if result != QMessageBox.Yes:
+                    return
+            self.articulation_chain_items = [ArticulationChainItem.from_json_dict(item) for item in chain_payload.get("items", []) if isinstance(item, dict)]
+            self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+            if isinstance(chain_payload.get("word_render_settings"), dict):
+                self.articulation_word_render_settings.update(chain_payload["word_render_settings"])
+            self.articulation_syllable_markers = list(chain_payload.get("syllable_markers", [])) if isinstance(chain_payload.get("syllable_markers", []), list) else []
+            self.articulation_phrase_markers = list(chain_payload.get("phrase_markers", [])) if isinstance(chain_payload.get("phrase_markers", []), list) else []
+            self._mark_articulation_word_dirty()
+            self._refresh_articulation_chain_cards()
+            self._refresh_articulation_motion_timeline()
+            return
+        if record.asset_type == "voice_source":
+            self.voice_source_profile = VoiceSourceProfile.from_json_dict(payload)
+            return
+        if record.asset_type == "voice_box":
+            self.voice_box_state = VoiceBoxState.from_json_dict(payload); self._sync_voice_box_controls(); return
+        if record.asset_type == "resonance_profile":
+            self.resonance_tract_state = ResonanceTractState.from_json_dict(payload); self._sync_resonance_controls(); return
+        if record.asset_type == "character_profile":
+            self.character_voice_profile = CharacterVoiceProfile.from_json_dict(payload); return
+        if record.asset_type in {"imported_wav", "generated_wav"}:
+            source = record.source_path or str(payload.get("source_path") or payload.get("audio_path") or "")
+            if not source or not Path(source).exists():
+                QMessageBox.warning(self, "Missing Audio Source", f"The source audio file is missing:\n{source or '(no source_path)'}")
+                return
+            item = self._audio_palette_item_from_source(Path(source), record.name)
+            self.timeline_audio_palette.append(item)
+            self.timeline_selected_palette_item_id = item.item_id
+            self._timeline_refresh_palette_cards()
+            return
+        QMessageBox.information(self, "Load Library Asset", f"Loading is not yet defined for {record.asset_type} assets.")
+
+    def _rename_selected_library_entry(self, checked: bool = False) -> None:
+        del checked
+        selected = self._selected_library_entry()
+        if selected is None:
+            return
+        path, record = selected
+        new_name, ok = QInputDialog.getText(self, "Rename Asset", "New asset name:", text=record.name)
+        if not ok or not new_name.strip():
+            return
+        record.name = new_name.strip(); record.modified_at = _utc_now_iso()
+        self._update_library_record(path, record)
+        self._refresh_asset_library_view(); self._mark_project_dirty("library asset renamed")
+
+    def _duplicate_selected_library_entry(self, checked: bool = False) -> None:
+        del checked
+        selected = self._selected_library_entry()
+        if selected is None:
+            return
+        _path, record = selected
+        duplicate = AssetLibraryRecord.from_json_dict(record.to_json_dict())
+        duplicate.uuid = str(uuid.uuid4()); duplicate.name = f"{record.name} Copy"; duplicate.created_at = _utc_now_iso()
+        self.storage.save_asset(duplicate)
+        self._refresh_asset_library_view(); self._mark_project_dirty("library asset duplicated")
+
+    def _delete_selected_library_entry(self, checked: bool = False) -> None:
+        del checked
+        selected = self._selected_library_entry()
+        if selected is None:
+            return
+        path, record = selected
+        result = QMessageBox.question(self, "Delete Asset", f"Delete library metadata for '{record.name}'?\n\nSource audio files are not deleted.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if result != QMessageBox.Yes:
+            return
+        self._delete_library_path_for_record(path, record)
+        self._refresh_asset_library_view(); self._mark_project_dirty("library asset deleted")
+
+    def _toggle_selected_library_favorite(self, checked: bool = False) -> None:
+        del checked
+        selected = self._selected_library_entry()
+        if selected is None:
+            return
+        path, record = selected
+        record.favorite = not record.favorite
+        self._update_library_record(path, record)
+        self._refresh_asset_library_view(); self._mark_project_dirty("library asset favorite changed")
+
+    def _edit_selected_library_tags_notes(self, checked: bool = False) -> None:
+        del checked
+        selected = self._selected_library_entry()
+        if selected is None:
+            return
+        path, record = selected
+        tags, ok = QInputDialog.getText(self, "Edit Tags", "Comma-separated tags:", text=", ".join(record.tags))
+        if not ok:
+            return
+        notes, ok = QInputDialog.getMultiLineText(self, "Edit Notes", "Notes:", text=record.notes)
+        if not ok:
+            return
+        record.tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        record.notes = notes
+        self._update_library_record(path, record)
+        self._refresh_asset_library_view(); self._mark_project_dirty("library asset tags/notes changed")
 
     def _refresh_asset_library_view(self) -> None:
         if self.asset_library_summary is None:
@@ -7891,16 +8135,19 @@ class WaveToyWindow(QMainWindow):
             filtered.sort(key=lambda entry: (entry[1].asset_type, entry[1].name.lower()))
         else:
             filtered.sort(key=lambda entry: entry[1].modified_at, reverse=True)
-        lines = ["Speech Asset Library", f"Storage root: {self.storage.root}", f"Assets shown: {len(filtered)} of {len(records)}", ""]
+        self.asset_library_rows = filtered
+        if self.asset_library_table is not None:
+            self.asset_library_table.setRowCount(len(filtered))
+            for row, (path, record) in enumerate(filtered):
+                values = ["★" if record.favorite else "☆", record.name, record.asset_type, record.modified_at, ", ".join(record.tags), self._source_status_for_record(record)]
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setToolTip(str(path))
+                    self.asset_library_table.setItem(row, column, item)
+            self.asset_library_table.resizeColumnsToContents()
+        lines = ["Speech Asset Library", f"Storage root: {self.storage.root}", f"Assets shown: {len(filtered)} of {len(records)}"]
         if not filtered:
             lines.append("No matching library assets yet. Save a phoneme, chain, word, profile, imported wav, generated wav, analysis, or export to populate the persistent library.")
-        for path, record in filtered:
-            favorite = "★ " if record.favorite else ""
-            tags = f" tags={', '.join(record.tags)}" if record.tags else ""
-            lines.append(f"{favorite}{record.name} [{record.asset_type}] modified={record.modified_at}{tags}")
-            lines.append(f"  {path}")
-            if record.description:
-                lines.append(f"  {record.description}")
         self.asset_library_summary.setPlainText("\n".join(lines))
 
     def _export_library_entry(self, checked: bool = False) -> None:
@@ -10820,6 +11067,11 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._timeline_refresh_palette_cards()
+        self._timeline_update_duration()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
         self._scrub_articulation_playhead(self.articulation_playhead_ms)
         self._schedule_live_preview("selected_timeline_fragment")
         self._schedule_live_preview("selected_transition")
@@ -11187,6 +11439,11 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._timeline_refresh_palette_cards()
+        self._timeline_update_duration()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
         self._update_articulation_word_status()
         self._schedule_live_preview("selected_cv_vc_combination")
 
@@ -11298,6 +11555,11 @@ class WaveToyWindow(QMainWindow):
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._timeline_refresh_palette_cards()
+        self._timeline_update_duration()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
         self._schedule_live_preview("selected_cv_vc_combination")
 
     def _add_cv_vc_combination_to_speech_assets(self, checked: bool = False) -> None:
@@ -11845,6 +12107,7 @@ class WaveToyWindow(QMainWindow):
         self._set_articulation_motion_elapsed(timeline_elapsed_ms)
 
     def _mark_articulation_word_dirty(self) -> None:
+        self._mark_project_dirty("articulation chain changed")
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
         self.articulation_word_render_signature = None
         self.articulation_last_word_render_path = None
@@ -13422,6 +13685,11 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_signature = None
         self._refresh_articulation_chain_cards()
         self._refresh_articulation_motion_timeline()
+        self._timeline_refresh_palette_cards()
+        self._timeline_update_duration()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
 
     def _select_vowel_preset(self, preset_name: str, play: bool = False) -> None:
         data = VOWEL_PRESETS[preset_name]
@@ -14277,19 +14545,35 @@ class WaveToyWindow(QMainWindow):
         self.asset_library_sort_combo.currentIndexChanged.connect(lambda _index: self._refresh_asset_library_view())
         self.asset_library_summary = QTextEdit()
         self.asset_library_summary.setReadOnly(True)
+        self.asset_library_summary.setMaximumHeight(76)
         self.asset_library_summary.setObjectName("speechDiagnosticsText")
+        self.asset_library_table = QTableWidget(0, 6)
+        self.asset_library_table.setHorizontalHeaderLabels(["★", "Name", "Type", "Modified", "Tags", "Source"])
+        self.asset_library_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.asset_library_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.asset_library_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.asset_library_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.asset_library_table.horizontalHeader().setStretchLastSection(True)
+        self.asset_library_table.cellDoubleClicked.connect(lambda _row, _column: self._load_selected_library_entry())
         button_row = QHBoxLayout()
-        for label, callback in (("Refresh", self._refresh_asset_library_view), ("Import Entry", self._import_library_entry), ("Export Entry", self._export_library_entry), ("Save Profiles", self._save_profile_assets)):
+        for label, callback in (("Load", self._load_selected_library_entry), ("Rename", self._rename_selected_library_entry), ("Duplicate", self._duplicate_selected_library_entry), ("Delete", self._delete_selected_library_entry), ("Favorite", self._toggle_selected_library_favorite), ("Tags/Notes", self._edit_selected_library_tags_notes)):
             button = QPushButton(label)
             button.clicked.connect(callback)
             button_row.addWidget(button)
+        secondary_button_row = QHBoxLayout()
+        for label, callback in (("Refresh", self._refresh_asset_library_view), ("Import Entry", self._import_library_entry), ("Export Entry", self._export_library_entry), ("Save Profiles", self._save_profile_assets)):
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            secondary_button_row.addWidget(button)
         intro_layout.addWidget(title)
         intro_layout.addWidget(body)
         intro_layout.addWidget(self.asset_library_search)
         intro_layout.addWidget(self.asset_library_category_combo)
         intro_layout.addWidget(self.asset_library_sort_combo)
         intro_layout.addLayout(button_row)
-        intro_layout.addWidget(self.asset_library_summary, 1)
+        intro_layout.addLayout(secondary_button_row)
+        intro_layout.addWidget(self.asset_library_summary)
+        intro_layout.addWidget(self.asset_library_table, 1)
         layout.addWidget(intro, 2)
         layout.addWidget(self._build_speech_assets_panel("library"), 2)
         self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "Speech Asset Library")
@@ -14647,6 +14931,94 @@ class WaveToyWindow(QMainWindow):
         if word_item is not None:
             self._timeline_add_speech_item_to_playhead(word_item.id)
 
+
+    def _audio_palette_item_from_source(self, path: Path, name: str | None = None) -> AudioPaletteItem:
+        audio, sample_rate = load_audio_file(path)
+        item_id = self.timeline_next_palette_item_id
+        self.timeline_next_palette_item_id += 1
+        colors = ["#5cdb95", "#ffd166", "#b8f2e6", "#d7b9ff", "#ffadad", "#caffbf", "#ffc6ff"]
+        return AudioPaletteItem(
+            id=item_id,
+            name=(name or path.stem),
+            source_path=str(path),
+            audio_data=audio,
+            sample_rate=sample_rate,
+            duration_seconds=len(audio) / float(sample_rate),
+            waveform_peaks=compute_waveform_peaks(audio),
+            color=colors[(item_id - 1) % len(colors)],
+        )
+
+    def _rehydrate_audio_palette(self, entries: object) -> List[AudioPaletteItem]:
+        items: List[AudioPaletteItem] = []
+        if not isinstance(entries, list):
+            return items
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            source_path = str(entry.get("source_path") or "")
+            if not source_path or not Path(source_path).exists():
+                print(f"[WaveToy Project] Missing audio palette source: {source_path or '(none)'}")
+                continue
+            try:
+                item = self._audio_palette_item_from_source(Path(source_path), str(entry.get("name") or Path(source_path).stem))
+                item.id = int(entry.get("id", item.id) or item.id)
+                item.color = str(entry.get("color", item.color) or item.color)
+                items.append(item)
+            except Exception as exc:
+                print(f"[WaveToy Project] Could not rehydrate audio palette source {source_path}: {exc}")
+        return items
+
+    def _rehydrate_timeline_clips(self, entries: object) -> List[TimelineClip]:
+        clips: List[TimelineClip] = []
+        if not isinstance(entries, list):
+            return clips
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            source_path = str(entry.get("source_path") or "")
+            audio = np.zeros((1, 2), dtype=np.float32)
+            warning = str(entry.get("muted_warning") or "") or None
+            sample_rate = int(entry.get("sample_rate", SAMPLE_RATE) or SAMPLE_RATE)
+            full_length = int(entry.get("source_audio_full_length_samples", 1) or 1)
+            if source_path and Path(source_path).exists():
+                try:
+                    audio, sample_rate = load_audio_file(Path(source_path))
+                    full_length = len(audio)
+                    warning = None
+                except Exception as exc:
+                    warning = f"Could not reload source audio: {exc}"
+            elif source_path:
+                warning = f"Missing source audio: {source_path}"
+            try:
+                clips.append(TimelineClip(
+                    clip_id=int(entry.get("id", len(clips) + 1) or len(clips) + 1),
+                    name=str(entry.get("name", "Restored Clip")),
+                    audio=audio,
+                    start_time_seconds=float(entry.get("start_time_seconds", 0.0) or 0.0),
+                    lane=int(entry.get("lane", 0) or 0),
+                    sample_rate=sample_rate,
+                    recipe=entry.get("recipe") if isinstance(entry.get("recipe"), dict) else None,
+                    source_path=source_path or None,
+                    import_metadata=entry.get("import_metadata") if isinstance(entry.get("import_metadata"), dict) else None,
+                    source_type=str(entry.get("source_type", "restored_clip")),
+                    speech_metadata=entry.get("speech_metadata") if isinstance(entry.get("speech_metadata"), dict) else None,
+                    muted_warning=warning,
+                    source_audio_full_length_samples=full_length,
+                    trim_start_seconds=float(entry.get("trim_start_seconds", entry.get("trim_start", 0.0)) or 0.0),
+                    trim_end_seconds=float(entry.get("trim_end_seconds", entry.get("trim_end", 0.0)) or 0.0),
+                    playback_rate=float(entry.get("playback_rate", 1.0) or 1.0),
+                    gain=float(entry.get("gain", 1.0) or 1.0),
+                    fade_in_seconds=float(entry.get("fade_in_seconds", entry.get("fade_in", 0.0)) or 0.0),
+                    fade_out_seconds=float(entry.get("fade_out_seconds", entry.get("fade_out", 0.0)) or 0.0),
+                    stretch_mode=str(entry.get("stretch_mode", "preserve_pitch")),
+                    stretch_algorithm=str(entry.get("stretch_algorithm", "numpy_phase_vocoder")),
+                    expression_metadata=entry.get("expression_metadata") if isinstance(entry.get("expression_metadata"), dict) else {},
+                    svg_visual_metadata=entry.get("svg_visual_metadata") if isinstance(entry.get("svg_visual_metadata"), dict) else {},
+                ))
+            except Exception as exc:
+                print(f"[WaveToy Project] Could not restore timeline clip {entry.get('name')}: {exc}")
+        return clips
+
     def _timeline_refresh_palette_cards(self) -> None:
         if self.timeline_palette_list_widget is None:
             return
@@ -14958,18 +15330,7 @@ class WaveToyWindow(QMainWindow):
                 audio, sample_rate = load_audio_file(path)
                 if audio.size == 0 or len(audio) < 2:
                     raise ValueError("Imported audio is empty")
-                item_id = self.timeline_next_palette_item_id
-                self.timeline_next_palette_item_id += 1
-                item = AudioPaletteItem(
-                    id=item_id,
-                    name=path.stem,
-                    source_path=str(path),
-                    audio_data=audio,
-                    sample_rate=sample_rate,
-                    duration_seconds=len(audio) / float(sample_rate),
-                    waveform_peaks=compute_waveform_peaks(audio),
-                    color=colors[(item_id - 1) % len(colors)],
-                )
+                item = self._audio_palette_item_from_source(path, path.stem)
                 self.timeline_audio_palette.append(item)
                 self._save_library_asset("imported_wav", item.name, item.metadata(), description="Imported timeline audio file", source_path=str(path))
                 imported += 1
@@ -15313,6 +15674,7 @@ class WaveToyWindow(QMainWindow):
 
     def _timeline_mark_mix_dirty(self) -> None:
         self.timeline_mix_dirty = True
+        self._mark_project_dirty("timeline changed")
 
     def _timeline_zoom(self, factor: float) -> None:
         if self.timeline_canvas is not None:
@@ -15641,6 +16003,12 @@ class WaveToyWindow(QMainWindow):
         except Exception as exc:
             self._timeline_debug(f"Export failed: {exc}")
             QMessageBox.warning(self, "Could not export timeline", str(exc))
+
+    def closeEvent(self, event) -> None:
+        if not self._confirm_discard_dirty_project("exiting"):
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _build_play_tab(self) -> None:
         if self.tabs is None:
