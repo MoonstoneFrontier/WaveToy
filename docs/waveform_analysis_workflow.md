@@ -1,34 +1,17 @@
 # Waveform Analysis Workflow
 
-This workflow uses WaveToy's Articulation Lab to compare stable Clip Crossfade rendering against opt-in Continuous Mouth Motion.
+WaveToy's waveform diagnostics view remains focused on render inspection while gaining a lightweight performance overlay hook.
 
-## Setup
+## Performance overlay API
 
-1. Open `wave_toy.py`.
-2. Go to Articulation Lab / Articulation Timeline.
-3. Confirm Word Render Mode starts on **Clip Crossfade**.
-4. Confirm **Musical Timing** and **Singing Preview** are off unless intentionally testing those foundations.
-5. Build or load one validation chain.
+The diagnostics canvas can receive:
 
-## Compare render modes
+- `performance_points`: JSON-safe marker dictionaries for the selected performance track;
+- `active_track`: the selected lane name;
+- `playhead_ms`: the current performance playhead.
 
-For each validation chain:
+This allows selected automation points to appear over the waveform without rewriting the waveform editor.
 
-1. Render/play in Clip Crossfade.
-2. Switch Word Render Mode to Continuous Mouth Motion.
-3. Render/play again.
-4. Open Continuous diagnostics and inspect the waveform editor overlays.
-5. Toggle overlays off to confirm the visual layer is optional and does not affect playback.
+## Current scope
 
-## What to inspect
-
-- **Silence:** waveform should have visible energy and audible output.
-- **Distortion:** red high-peak regions should be rare; harsh formant artifacts should be checked with Bypass formants.
-- **Pitch:** intended and estimated tracks should stay close during voiced vowels, glides, nasals, and liquids.
-- **Stops:** P/B/T/D/K/G bursts should remain sharp, visible, and audible.
-- **Diphthongs:** AY/AW/OY/OW/EY should show one timeline item with internal start/end vowel glide labeling.
-- **Resonance:** base and resonance-biased formants should remain in safe ranges; Bypass formants should remove shaping.
-
-## Repository hygiene
-
-Do not stage generated WAV files, cache files, or manual audio exports. Commit only source and documentation changes.
+The overlay is intentionally simple: it shows selected-track markers and the playhead. It does not yet provide waveform-side automation editing, Bezier handles, or DAW-style region tools. Those belong in a future Task 077-style waveform integration pass.

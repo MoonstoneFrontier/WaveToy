@@ -1,37 +1,23 @@
-# WaveToy Project System
+# Project System
 
-WaveToy projects are human-readable `.wavetoy-project.json` files stored by default under `WaveToyData/Projects`. Project JSON stores workstation state and references source audio paths, but it does not embed raw audio arrays.
+WaveToy project snapshots are JSON documents designed for editable synthesis state, not raw audio storage.
 
-## Saved project state
+## Performance persistence
 
-Projects capture:
+Canonical performance data lives under `performance.timeline_tracks`. New saves should not duplicate the same data in a top-level `automation_tracks` key.
 
-- Current synthesizer recipe/settings.
-- Active Articulation Chain, selected chain item, render settings, syllable markers, and phrase markers.
-- Saved phoneme snapshots.
-- Voice Source, Voice Box, Resonance Tract, and Character Voice Profile state.
-- Musical timing settings, note events, pitch curves, and stress markers.
-- Timeline lanes, snap settings, Audio Assets metadata, Speech Assets metadata, clips, and timeline palette metadata.
-- Window metadata including the selected tab.
+Legacy Task 075 projects remain supported:
 
-## Restore behavior
+1. load `performance.timeline_tracks` when present;
+2. otherwise migrate `performance.automation_tracks`;
+3. otherwise read legacy top-level `automation_tracks` as a load-only fallback.
 
-Opening a project restores chain/profile/timing/timeline metadata and switches back to the saved tab when that tab index is available. Imported audio palette items and imported/generated timeline clips are rehydrated from `source_path` when the file still exists. Missing audio sources are represented visibly as muted timeline clips rather than crashing or silently disappearing.
+This keeps older projects openable while making `performance` the single authoritative save location.
 
-## Dirty state and prompts
+## Audio storage rule
 
-Changes to articulation chains, profiles, timing-related state, library assets, and timeline edits mark the project dirty. The window title and project label show an unsaved marker. New Project, Open Project, and Exit prompt the user to save, discard, or cancel when unsaved changes exist. Recovery auto-save does not clear dirty state.
+Generated waveform/audio arrays are not stored in project JSON. Projects may store paths, settings, source metadata, and timeline point data, but rendered arrays remain cache/runtime data.
 
-## Recovery workflow
+## Asset library compatibility
 
-WaveToy writes a recovery JSON file under `WaveToyData/Recovery/autosave_recovery.wavetoy-project.json`. On startup, if that file exists, WaveToy prompts with:
-
-- Restore Recovery
-- Ignore This Time
-- Delete Recovery
-
-The prompt displays the recovery timestamp and source project path. Restored recovery data is loaded without silently overwriting the current project path, and the user is offered a normal project save location.
-
-## Task 075 performance automation persistence
-
-Project snapshots now include a `performance` object plus a top-level `automation_tracks` compatibility list. These structures are JSON-safe and do not embed raw audio arrays. Autosave recovery writes the same snapshot shape, so recovery includes performance automation tracks alongside articulation chains, timing, profiles, and timeline metadata.
+Performance assets are saved using the canonical performance schema. Legacy automation-curve assets can still be loaded and are appended as unified timeline parameter tracks.

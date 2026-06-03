@@ -1,29 +1,46 @@
 # Performance Tracks
 
-Performance tracks are reusable performance snapshots for speech rendering. A performance contains automation tracks that describe expressive changes over time without changing saved phoneme presets or articulation chain items.
+Performance tracks are the canonical container for non-destructive time-based expression in WaveToy.
 
-## Performance asset schema
+## Canonical schema
 
-A performance asset stores:
+`PerformanceAsset` version 2 stores `timeline_tracks`, not a separate top-level automation list. Each `TimelineParameterTrack` has:
 
-- `performance_id`
+- `track_id`
 - `name`
-- `automation_tracks`
-- `created_at`
-- `modified_at`
-- `version`
+- `track_kind`
+- `target_parameter`
+- `points`
+- `muted`
+- `visible`
+- `color`
+- `lane_order`
 
-When imported from the Speech Asset Library, the performance receives a fresh UUID so the imported copy is distinct from the library source.
+Each `TimelineParameterPoint` has:
 
-## Current render behavior
+- `time_ms`
+- `value`
+- `curve`
+- `label`
+- `metadata`
 
-The current render hook applies only `accentuation_db` tracks. The generated audio receives a render-time gain envelope after the selected word render mode returns audio. This keeps the editable chain and presets unchanged.
+## Track kinds
 
-## Future hooks
+- `automation`: render or parameter automation such as `accentuation_db` and `pitch_bias_cents`.
+- `pitch`: bridge/view lane for pitch curve data.
+- `stress`: bridge/view lane for syllable stress markers.
+- `musical_grid`: reserved for future beat/measure timelines.
+- `marker`: reserved for future expression markers.
 
-Other persisted targets are reserved for future render passes:
+## Safe value ranges
 
-- articulation: mouth and nasal parameters
-- voice box: breathiness, rasp, glottal closure, vocal fold tension
-- resonance: resonance depth, brightness, darkness, nasal coupling
-- expression: timing and pitch bias
+- `accentuation_db`: `-24.0` to `24.0`
+- `pitch_bias_cents`: `-1200.0` to `1200.0`
+- `timing_bias`: `-1.0` to `1.0`
+- articulation lanes: normalized `0.0` to `1.0`
+- voice-box lanes: normalized `0.0` to `1.0`
+- resonance lanes: normalized `0.0` to `1.0`
+
+## Visual editing
+
+The Performance Timeline canvas supports selecting, dragging, double-click creation, delete-key removal, a millisecond ruler, a playhead, and optional musical-grid snap. The inspector tables remain available for precise fallback edits.
