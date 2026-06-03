@@ -30,6 +30,7 @@ Optional for MP3/OGG/FLAC export:
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import math
 import re
@@ -94,6 +95,176 @@ from PySide6.QtWidgets import (
 )
 
 SAMPLE_RATE = 44_100
+
+
+def _utc_now_iso() -> str:
+    """Return a stable UTC timestamp for project and asset metadata."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _safe_storage_name(name: str, fallback: str = "asset") -> str:
+    """Create a readable filename stem without hiding the user's asset name in metadata."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name or "").strip()).strip("._-")
+    return cleaned[:80] or fallback
+
+
+def wavetoy_data_root() -> Path:
+    """Return the cross-platform WaveToyData root, with a local override for tests/portable runs."""
+    override = os.environ.get("WAVETOY_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / "WaveToyData"
+
+
+WAVETOY_ASSET_CATEGORIES: Dict[str, str] = {
+    "phoneme": "Phonemes",
+    "cv_combination": "CVCombinations",
+    "vc_combination": "VCCombinations",
+    "word": "Words",
+    "phrase": "Phrases",
+    "voice_source": "VoiceSources",
+    "voice_box": "VoiceBoxes",
+    "resonance_profile": "Resonance",
+    "character_profile": "Characters",
+    "note_pattern": "NotePatterns",
+    "pitch_curve": "PitchCurves",
+    "waveform_analysis": "WaveformAnalyses",
+    "articulation_chain": "Chains",
+    "imported_wav": "ImportedWav",
+    "generated_wav": "GeneratedWav",
+    "animation_export": "AnimationExports",
+}
+
+
+@dataclass
+class AssetLibraryRecord:
+    """Human-readable asset envelope shared by global library and projects."""
+
+    asset_type: str
+    name: str
+    payload: Dict[str, object]
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    description: str = ""
+    tags: List[str] = field(default_factory=list)
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+    version: int = 1
+    favorite: bool = False
+    notes: str = ""
+    source_path: str | None = None
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "uuid": self.uuid,
+            "asset_type": self.asset_type,
+            "name": self.name,
+            "description": self.description,
+            "tags": list(self.tags),
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+            "version": self.version,
+            "favorite": self.favorite,
+            "notes": self.notes,
+            "source_path": self.source_path,
+            "payload": self.payload,
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "AssetLibraryRecord":
+        return cls(
+            uuid=str(data.get("uuid") or uuid.uuid4()),
+            asset_type=str(data.get("asset_type", "asset")),
+            name=str(data.get("name", "Untitled Asset")),
+            description=str(data.get("description", "")),
+            tags=[str(tag) for tag in data.get("tags", [])] if isinstance(data.get("tags", []), list) else [],
+            created_at=str(data.get("created_at") or _utc_now_iso()),
+            modified_at=str(data.get("modified_at") or _utc_now_iso()),
+            version=int(data.get("version", 1) or 1),
+            favorite=bool(data.get("favorite", False)),
+            notes=str(data.get("notes", "")),
+            source_path=str(data.get("source_path")) if data.get("source_path") else None,
+            payload=dict(data.get("payload", {})) if isinstance(data.get("payload", {}), dict) else {},
+        )
+
+
+class WaveToyStorage:
+    """Small JSON storage foundation for persistent projects, assets, and recovery."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root or wavetoy_data_root()
+        self.projects_dir = self.root / "Projects"
+        self.assets_dir = self.root / "Assets"
+        self.exports_dir = self.root / "Exports"
+        self.cache_dir = self.root / "Cache"
+        self.recovery_dir = self.root / "Recovery"
+        self.metadata_path = self.root / "wavetoy_storage.json"
+        self.ensure_layout()
+
+    def ensure_layout(self) -> None:
+        for path in [self.projects_dir, self.assets_dir, self.exports_dir, self.cache_dir, self.recovery_dir]:
+            path.mkdir(parents=True, exist_ok=True)
+        for folder in WAVETOY_ASSET_CATEGORIES.values():
+            (self.assets_dir / folder).mkdir(parents=True, exist_ok=True)
+        if not self.metadata_path.exists():
+            self.write_json(self.metadata_path, {"version": 1, "recent_projects": [], "restore_previous_session": True})
+
+    def asset_dir(self, asset_type: str) -> Path:
+        return self.assets_dir / WAVETOY_ASSET_CATEGORIES.get(asset_type, _safe_storage_name(asset_type, "Assets"))
+
+    def read_json(self, path: Path) -> Dict[str, object]:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def write_json(self, path: Path, data: Dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+
+    def save_asset(self, record: AssetLibraryRecord) -> Path:
+        record.modified_at = _utc_now_iso()
+        path = self.asset_dir(record.asset_type) / f"{_safe_storage_name(record.name)}_{record.uuid[:8]}.json"
+        self.write_json(path, record.to_json_dict())
+        return path
+
+    def iter_assets(self) -> List[Tuple[Path, AssetLibraryRecord]]:
+        records: List[Tuple[Path, AssetLibraryRecord]] = []
+        for path in sorted(self.assets_dir.glob("*/*.json")):
+            try:
+                records.append((path, AssetLibraryRecord.from_json_dict(self.read_json(path))))
+            except Exception as exc:
+                print(f"[WaveToy Storage] Could not load asset {path}: {exc}")
+        return records
+
+    def metadata(self) -> Dict[str, object]:
+        try:
+            return self.read_json(self.metadata_path)
+        except Exception:
+            return {"version": 1, "recent_projects": [], "restore_previous_session": True}
+
+    def update_metadata(self, **updates: object) -> None:
+        metadata = self.metadata()
+        metadata.update(updates)
+        metadata["modified_at"] = _utc_now_iso()
+        self.write_json(self.metadata_path, metadata)
+
+    def add_recent_project(self, path: Path) -> None:
+        metadata = self.metadata()
+        recent = [entry for entry in metadata.get("recent_projects", []) if str(entry) != str(path)]
+        recent.insert(0, str(path))
+        self.update_metadata(recent_projects=recent[:10], last_project_path=str(path))
+
+    def default_project_path(self, name: str) -> Path:
+        return self.projects_dir / f"{_safe_storage_name(name, 'WaveToy_Project')}.wavetoy-project.json"
+
+    @property
+    def recovery_path(self) -> Path:
+        return self.recovery_dir / "autosave_recovery.wavetoy-project.json"
 
 
 class FlowLayout(QLayout):
@@ -1294,6 +1465,10 @@ class CharacterVoiceProfile:
     def to_json_dict(self) -> Dict[str, object]:
         return asdict(self)
 
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "CharacterVoiceProfile":
+        return cls(**{field_name: data[field_name] for field_name in cls.__dataclass_fields__ if field_name in data})
+
 
 @dataclass
 class MusicalTimingSettings:
@@ -1446,6 +1621,15 @@ class PitchAutomationPoint:
     def to_json_dict(self) -> Dict[str, object]:
         return {"time_ms": float(self.time_ms), "pitch_hz": float(self.pitch_hz), "curve": str(self.curve), "source": str(self.source)}
 
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "PitchAutomationPoint":
+        return cls(
+            time_ms=float(data.get("time_ms", 0.0)),
+            pitch_hz=float(data.get("pitch_hz", 220.0)),
+            curve=str(data.get("curve", "linear")),
+            source=str(data.get("source", "manual")),
+        )
+
 
 @dataclass
 class SyllableStressMarker:
@@ -1469,6 +1653,10 @@ class SyllableStressMarker:
         data["timing_bias"] = float(np.clip(self.timing_bias, -1.0, 1.0))
         data["pitch_bias_cents"] = float(np.clip(self.pitch_bias_cents, -1200.0, 1200.0))
         return data
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, object]) -> "SyllableStressMarker":
+        return cls(**{field_name: data[field_name] for field_name in cls.__dataclass_fields__ if field_name in data})
 
 
 @dataclass
@@ -7085,6 +7273,21 @@ class WaveToyWindow(QMainWindow):
         self._generate_timer.setSingleShot(True)
         self._generate_timer.timeout.connect(self._run_scheduled_generate)
 
+        self.storage = WaveToyStorage()
+        self.current_project_path: Path | None = None
+        self.current_project_name = "Untitled WaveToy Project"
+        self.project_dirty = False
+        self.recent_project_actions: List[QAction] = []
+        self.project_path_label: QLabel | None = None
+        self.asset_library_summary: QTextEdit | None = None
+        self.asset_library_search: QLineEdit | None = None
+        self.asset_library_category_combo: QComboBox | None = None
+        self.asset_library_sort_combo: QComboBox | None = None
+        self.auto_save_interval_ms = 5 * 60 * 1000
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self._auto_save_project_recovery)
+        self.auto_save_timer.start(self.auto_save_interval_ms)
+
         self.user_presets_path = Path.home() / ".wave_toy_sound_experiments.json"
         self.user_preset_buttons: List[QPushButton] = []
         self.user_preset_layout: QVBoxLayout | None = None
@@ -7350,6 +7553,8 @@ class WaveToyWindow(QMainWindow):
         self._apply_style()
         self._sync_loop_buttons()
         self._sync_note_to_pitch()
+        self._refresh_asset_library_view()
+        self._restore_startup_project_if_enabled()
         self._generate_now(reason="startup", update_message=True, force=True)
 
     def _build_speech_diagnostics_dock(self) -> None:
@@ -7445,7 +7650,329 @@ class WaveToyWindow(QMainWindow):
         self._sync_resonance_controls()
         self._update_speech_diagnostics_panel(self.current_phoneme)
 
+    def _project_status_text(self) -> str:
+        if self.current_project_path is None:
+            return "Project: Unsaved — no project file yet"
+        return f"Project: {self.current_project_path}"
+
+    def _update_project_path_label(self) -> None:
+        if self.project_path_label is not None:
+            self.project_path_label.setText(self._project_status_text())
+        self.setWindowTitle(f"WaveToy - Visual Sound and Articulation Lab — {self.current_project_name}")
+
+    def _project_snapshot(self) -> Dict[str, object]:
+        """Collect persistent, JSON-safe workstation state without embedding audio arrays."""
+        return {
+            "format": "wavetoy_project",
+            "version": 1,
+            "name": self.current_project_name,
+            "uuid": str(uuid.uuid4()) if self.current_project_path is None else self._project_uuid_for_path(self.current_project_path),
+            "saved_at": _utc_now_iso(),
+            "storage_root": str(self.storage.root),
+            "settings": self._settings_to_recipe(self.current_project_name),
+            "articulation_chain": ArticulationChain(
+                items=self.articulation_chain_items,
+                last_word_render_path=str(self.articulation_last_word_render_path) if self.articulation_last_word_render_path else None,
+                last_word_render_created_at=self.articulation_last_word_render_created_at,
+                word_render_settings=dict(self.articulation_word_render_settings),
+                syllable_markers=list(self.articulation_syllable_markers),
+                phrase_markers=list(self.articulation_phrase_markers),
+            ).to_json_dict(),
+            "phoneme_assets": [phoneme.to_json_dict() for phoneme in self.saved_phonemes],
+            "profiles": {
+                "voice_source_profile": self.voice_source_profile.to_json_dict(),
+                "voice_box_state": self.voice_box_state.to_json_dict(),
+                "resonance_tract_state": self.resonance_tract_state.to_json_dict(),
+                "character_voice_profile": self.character_voice_profile.to_json_dict(),
+            },
+            "timing": {
+                "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
+                "note_events": self._note_events_json(),
+                "pitch_curve": self._pitch_curve_json(),
+                "stress_markers": self._syllable_stress_json(),
+            },
+            "timeline": {
+                "lane_names": list(self.timeline_lane_names),
+                "snap_enabled": self.timeline_snap_enabled,
+                "snap_seconds": self.timeline_snap_seconds,
+                "audio_palette": [item.metadata() for item in self.timeline_audio_palette],
+                "speech_bin": [item.metadata() for item in self.timeline_speech_bin],
+                "clips": [clip.metadata() for clip in self.timeline_clips],
+                "last_mix_path": str(self.timeline_last_mix_path) if self.timeline_last_mix_path else None,
+            },
+            "exports": {
+                "last_word_render_path": str(self.articulation_last_word_render_path) if self.articulation_last_word_render_path else None,
+                "last_timeline_mix_path": str(self.timeline_last_mix_path) if self.timeline_last_mix_path else None,
+            },
+            "window": {
+                "size": [self.width(), self.height()],
+                "active_tab": self.tabs.currentIndex() if self.tabs is not None else 0,
+            },
+        }
+
+    def _project_uuid_for_path(self, path: Path) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, str(path.resolve())))
+
+    def _apply_project_snapshot(self, data: Dict[str, object]) -> None:
+        self.current_project_name = str(data.get("name") or Path(str(self.current_project_path or "Untitled")).stem)
+        chain = data.get("articulation_chain", {})
+        if isinstance(chain, dict):
+            self.articulation_chain_items = [ArticulationChainItem.from_json_dict(item) for item in chain.get("items", []) if isinstance(item, dict)]
+            self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+            self.articulation_syllable_markers = list(chain.get("syllable_markers", [])) if isinstance(chain.get("syllable_markers", []), list) else []
+            self.articulation_phrase_markers = list(chain.get("phrase_markers", [])) if isinstance(chain.get("phrase_markers", []), list) else []
+            if isinstance(chain.get("word_render_settings"), dict):
+                self.articulation_word_render_settings.update(chain["word_render_settings"])
+        profiles = data.get("profiles", {})
+        if isinstance(profiles, dict):
+            if isinstance(profiles.get("voice_source_profile"), dict):
+                self.voice_source_profile = VoiceSourceProfile.from_json_dict(profiles["voice_source_profile"])
+            if isinstance(profiles.get("voice_box_state"), dict):
+                self.voice_box_state = VoiceBoxState.from_json_dict(profiles["voice_box_state"])
+            if isinstance(profiles.get("resonance_tract_state"), dict):
+                self.resonance_tract_state = ResonanceTractState.from_json_dict(profiles["resonance_tract_state"])
+            if isinstance(profiles.get("character_voice_profile"), dict):
+                self.character_voice_profile = CharacterVoiceProfile.from_json_dict(profiles["character_voice_profile"])
+        timing = data.get("timing", {})
+        if isinstance(timing, dict):
+            if isinstance(timing.get("musical_timing_settings"), dict):
+                self.musical_timing_settings = MusicalTimingSettings.from_json_dict(timing["musical_timing_settings"])
+            self.note_events = [NoteEvent.from_json_dict(item) for item in timing.get("note_events", []) if isinstance(item, dict)] if isinstance(timing.get("note_events", []), list) else []
+            self.pitch_automation_points = [PitchAutomationPoint.from_json_dict(item) for item in timing.get("pitch_curve", []) if isinstance(item, dict)] if isinstance(timing.get("pitch_curve", []), list) else []
+            self.syllable_stress_markers = [SyllableStressMarker.from_json_dict(item) for item in timing.get("stress_markers", []) if isinstance(item, dict)] if isinstance(timing.get("stress_markers", []), list) else []
+        window = data.get("window", {})
+        if isinstance(window, dict) and self.tabs is not None:
+            index = int(window.get("active_tab", self.tabs.currentIndex()) or 0)
+            if 0 <= index < self.tabs.count():
+                self.tabs.setCurrentIndex(index)
+        self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_word_render_signature = None
+        self._refresh_articulation_chain_cards()
+        self._refresh_articulation_motion_timeline()
+        self._sync_voice_box_controls()
+        self._sync_resonance_controls()
+        self._update_project_path_label()
+
+    def _new_project(self, checked: bool = False) -> None:
+        del checked
+        name, ok = QInputDialog.getText(self, "New Project", "Project name:", text="Untitled WaveToy Project")
+        if not ok:
+            return
+        self.current_project_name = name.strip() or "Untitled WaveToy Project"
+        self.current_project_path = self.storage.default_project_path(self.current_project_name)
+        self.articulation_chain_items = []
+        self.timeline_clips = []
+        self.timeline_audio_palette = []
+        self.timeline_speech_bin = []
+        self.project_dirty = True
+        self._save_project_to_path(self.current_project_path)
+        self._refresh_articulation_chain_cards()
+        self._timeline_refresh_palette_cards()
+        self._timeline_refresh_speech_bin_cards()
+        self._update_project_path_label()
+
+    def _open_project(self, checked: bool = False, path: str | None = None) -> None:
+        del checked
+        filename = path
+        if not filename:
+            filename, _ = QFileDialog.getOpenFileName(self, "Open WaveToy Project", str(self.storage.projects_dir), "WaveToy Project (*.wavetoy-project.json *.json);;All Files (*)")
+        if not filename:
+            return
+        project_path = Path(filename)
+        try:
+            data = self.storage.read_json(project_path)
+            self.current_project_path = project_path
+            self._apply_project_snapshot(data)
+            self.storage.add_recent_project(project_path)
+            self._refresh_recent_project_menu()
+            self.storage.update_metadata(last_project_path=str(project_path))
+            QMessageBox.information(self, "Project Opened", f"Opened project:\n{project_path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not open project", str(exc))
+
+    def _save_project(self, checked: bool = False) -> None:
+        del checked
+        if self.current_project_path is None:
+            self._save_project_as()
+            return
+        self._save_project_to_path(self.current_project_path, show_message=True)
+
+    def _save_project_as(self, checked: bool = False) -> None:
+        del checked
+        filename, _ = QFileDialog.getSaveFileName(self, "Save WaveToy Project As", str(self.storage.default_project_path(self.current_project_name)), "WaveToy Project (*.wavetoy-project.json);;JSON (*.json)")
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.name.endswith(".wavetoy-project.json"):
+            path = path.with_suffix(".wavetoy-project.json")
+        self.current_project_path = path
+        self._save_project_to_path(path, show_message=True)
+
+    def _save_project_to_path(self, path: Path, *, show_message: bool = False) -> None:
+        data = self._project_snapshot()
+        data["name"] = self.current_project_name
+        self.storage.write_json(path, data)
+        self.current_project_path = path
+        self.project_dirty = False
+        self.storage.add_recent_project(path)
+        self._refresh_recent_project_menu()
+        self.storage.update_metadata(last_project_path=str(path), last_session=data)
+        self._update_project_path_label()
+        if show_message:
+            QMessageBox.information(self, "Project Saved", f"Saved project:\n{path}")
+
+    def _auto_save_project_recovery(self) -> None:
+        try:
+            data = self._project_snapshot()
+            data["autosave"] = {"created_at": _utc_now_iso(), "source_project_path": str(self.current_project_path) if self.current_project_path else None}
+            self.storage.write_json(self.storage.recovery_path, data)
+            if self.current_project_path is not None:
+                metadata = self.storage.metadata()
+                recent = metadata.get("recent_projects", [])
+                self.storage.update_metadata(last_project_path=str(self.current_project_path), recent_projects=recent)
+        except Exception as exc:
+            print(f"[WaveToy Storage] Auto-save failed: {exc}")
+
+    def _restore_startup_project_if_enabled(self) -> None:
+        metadata = self.storage.metadata()
+        recovery_path = self.storage.recovery_path
+        if recovery_path.exists():
+            print(f"[WaveToy Storage] Recovery file available: {recovery_path}")
+        if not bool(metadata.get("restore_previous_session", True)):
+            return
+        last_path = metadata.get("last_project_path")
+        if last_path and Path(str(last_path)).exists():
+            try:
+                self.current_project_path = Path(str(last_path))
+                self._apply_project_snapshot(self.storage.read_json(self.current_project_path))
+            except Exception as exc:
+                print(f"[WaveToy Storage] Startup restore failed: {exc}")
+
+    def _refresh_recent_project_menu(self) -> None:
+        if not hasattr(self, "recent_projects_menu"):
+            return
+        self.recent_projects_menu.clear()
+        recent = [Path(str(path)) for path in self.storage.metadata().get("recent_projects", []) if Path(str(path)).exists()]
+        if not recent:
+            disabled = QAction("No recent projects", self)
+            disabled.setEnabled(False)
+            self.recent_projects_menu.addAction(disabled)
+            return
+        for project_path in recent[:10]:
+            action = QAction(project_path.name, self)
+            action.setToolTip(str(project_path))
+            action.triggered.connect(lambda _checked=False, p=str(project_path): self._open_project(path=p))
+            self.recent_projects_menu.addAction(action)
+
+    def _save_library_asset(self, asset_type: str, name: str, payload: Dict[str, object], *, description: str = "", tags: List[str] | None = None, notes: str = "", source_path: str | None = None) -> Path:
+        record = AssetLibraryRecord(asset_type=asset_type, name=name, payload=payload, description=description, tags=list(tags or []), notes=notes, source_path=source_path)
+        path = self.storage.save_asset(record)
+        self._refresh_asset_library_view()
+        return path
+
+    def _refresh_asset_library_view(self) -> None:
+        if self.asset_library_summary is None:
+            return
+        query = self.asset_library_search.text().strip().lower() if self.asset_library_search is not None else ""
+        category = self.asset_library_category_combo.currentData() if self.asset_library_category_combo is not None else "all"
+        sort_key = self.asset_library_sort_combo.currentData() if self.asset_library_sort_combo is not None else "modified"
+        records = self.storage.iter_assets()
+        filtered: List[Tuple[Path, AssetLibraryRecord]] = []
+        for path, record in records:
+            haystack = " ".join([record.name, record.asset_type, record.description, " ".join(record.tags), record.notes]).lower()
+            if query and query not in haystack:
+                continue
+            if category != "all" and record.asset_type != category:
+                continue
+            filtered.append((path, record))
+        if sort_key == "name":
+            filtered.sort(key=lambda entry: entry[1].name.lower())
+        elif sort_key == "type":
+            filtered.sort(key=lambda entry: (entry[1].asset_type, entry[1].name.lower()))
+        else:
+            filtered.sort(key=lambda entry: entry[1].modified_at, reverse=True)
+        lines = ["Speech Asset Library", f"Storage root: {self.storage.root}", f"Assets shown: {len(filtered)} of {len(records)}", ""]
+        if not filtered:
+            lines.append("No matching library assets yet. Save a phoneme, chain, word, profile, imported wav, generated wav, analysis, or export to populate the persistent library.")
+        for path, record in filtered:
+            favorite = "★ " if record.favorite else ""
+            tags = f" tags={', '.join(record.tags)}" if record.tags else ""
+            lines.append(f"{favorite}{record.name} [{record.asset_type}] modified={record.modified_at}{tags}")
+            lines.append(f"  {path}")
+            if record.description:
+                lines.append(f"  {record.description}")
+        self.asset_library_summary.setPlainText("\n".join(lines))
+
+    def _export_library_entry(self, checked: bool = False) -> None:
+        del checked
+        records = self.storage.iter_assets()
+        if not records:
+            QMessageBox.information(self, "Export Library Entry", "No saved library entries are available yet.")
+            return
+        names = [f"{record.name} [{record.asset_type}]" for _path, record in records]
+        selected, ok = QInputDialog.getItem(self, "Export Library Entry", "Entry:", names, 0, False)
+        if not ok or selected not in names:
+            return
+        source_path, _record = records[names.index(selected)]
+        filename, _ = QFileDialog.getSaveFileName(self, "Export Library Entry", str(Path.home() / source_path.name), "WaveToy Asset (*.json)")
+        if not filename:
+            return
+        shutil.copy2(source_path, filename)
+        QMessageBox.information(self, "Export Library Entry", f"Exported:\n{filename}")
+
+    def _import_library_entry(self, checked: bool = False) -> None:
+        del checked
+        filename, _ = QFileDialog.getOpenFileName(self, "Import Library Entry", str(Path.home()), "WaveToy Asset (*.json);;All Files (*)")
+        if not filename:
+            return
+        try:
+            record = AssetLibraryRecord.from_json_dict(json.loads(Path(filename).read_text(encoding="utf-8")))
+            record.uuid = str(uuid.uuid4())
+            record.created_at = _utc_now_iso()
+            path = self.storage.save_asset(record)
+            self._refresh_asset_library_view()
+            QMessageBox.information(self, "Import Library Entry", f"Imported as:\n{path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not import library entry", str(exc))
+
+    def _save_profile_assets(self, checked: bool = False) -> None:
+        del checked
+        self._save_library_asset("voice_source", getattr(self.voice_source_profile, "name", "Voice Source"), self.voice_source_profile.to_json_dict(), description="Voice Source profile snapshot")
+        self._save_library_asset("voice_box", "Voice Box", self.voice_box_state.to_json_dict(), description="Voice Box profile snapshot")
+        self._save_library_asset("resonance_profile", "Resonance Profile", self.resonance_tract_state.to_json_dict(), description="Resonance tract profile snapshot")
+        self._save_library_asset("character_profile", getattr(self.character_voice_profile, "name", "Character Profile"), self.character_voice_profile.to_json_dict(), description="Character Voice Profile snapshot")
+        QMessageBox.information(self, "Profile Library", "Saved current Voice Source, Voice Box, Resonance, and Character profiles to the Speech Asset Library.")
+
     def _build_actions(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        for label, callback, shortcut in (
+            ("New Project", self._new_project, QKeySequence.New),
+            ("Open Project", self._open_project, QKeySequence.Open),
+            ("Save Project", self._save_project, QKeySequence.Save),
+            ("Save Project As", self._save_project_as, QKeySequence.SaveAs),
+        ):
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            action.setShortcut(shortcut)
+            file_menu.addAction(action)
+        self.recent_projects_menu = file_menu.addMenu("Recent Projects")
+        self._refresh_recent_project_menu()
+        file_menu.addSeparator()
+        export_entry_action = QAction("Export Library Entry", self)
+        export_entry_action.triggered.connect(self._export_library_entry)
+        file_menu.addAction(export_entry_action)
+        import_entry_action = QAction("Import Library Entry", self)
+        import_entry_action.triggered.connect(self._import_library_entry)
+        file_menu.addAction(import_entry_action)
+
+        library_menu = self.menuBar().addMenu("Library")
+        save_profiles_action = QAction("Save Current Profiles", self)
+        save_profiles_action.triggered.connect(self._save_profile_assets)
+        library_menu.addAction(save_profiles_action)
+        refresh_library_action = QAction("Refresh Speech Asset Library", self)
+        refresh_library_action.triggered.connect(self._refresh_asset_library_view)
+        library_menu.addAction(refresh_library_action)
+
         view_menu = self.menuBar().addMenu("View")
         diagnostics_action = QAction("Speech Diagnostics", self)
         diagnostics_action.triggered.connect(lambda _checked=False: self.speech_diagnostics_dock.show() if self.speech_diagnostics_dock is not None else None)
@@ -7705,6 +8232,10 @@ class WaveToyWindow(QMainWindow):
         app_layout.setSpacing(4)
         app_layout.addWidget(self._build_toy_title_banner())
         app_layout.addWidget(self._build_global_control_panel())
+        self.project_path_label = QLabel(self._project_status_text())
+        self.project_path_label.setObjectName("projectPathLabel")
+        self.project_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        app_layout.addWidget(self.project_path_label)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("mainTabs")
@@ -9419,14 +9950,26 @@ class WaveToyWindow(QMainWindow):
 
     def _load_saved_phonemes(self) -> None:
         self.saved_phonemes = []
-        if not self.phonemes_dir.exists():
-            return
-        for path in sorted(self.phonemes_dir.glob("*.json")):
+        seen_names: set[str] = set()
+        if self.phonemes_dir.exists():
+            for path in sorted(self.phonemes_dir.glob("*.json")):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    phoneme = ArticulationPhoneme.from_json_dict(data)
+                    self.saved_phonemes.append(phoneme)
+                    seen_names.add(phoneme.name.lower())
+                except Exception as exc:
+                    print(f"[Articulation Lab] Could not load {path}: {exc}")
+        for _path, record in self.storage.iter_assets():
+            if record.asset_type != "phoneme":
+                continue
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self.saved_phonemes.append(ArticulationPhoneme.from_json_dict(data))
+                phoneme = ArticulationPhoneme.from_json_dict(record.payload)
+                if phoneme.name.lower() not in seen_names:
+                    self.saved_phonemes.append(phoneme)
+                    seen_names.add(phoneme.name.lower())
             except Exception as exc:
-                print(f"[Articulation Lab] Could not load {path}: {exc}")
+                print(f"[Articulation Lab] Could not load library phoneme {record.name}: {exc}")
 
     def _articulation_slider_value(self, key: str) -> float:
         slider = self.articulation_sliders[key]
@@ -10890,6 +11433,7 @@ class WaveToyWindow(QMainWindow):
             "formant_frames": [{"time_ms": f["time_ms"], "formants": f.get("formants", {})} for f in frames],
         }
         Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._save_library_asset("animation_export", Path(filename).stem, payload, description="Generic viseme timeline JSON export", source_path=str(filename))
         QMessageBox.information(self, "Export Viseme JSON", f"Exported {len(frames)} viseme frames to {filename}.")
 
     def _export_animation_json(self, checked: bool = False) -> None:
@@ -10934,6 +11478,7 @@ class WaveToyWindow(QMainWindow):
             "singing_mode_enabled": self._singing_mode_enabled(),
         }
         Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._save_library_asset("animation_export", Path(filename).stem, payload, description="Generic animation JSON export", source_path=str(filename))
         QMessageBox.information(self, "Export Animation JSON", f"Exported generic animation data to {filename}.")
 
     def _import_voice_font_recording(self, checked: bool = False) -> None:
@@ -12744,6 +13289,7 @@ class WaveToyWindow(QMainWindow):
         name = name.strip() or default_name
         word_item = self._create_rendered_speech_bin_item("word", name=name)
         if word_item is not None:
+            self._save_library_asset("word", word_item.name, word_item.metadata(), description="Created word asset with phoneme sequence, timing, transitions, stress markers, note events, and voice profile references", tags=["speech-bin"])
             self.timeline_selected_speech_item_id = word_item.id
             self._timeline_refresh_speech_bin_cards()
             message = f"Word ready: {word_item.name} • {word_item.duration_seconds:.2f}s • {self._chain_custom_transition_summary()} • saved to Speech Assets."
@@ -12809,6 +13355,8 @@ class WaveToyWindow(QMainWindow):
                 }
             )
             sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self._save_library_asset("generated_wav", path.stem, {"audio_path": str(path), "metadata_path": str(sidecar), "duration_seconds": len(self.articulation_word_render_audio) / SAMPLE_RATE}, description="Generated word WAV export", source_path=str(path))
+            self._save_library_asset("word", path.stem, data, description="Exported word metadata", source_path=str(sidecar))
             self.articulation_last_word_render_path = path
             self._update_articulation_word_status()
             QMessageBox.information(self, "Word Exported", f"Saved created word:\n{path}\n\nSaved word metadata:\n{sidecar}")
@@ -12838,7 +13386,9 @@ class WaveToyWindow(QMainWindow):
             phrase_markers=list(self.articulation_phrase_markers),
         ).to_json_dict()
         self.articulation_chain_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        QMessageBox.information(self, "Articulation Chain", f"Saved {len(self.articulation_chain_items)} chain phoneme(s) to {self.articulation_chain_path}.")
+        chain_name = self._speech_display_sequence_for_chain() or "Articulation Chain"
+        self._save_library_asset("articulation_chain", chain_name, data, description="Saved articulation chain", tags=["favorite:false"], notes="created_date and modified_date are stored as created_at/modified_at metadata fields.", source_path=str(self.articulation_chain_path))
+        QMessageBox.information(self, "Articulation Chain", f"Saved {len(self.articulation_chain_items)} chain phoneme(s) to {self.articulation_chain_path} and Speech Asset Library.")
 
     def _load_articulation_chain(self, checked: bool = False) -> None:
         del checked
@@ -12962,6 +13512,7 @@ class WaveToyWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 return
         path.write_text(json.dumps(self.current_phoneme.to_json_dict(), indent=2), encoding="utf-8")
+        self._save_library_asset("phoneme", self.current_phoneme.name, self.current_phoneme.to_json_dict(), description="Saved articulation phoneme preset", source_path=str(path))
         self._load_saved_phonemes()
         self._refresh_phoneme_cards()
         self._update_articulation_preview(regenerate=True)
@@ -13708,16 +14259,42 @@ class WaveToyWindow(QMainWindow):
         intro_layout.setSpacing(8)
         title = QLabel("Library")
         title.setObjectName("timelineInspectorTitle")
-        body = QLabel("Central asset management for imported Audio Assets and created Speech Assets. Speech Assets uses the existing Speech Bin data model so saved chains and Timeline integration remain compatible.")
+        body = QLabel("Central asset management for imported Audio Assets and created Speech Assets. The persistent Speech Asset Library mirrors saved phonemes, chains, words, profiles, analyses, imports, and exports into human-readable JSON under WaveToyData.")
         body.setObjectName("timelineInspectorText")
         body.setWordWrap(True)
+        self.asset_library_search = QLineEdit()
+        self.asset_library_search.setPlaceholderText("Search saved assets...")
+        self.asset_library_search.textChanged.connect(lambda _text: self._refresh_asset_library_view())
+        self.asset_library_category_combo = NoWheelComboBox()
+        self.asset_library_category_combo.addItem("All Categories", "all")
+        for asset_type, folder in sorted(WAVETOY_ASSET_CATEGORIES.items(), key=lambda item: item[1]):
+            self.asset_library_category_combo.addItem(folder, asset_type)
+        self.asset_library_category_combo.currentIndexChanged.connect(lambda _index: self._refresh_asset_library_view())
+        self.asset_library_sort_combo = NoWheelComboBox()
+        self.asset_library_sort_combo.addItem("Sort: Modified", "modified")
+        self.asset_library_sort_combo.addItem("Sort: Name", "name")
+        self.asset_library_sort_combo.addItem("Sort: Type", "type")
+        self.asset_library_sort_combo.currentIndexChanged.connect(lambda _index: self._refresh_asset_library_view())
+        self.asset_library_summary = QTextEdit()
+        self.asset_library_summary.setReadOnly(True)
+        self.asset_library_summary.setObjectName("speechDiagnosticsText")
+        button_row = QHBoxLayout()
+        for label, callback in (("Refresh", self._refresh_asset_library_view), ("Import Entry", self._import_library_entry), ("Export Entry", self._export_library_entry), ("Save Profiles", self._save_profile_assets)):
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            button_row.addWidget(button)
         intro_layout.addWidget(title)
         intro_layout.addWidget(body)
-        intro_layout.addStretch(1)
-        layout.addWidget(intro, 1)
+        intro_layout.addWidget(self.asset_library_search)
+        intro_layout.addWidget(self.asset_library_category_combo)
+        intro_layout.addWidget(self.asset_library_sort_combo)
+        intro_layout.addLayout(button_row)
+        intro_layout.addWidget(self.asset_library_summary, 1)
+        layout.addWidget(intro, 2)
         layout.addWidget(self._build_speech_assets_panel("library"), 2)
-        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "Library")
+        self.tabs.insertTab(max(0, self.tabs.count() - 1), tab, "Speech Asset Library")
         self._timeline_refresh_speech_bin_cards()
+        self._refresh_asset_library_view()
 
     def _build_timeline_tab(self) -> None:
         if self.tabs is None:
@@ -14394,6 +14971,7 @@ class WaveToyWindow(QMainWindow):
                     color=colors[(item_id - 1) % len(colors)],
                 )
                 self.timeline_audio_palette.append(item)
+                self._save_library_asset("imported_wav", item.name, item.metadata(), description="Imported timeline audio file", source_path=str(path))
                 imported += 1
                 self._timeline_debug(f"File import success id={item.item_id} path={path} duration={item.duration_seconds:.3f}s")
             except Exception as exc:
@@ -15056,6 +15634,7 @@ class WaveToyWindow(QMainWindow):
                 "notes": "Timeline metadata stores imported and speech source paths plus articulation snapshots only; raw audio arrays are not embedded. Missing speech cache audio should be re-rendered from speech_metadata.articulation_metadata when possible, otherwise the clip stays visible as muted with a warning.",
             }
             sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self._save_library_asset("generated_wav", path.stem, {"audio_path": str(path), "metadata_path": str(sidecar), "duration_seconds": len(mix) / SAMPLE_RATE}, description="Generated timeline mix export", source_path=str(path))
             self.timeline_last_mix_path = path
             self._timeline_debug(f"Export succeeded audio={path} sidecar={sidecar}")
             QMessageBox.information(self, "Timeline Exported", f"Saved timeline mix:\n{path}\n\nSaved arrangement metadata:\n{sidecar}")
@@ -17538,6 +18117,7 @@ class WaveToyWindow(QMainWindow):
             recipe = self._settings_to_recipe(path.stem)
             recipe_path = path.with_suffix(path.suffix + ".wave-toy.json")
             recipe_path.write_text(json.dumps(recipe, indent=2), encoding="utf-8")
+            self._save_library_asset("generated_wav", path.stem, {"audio_path": str(path), "recipe_path": str(recipe_path), "recipe": recipe}, description="Generated WaveToy sound export", source_path=str(path))
 
             self._add_recipe_to_sound_experiments(recipe)
         except Exception as exc:
