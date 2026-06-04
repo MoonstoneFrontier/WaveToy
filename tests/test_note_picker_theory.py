@@ -146,3 +146,20 @@ def test_highlight_set_preserves_selected_pitch_class_without_selecting_root(qap
     assert picker.selected_note() == "C#"
     assert picker.highlighted_notes() == {"A", "C#", "E"}
     assert picker.highlight_root() == "A"
+
+
+def test_note_picker_harmony_highlight_layers_preserve_selection(qapp):
+    picker = wave_toy.CircleOfFifthsNotePicker()
+    picker.set_note("C#")
+    scale_notes = wave_toy.scale_pitch_classes("A", "major")
+    chord_notes = wave_toy.chord_pitch_classes("A", "major_triad")
+    picker.set_harmony_highlights(scale_notes, chord_notes, "A")
+    assert picker.selected_note() == "C#"
+    assert picker.highlight_root() == "A"
+    assert picker.highlighted_scale_notes() == set(scale_notes)
+    assert picker.highlighted_chord_notes() == {"A", "C#", "E"}
+    picker.set_layout_mode(wave_toy.NOTE_WHEEL_LAYOUT_FIFTHS)
+    assert picker.highlighted_chord_notes() == {"A", "C#", "E"}
+    picker.set_harmony_highlights([], [], None)
+    assert picker.highlighted_notes() == set()
+    assert picker.highlight_root() is None

@@ -50,3 +50,9 @@ Reserved category constants and TODO comments identify future asset directions w
 ## Known limitation
 
 This is not a full music-theory engine. The foundation intentionally uses deterministic pitch-class sets and compact degree helpers rather than context-aware notation, modal mixture, secondary dominants, inversions, or progression analysis.
+
+## Task 087 state-sync hardening
+
+Task 087 centralizes Harmony Workbench refresh around current harmony state so root, scale, chord, spelling, layout, selected note, labels, and highlights are refreshed together. Scale and chord highlights are now stored as separate layers; chord tones remain visibly distinct inside scale highlights, the root keeps a stronger visual halo, and the selected note remains independent from harmony highlighting.
+
+Task 087 also adds a metadata-only **Export Harmony JSON** action and reserves JSON-safe asset dataclasses for `scale_pattern`, `chord_pattern`, and `chord_progression`. These are foundations only: no full progression editor, MIDI export, piano roll, or project-schema migration is added.

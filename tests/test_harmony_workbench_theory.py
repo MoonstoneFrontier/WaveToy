@@ -66,3 +66,61 @@ def test_note_picker_highlight_set_preserves_selected_pitch_class(qapp):
     assert picker.selected_note() == "C#"
     assert "C#" in picker.highlighted_notes()
     assert picker.highlight_root() == "A"
+
+
+def test_root_change_from_a_to_bb_changes_auto_display_spelling():
+    a_notes = wave_toy.scale_pitch_classes("A", "major")
+    bb_notes = wave_toy.scale_pitch_classes("Bb", "major")
+    assert wave_toy.display_pitch_class_set(a_notes, "A", "Auto") == ["A", "B", "C#", "D", "E", "F#", "G#"]
+    assert wave_toy.display_pitch_class_set(bb_notes, "Bb", "Auto") == ["Bb", "C", "D", "Eb", "F", "G", "A"]
+
+
+def test_a_major_and_minor_scale_highlight_sets_are_pitch_class_stable():
+    a_major = set(wave_toy.scale_pitch_classes("A", "major"))
+    a_minor = set(wave_toy.scale_pitch_classes("A", "natural_minor"))
+    assert {"A", "C#", "E"}.issubset(a_major)
+    assert "C" not in a_major
+    assert {"A", "C", "E"}.issubset(a_minor)
+    assert "C#" not in a_minor
+
+
+def test_major_triad_chord_tones_are_subset_identifiable_in_scale():
+    scale_notes = set(wave_toy.scale_pitch_classes("A", "major"))
+    chord_notes = set(wave_toy.chord_pitch_classes("A", "major_triad"))
+    assert chord_notes == {"A", "C#", "E"}
+    assert chord_notes.issubset(scale_notes)
+
+
+def test_unknown_scale_and_chord_ids_fall_back_safely():
+    assert wave_toy.scale_pitch_classes("A", "missing_scale") == wave_toy.scale_pitch_classes("A", "major")
+    assert wave_toy.chord_pitch_classes("A", "missing_chord") == wave_toy.chord_pitch_classes("A", "major_triad")
+    assert wave_toy.scale_degree_for_note("C#", "A", "missing_scale") == 3
+    assert wave_toy.chord_degree_for_note("E", "A", "missing_chord") == 5
+
+
+def test_harmony_metadata_export_payload_is_json_safe():
+    payload = wave_toy.harmony_metadata_payload("Bb", "major", "major_triad", "Auto", created_at="2026-06-04T00:00:00+00:00")
+    assert payload["schema"] == "wavetoy.harmony_metadata.v1"
+    assert payload["root_note"] == "A#"
+    assert payload["root_display"] == "Bb"
+    assert payload["scale_displayed_names"] == ["Bb", "C", "D", "Eb", "F", "G", "A"]
+    assert payload["chord_displayed_names"] == ["Bb", "D", "F"]
+    assert payload["asset_types_reserved"] == ["scale_pattern", "chord_pattern", "chord_progression"]
+    import json
+
+    json.dumps(payload)
+
+
+def test_harmony_asset_dataclasses_are_json_safe():
+    created = "2026-06-04T00:00:00+00:00"
+    assets = [
+        wave_toy.ScalePatternAsset(uuid="scale-1", name="A Major", created_at=created, modified_at=created),
+        wave_toy.ChordPatternAsset(uuid="chord-1", name="A Major Triad", chord_steps=["I"], created_at=created, modified_at=created),
+        wave_toy.ChordProgressionAsset(uuid="prog-1", name="I V vi IV", chord_steps=["I", "V", "vi", "IV"], created_at=created, modified_at=created),
+    ]
+    import json
+
+    for asset in assets:
+        data = asset.to_json_dict()
+        assert set(data) == {"uuid", "name", "root_note", "spelling_mode", "scale_type", "chord_type", "chord_steps", "tags", "notes", "created_at", "modified_at"}
+        json.dumps(data)

@@ -1309,23 +1309,118 @@ HARMONY_ASSET_CATEGORY_CHORD_PATTERN = "chord_pattern"  # TODO: future reusable 
 HARMONY_ASSET_CATEGORY_CHORD_PROGRESSION = "chord_progression"  # TODO: future progression asset CRUD.
 
 
+@dataclass
+class ScalePatternAsset:
+    """JSON-safe reserved asset shape for future reusable scale patterns."""
+
+    uuid: str
+    name: str
+    root_note: str = "A"
+    spelling_mode: str = "Auto"
+    scale_type: str = "major"
+    chord_type: str = "major_triad"
+    chord_steps: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    notes: str = ""
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class ChordPatternAsset:
+    """JSON-safe reserved asset shape for future reusable chord patterns."""
+
+    uuid: str
+    name: str
+    root_note: str = "A"
+    spelling_mode: str = "Auto"
+    scale_type: str = "major"
+    chord_type: str = "major_triad"
+    chord_steps: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    notes: str = ""
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class ChordProgressionAsset:
+    """JSON-safe reserved asset shape for future chord progression assets."""
+
+    uuid: str
+    name: str
+    root_note: str = "A"
+    spelling_mode: str = "Auto"
+    scale_type: str = "major"
+    chord_type: str = "major_triad"
+    chord_steps: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    notes: str = ""
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
 def _pitch_classes_from_offsets(root_note: str, offsets: List[int]) -> List[str]:
     root_index = NOTE_TO_INDEX.get(str(root_note or "A"), NOTE_TO_INDEX["A"])
     return [NOTE_NAMES[(root_index + int(offset)) % 12] for offset in offsets]
 
 
 def scale_pitch_classes(root_note: str, scale_type: str) -> List[str]:
-    scale = SCALE_TYPES.get(scale_type, SCALE_TYPES["major"])
-    return _pitch_classes_from_offsets(root_note, scale["offsets"])  # type: ignore[arg-type]
+    scale = SCALE_TYPES.get(str(scale_type or "major"), SCALE_TYPES["major"])
+    return _pitch_classes_from_offsets(root_note, list(scale["offsets"]))  # type: ignore[arg-type]
 
 
 def chord_pitch_classes(root_note: str, chord_type: str) -> List[str]:
-    chord = CHORD_TYPES.get(chord_type, CHORD_TYPES["major_triad"])
-    return _pitch_classes_from_offsets(root_note, chord["offsets"])  # type: ignore[arg-type]
+    chord = CHORD_TYPES.get(str(chord_type or "major_triad"), CHORD_TYPES["major_triad"])
+    return _pitch_classes_from_offsets(root_note, list(chord["offsets"]))  # type: ignore[arg-type]
 
 
 def display_pitch_class_set(notes: List[str], root_note: str = "A", spelling_mode: str = "Auto") -> List[str]:
     return [display_note_name(normalize_note_name(note), root_note, spelling_mode) for note in notes]
+
+
+def harmony_metadata_payload(
+    root_note: str = "A",
+    scale_type: str = "major",
+    chord_type: str = "major_triad",
+    spelling_mode: str = "Auto",
+    created_at: str | None = None,
+) -> Dict[str, object]:
+    """Build a JSON-safe harmony metadata payload without exporting audio."""
+    root = normalize_note_name(root_note)
+    safe_scale_type = str(scale_type or "major") if str(scale_type or "major") in SCALE_TYPES else "major"
+    safe_chord_type = str(chord_type or "major_triad") if str(chord_type or "major_triad") in CHORD_TYPES else "major_triad"
+    scale_notes = scale_pitch_classes(root, safe_scale_type)
+    chord_notes = chord_pitch_classes(root, safe_chord_type)
+    return {
+        "schema": "wavetoy.harmony_metadata.v1",
+        "created_at": created_at or _utc_now_iso(),
+        "root_note": root,
+        "root_display": display_note_name(root, root_note, spelling_mode),
+        "scale_type": safe_scale_type,
+        "scale_label": str(SCALE_TYPES[safe_scale_type]["label"]),
+        "scale_pitch_classes": scale_notes,
+        "scale_displayed_names": display_pitch_class_set(scale_notes, root_note, spelling_mode),
+        "chord_type": safe_chord_type,
+        "chord_label": str(CHORD_TYPES[safe_chord_type]["label"]),
+        "chord_pitch_classes": chord_notes,
+        "chord_displayed_names": display_pitch_class_set(chord_notes, root_note, spelling_mode),
+        "spelling_mode": spelling_mode if spelling_mode in {"Auto", "Sharps", "Flats"} else "Auto",
+        "asset_types_reserved": [
+            HARMONY_ASSET_CATEGORY_SCALE_PATTERN,
+            HARMONY_ASSET_CATEGORY_CHORD_PATTERN,
+            HARMONY_ASSET_CATEGORY_CHORD_PROGRESSION,
+        ],
+    }
 
 
 def scale_degree_for_note(note: str, root_note: str, scale_type: str) -> int | None:
@@ -7109,6 +7204,8 @@ class CircleOfFifthsNotePicker(QWidget):
         self._spelling_mode = "Auto"
         self._layout_mode = NOTE_WHEEL_LAYOUT_INTERVALS
         self._highlight_notes: set[str] = set()
+        self._highlight_scale_notes: set[str] = set()
+        self._highlight_chord_notes: set[str] = set()
         self._highlight_root: str | None = None
         self.setMinimumSize(QSize(330, 330))
         self.setMouseTracking(True)
@@ -7155,15 +7252,38 @@ class CircleOfFifthsNotePicker(QWidget):
         return note_wheel_order(self._main_note, self._layout_mode)
 
     def set_highlight_notes(self, notes: List[str] | set[str] | None, root_note: str | None = None) -> None:
-        highlight_notes = {normalize_note_name(note) for note in (notes or [])}
-        highlight_root = normalize_note_name(root_note) if root_note else None
-        if highlight_notes != self._highlight_notes or highlight_root != self._highlight_root:
+        self.set_harmony_highlights(notes, None, root_note)
+
+    def set_harmony_highlights(
+        self,
+        scale_notes: List[str] | set[str] | None,
+        chord_notes: List[str] | set[str] | None,
+        root_note: str | None = None,
+    ) -> None:
+        scale_highlights = {normalize_note_name(note) for note in (scale_notes or [])}
+        chord_highlights = {normalize_note_name(note) for note in (chord_notes or [])}
+        highlight_notes = scale_highlights | chord_highlights
+        highlight_root = normalize_note_name(root_note) if root_note and highlight_notes else None
+        if (
+            highlight_notes != self._highlight_notes
+            or scale_highlights != self._highlight_scale_notes
+            or chord_highlights != self._highlight_chord_notes
+            or highlight_root != self._highlight_root
+        ):
             self._highlight_notes = highlight_notes
+            self._highlight_scale_notes = scale_highlights
+            self._highlight_chord_notes = chord_highlights
             self._highlight_root = highlight_root
             self.update()
 
     def highlighted_notes(self) -> set[str]:
         return set(self._highlight_notes)
+
+    def highlighted_scale_notes(self) -> set[str]:
+        return set(self._highlight_scale_notes)
+
+    def highlighted_chord_notes(self) -> set[str]:
+        return set(self._highlight_chord_notes)
 
     def highlight_root(self) -> str | None:
         return self._highlight_root
@@ -7229,13 +7349,27 @@ class CircleOfFifthsNotePicker(QWidget):
             emotion = note_emotion(note, self._main_note)
             fill = QColor(emotion["color"])
             highlighted = note in self._highlight_notes
+            scale_highlight = note in self._highlight_scale_notes
+            chord_highlight = note in self._highlight_chord_notes
             highlight_root = highlighted and note == self._highlight_root
-            if highlighted:
-                halo = QColor("#ffffff" if not highlight_root else "#fff176")
-                halo.setAlpha(150 if highlight_root else 110)
-                painter.setPen(QPen(halo, 7 if highlight_root else 5))
+            if scale_highlight:
+                scale_halo = QColor("#ffffff")
+                scale_halo.setAlpha(105)
+                painter.setPen(QPen(scale_halo, 5))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawEllipse(bubble.adjusted(-5, -5, 5, 5))
+            if chord_highlight:
+                chord_halo = QColor("#ff8cc6")
+                chord_halo.setAlpha(150)
+                painter.setPen(QPen(chord_halo, 7))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(bubble.adjusted(-8, -8, 8, 8))
+            if highlight_root:
+                root_halo = QColor("#fff176")
+                root_halo.setAlpha(175)
+                painter.setPen(QPen(root_halo, 9))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(bubble.adjusted(-11, -11, 11, 11))
             if selected:
                 fill = fill.lighter(118)
                 glow = QColor(fill)
@@ -7406,14 +7540,17 @@ class NoteWheelDialog(QDialog):
         play_scale_button = QPushButton("Play Scale")
         play_chord_button = QPushButton("Play Chord")
         play_arpeggio_button = QPushButton("Play Arpeggio")
+        export_harmony_button = QPushButton("Export Harmony JSON")
         play_scale_button.clicked.connect(lambda: self._request_preview("scale"))
         play_chord_button.clicked.connect(lambda: self._request_preview("chord"))
         play_arpeggio_button.clicked.connect(lambda: self._request_preview("arpeggio"))
+        export_harmony_button.clicked.connect(self._export_harmony_json)
         wb_toggle_row.addWidget(self.highlight_scale_check)
         wb_toggle_row.addWidget(self.highlight_chord_check)
         wb_toggle_row.addWidget(play_scale_button)
         wb_toggle_row.addWidget(play_chord_button)
         wb_toggle_row.addWidget(play_arpeggio_button)
+        wb_toggle_row.addWidget(export_harmony_button)
         wb_layout.addLayout(wb_toggle_row)
 
         self.harmony_summary_label = QLabel()
@@ -7465,29 +7602,53 @@ class NoteWheelDialog(QDialog):
     def _current_chord_type(self) -> str:
         return str(self.harmony_chord_combo.currentData() or "major_triad") if hasattr(self, "harmony_chord_combo") else "major_triad"
 
-    def _refresh_harmony_workbench(self) -> None:
-        if not hasattr(self, "harmony_summary_label"):
-            return
-        root = self.harmony_root_combo.currentText() if hasattr(self, "harmony_root_combo") else self.picker.main_note()
-        root = normalize_note_name(root)
-        self.picker.set_main_note(root)
+    def _current_harmony_state(self) -> Dict[str, object]:
+        root_text = self.harmony_root_combo.currentText() if hasattr(self, "harmony_root_combo") else self.picker.main_note()
+        root = normalize_note_name(root_text)
         spelling_mode = self.spelling_mode_combo.currentText() if hasattr(self, "spelling_mode_combo") else "Auto"
         scale_type = self._current_scale_type()
         chord_type = self._current_chord_type()
         scale_notes = scale_pitch_classes(root, scale_type)
         chord_notes = chord_pitch_classes(root, chord_type)
-        highlight_notes: set[str] = set()
-        if self.highlight_scale_check.isChecked():
-            highlight_notes.update(scale_notes)
-        if self.highlight_chord_check.isChecked():
-            highlight_notes.update(chord_notes)
-        self.picker.set_highlight_notes(highlight_notes, root if highlight_notes else None)
+        return {
+            "root_text": root_text,
+            "root": root,
+            "spelling_mode": spelling_mode,
+            "scale_type": scale_type if scale_type in SCALE_TYPES else "major",
+            "chord_type": chord_type if chord_type in CHORD_TYPES else "major_triad",
+            "scale_notes": scale_notes,
+            "chord_notes": chord_notes,
+            "highlight_scale": bool(self.highlight_scale_check.isChecked()) if hasattr(self, "highlight_scale_check") else False,
+            "highlight_chord": bool(self.highlight_chord_check.isChecked()) if hasattr(self, "highlight_chord_check") else False,
+            "selected": self.picker.selected_note(),
+        }
+
+    def _refresh_harmony_highlights(self, state: Dict[str, object] | None = None) -> None:
+        state = state or self._current_harmony_state()
+        scale_notes = state["scale_notes"] if state.get("highlight_scale") else []
+        chord_notes = state["chord_notes"] if state.get("highlight_chord") else []
+        root = str(state["root"])
+        has_highlights = bool(scale_notes or chord_notes)
+        self.picker.set_harmony_highlights(scale_notes, chord_notes, root if has_highlights else None)  # type: ignore[arg-type]
+
+    def _refresh_harmony_workbench(self) -> None:
+        if not hasattr(self, "harmony_summary_label"):
+            return
+        state = self._current_harmony_state()
+        root = str(state["root"])
+        self.picker.set_main_note(root)
+        self._refresh_harmony_highlights(state)
+        spelling_mode = str(state["spelling_mode"])
+        scale_type = str(state["scale_type"])
+        chord_type = str(state["chord_type"])
+        scale_notes = list(state["scale_notes"])
+        chord_notes = list(state["chord_notes"])
         scale_meta = SCALE_TYPES.get(scale_type, SCALE_TYPES["major"])
         chord_meta = CHORD_TYPES.get(chord_type, CHORD_TYPES["major_triad"])
-        scale_display = " ".join(display_pitch_class_set(scale_notes, root, spelling_mode))
-        chord_display = " ".join(display_pitch_class_set(chord_notes, root, spelling_mode))
-        selected = self.picker.selected_note()
-        selected_display = display_note_name(selected, root, spelling_mode)
+        scale_display = " ".join(display_pitch_class_set(scale_notes, str(state["root_text"]), spelling_mode))
+        chord_display = " ".join(display_pitch_class_set(chord_notes, str(state["root_text"]), spelling_mode))
+        selected = str(state["selected"])
+        selected_display = display_note_name(selected, str(state["root_text"]), spelling_mode)
         scale_degree = scale_degree_for_note(selected, root, scale_type)
         chord_degree = chord_degree_for_note(selected, root, chord_type)
         degree_bits = []
@@ -7496,12 +7657,30 @@ class NoteWheelDialog(QDialog):
         if chord_degree is not None:
             degree_bits.append(f"chord degree {chord_degree}")
         degree_text = f"{selected_display} is " + " • ".join(degree_bits) if degree_bits else f"{selected_display} is outside the current scale/chord."
-        root_display = display_note_name(root, root, spelling_mode)
+        root_display = display_note_name(root, str(state["root_text"]), spelling_mode)
         self.harmony_summary_label.setText(
             f"{root_display} {scale_meta['label']}: {scale_display} — {scale_meta['description']}\n"
             f"{root_display} {chord_meta['label']}: {chord_display} — {chord_meta['description']}\n"
             f"{degree_text}"
         )
+
+    def _export_harmony_json(self) -> None:
+        state = self._current_harmony_state()
+        filename, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Harmony JSON",
+            "wave_toy_harmony.json",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+        payload = harmony_metadata_payload(
+            str(state["root_text"]),
+            str(state["scale_type"]),
+            str(state["chord_type"]),
+            str(state["spelling_mode"]),
+        )
+        Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _request_preview(self, target: str) -> None:
         if self.preview_callback is None:
