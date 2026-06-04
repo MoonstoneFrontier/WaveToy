@@ -24,3 +24,13 @@ On load, legacy automation becomes `TimelineParameterTrack(track_kind="automatio
 `accentuation_db` is sampled as a gain envelope and applied to a render copy only.
 
 `pitch_bias_cents` is sampled through the same envelope helper. Pitch bias currently uses a conservative post-render approximation: it limits active bias to `±300 cents` and blends into voiced-looking regions based on RMS and zero-crossing analysis. This is intentionally safer for stops and fricatives, but not a replacement for future frame-aware voiced-source resynthesis.
+
+## Task 078 compiled envelopes and cache
+
+Automation envelopes now route through `compiled_envelope_for_parameter()`. The compatibility helper `automation_envelope_for_parameter()` remains available and delegates to the compiled/cached path.
+
+The envelope cache stores only numeric `float32` parameter envelopes, never rendered audio. Cache keys are built from parameter, duration in milliseconds, sample rate, and the timeline tracks hash. The hash changes when tracks or points change, including point moves and mute toggles; `visible` remains UI-only and is excluded from the runtime source hash.
+
+The cache is bounded by entry count and memory budget. Old entries are evicted least-recently-used style when the budget is exceeded. Runtime diagnostics report cache hit/miss behavior and the last envelope generation time.
+
+`accentuation_db` and `pitch_bias_cents` both use the compiled envelope path. Gain automation and conservative pitch-bias behavior are intended to stay audibly compatible with Task 077 while avoiding repeated point scans for longer or denser phrases.

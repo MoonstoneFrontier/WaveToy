@@ -51,3 +51,20 @@ Values are clamped through `_timeline_value_range()` before display or render sa
 The Performance Timeline canvas supports selecting, dragging, double-click creation, delete-key removal, a millisecond ruler, a playhead, and optional musical-grid snap. The inspector tables remain available for precise fallback edits.
 
 The playhead updates the status line, diagnostics, and waveform overlay sampled-value context. Scrubbing the Performance Timeline moves the playhead without starting overlapping audio playback. During Articulation Word Motion playback, the Performance Timeline playhead follows the motion timeline.
+
+## Task 078 runtime compilation
+
+Performance tracks now have an in-memory compiled runtime form, `CompiledTimelineTrack`. It is derived from `TimelineParameterTrack`, is not persisted, and exists only to make repeated sampling efficient.
+
+Compilation behavior:
+
+- sorts points by time,
+- normalizes unsupported curves to `linear`,
+- clamps values through `_timeline_value_range()`,
+- builds adjacent points into runtime segments,
+- excludes `visible` from the source hash because visibility is UI-only,
+- keeps muted tracks compiled but inactive during evaluation.
+
+`evaluate_compiled_track()` samples these segments while preserving Task 077 behavior for `hold`, `linear`, `smooth`, before-first-point silence, and after-last-point hold. The compact Runtime inspector in the Performance Timeline tab shows the selected track's point count, segment count, sampled playhead value, min/max point values, mute/visible state, and source hash short form.
+
+Runtime diagnostics shown in the Performance Timeline status and Speech Diagnostics include compiled track counts, active compiled track counts, envelope cache hits/misses, last envelope generation time, timeline hash, and backend name.

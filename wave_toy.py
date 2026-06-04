@@ -29,6 +29,8 @@ Optional for MP3/OGG/FLAC export:
 
 from __future__ import annotations
 
+import bisect
+from collections import OrderedDict
 import hashlib
 import os
 import json
@@ -309,6 +311,249 @@ class TimelineParameterTrack:
         )
 
 
+@dataclass
+class TimelineSegment:
+    """Runtime segment spanning two timeline points."""
+
+    start_ms: float = 0.0
+    end_ms: float = 0.0
+    start_value: float = 0.0
+    end_value: float = 0.0
+    curve: str = "linear"
+
+
+@dataclass
+class CompiledTimelineTrack:
+    """Cacheable runtime representation of a TimelineParameterTrack."""
+
+    track_id: str = ""
+    target_parameter: str = "accentuation_db"
+    track_kind: str = "automation"
+    muted: bool = False
+    points: List[TimelineParameterPoint] = field(default_factory=list)
+    segments: List[TimelineSegment] = field(default_factory=list)
+    value_range: Tuple[float, float] = (-1.0, 1.0)
+    source_hash: str = ""
+
+
+_TIMELINE_TRACK_COMPILE_CACHE: Dict[Tuple[str, str], CompiledTimelineTrack] = {}
+_AUTOMATION_ENVELOPE_CACHE: "OrderedDict[Tuple[str, int, int, str], np.ndarray]" = OrderedDict()
+_AUTOMATION_ENVELOPE_CACHE_BYTES = 0
+_AUTOMATION_ENVELOPE_CACHE_MAX_BYTES = 24 * 1024 * 1024
+_AUTOMATION_ENVELOPE_CACHE_MAX_ENTRIES = 16
+_AUTOMATION_RUNTIME_DIAGNOSTICS: Dict[str, object] = {
+    "compiled_track_count": 0,
+    "active_compiled_track_count": 0,
+    "envelope_cache_hits": 0,
+    "envelope_cache_misses": 0,
+    "envelope_generation_ms": 0.0,
+    "timeline_tracks_hash": "",
+    "automation_runtime_backend": "compiled_segments",
+}
+
+
+def _normalize_automation_curve(curve: str) -> str:
+    curve = str(curve or "linear").lower()
+    return curve if curve in AUTOMATION_CURVES else "linear"
+
+
+def _timeline_track_source_dict(track: "TimelineParameterTrack") -> Dict[str, object]:
+    """Stable runtime source for hashing; visible is UI-only and intentionally excluded."""
+    return {
+        "track_id": str(getattr(track, "track_id", "") or ""),
+        "target_parameter": str(getattr(track, "target_parameter", "") or ""),
+        "track_kind": str(getattr(track, "track_kind", "automation") or "automation"),
+        "muted": bool(getattr(track, "muted", False)),
+        "points": [
+            {
+                "time_ms": int(point.time_ms),
+                "value": float(point.value),
+                "curve": _normalize_automation_curve(point.curve),
+            }
+            for point in _sorted_timeline_points(track)
+        ],
+    }
+
+
+def timeline_track_source_hash(track: "TimelineParameterTrack") -> str:
+    payload = json.dumps(_timeline_track_source_dict(track), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def timeline_tracks_hash(tracks: List["TimelineParameterTrack"] | None) -> str:
+    payload = [
+        _timeline_track_source_dict(track)
+        for track in sorted(list(tracks or []), key=lambda item: (str(getattr(item, "track_id", "")), int(getattr(item, "lane_order", 0) or 0)))
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def compile_timeline_track(track: "TimelineParameterTrack") -> CompiledTimelineTrack:
+    source_hash = timeline_track_source_hash(track)
+    cache_key = (str(getattr(track, "track_id", "") or ""), source_hash)
+    cached = _TIMELINE_TRACK_COMPILE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    low, high = _timeline_value_range(getattr(track, "target_parameter", ""), getattr(track, "track_kind", "automation"))
+    points = []
+    for point in _sorted_timeline_points(track):
+        points.append(
+            TimelineParameterPoint(
+                time_ms=point.time_ms,
+                value=float(point.value),
+                curve=_normalize_automation_curve(point.curve),
+                label=point.label,
+                metadata=dict(point.metadata),
+            )
+        )
+    segments = [
+        TimelineSegment(
+            start_ms=float(left.time_ms),
+            end_ms=float(right.time_ms),
+            start_value=float(left.value),
+            end_value=float(right.value),
+            curve=_normalize_automation_curve(left.curve),
+        )
+        for left, right in zip(points, points[1:])
+    ]
+    compiled = CompiledTimelineTrack(
+        track_id=str(getattr(track, "track_id", "") or ""),
+        target_parameter=str(getattr(track, "target_parameter", "accentuation_db") or "accentuation_db"),
+        track_kind=str(getattr(track, "track_kind", "automation") or "automation"),
+        muted=bool(getattr(track, "muted", False)),
+        points=points,
+        segments=segments,
+        value_range=(float(low), float(high)),
+        source_hash=source_hash,
+    )
+    stale_keys = [key for key in _TIMELINE_TRACK_COMPILE_CACHE if key[0] == compiled.track_id and key != cache_key]
+    for key in stale_keys:
+        _TIMELINE_TRACK_COMPILE_CACHE.pop(key, None)
+    _TIMELINE_TRACK_COMPILE_CACHE[cache_key] = compiled
+    return compiled
+
+
+def compiled_timeline_tracks(tracks: List["TimelineParameterTrack"] | None) -> List[CompiledTimelineTrack]:
+    compiled = [compile_timeline_track(track) for track in (tracks or [])]
+    _AUTOMATION_RUNTIME_DIAGNOSTICS["compiled_track_count"] = len(compiled)
+    _AUTOMATION_RUNTIME_DIAGNOSTICS["active_compiled_track_count"] = len([track for track in compiled if not track.muted and track.points])
+    _AUTOMATION_RUNTIME_DIAGNOSTICS["timeline_tracks_hash"] = timeline_tracks_hash(tracks)
+    _AUTOMATION_RUNTIME_DIAGNOSTICS["automation_runtime_backend"] = "compiled_segments"
+    return compiled
+
+
+def evaluate_compiled_track(compiled_track: CompiledTimelineTrack, time_ms: float) -> float | None:
+    if compiled_track is None or compiled_track.muted or not compiled_track.points:
+        return None
+    sample_ms = float(max(0.0, float(time_ms)))
+    points = compiled_track.points
+    low, high = compiled_track.value_range
+    if sample_ms < float(points[0].time_ms):
+        return None
+    if len(points) == 1 or sample_ms >= float(points[-1].time_ms):
+        return float(np.clip(points[-1].value, low, high))
+    starts = [segment.start_ms for segment in compiled_track.segments]
+    index = max(0, min(len(compiled_track.segments) - 1, bisect.bisect_right(starts, sample_ms) - 1))
+    segment = compiled_track.segments[index]
+    if sample_ms < segment.start_ms:
+        return None
+    if sample_ms > segment.end_ms:
+        return float(np.clip(points[-1].value, low, high))
+    if segment.curve == "hold" or segment.end_ms <= segment.start_ms:
+        return float(np.clip(segment.start_value, low, high))
+    ratio = float(np.clip((sample_ms - segment.start_ms) / max(1.0, segment.end_ms - segment.start_ms), 0.0, 1.0))
+    if segment.curve == "smooth":
+        ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+    value = segment.start_value + (segment.end_value - segment.start_value) * ratio
+    return float(np.clip(value, low, high))
+
+
+def _compiled_track_envelope(compiled: CompiledTimelineTrack, time_ms: np.ndarray) -> np.ndarray:
+    frame_count = len(time_ms)
+    values = np.zeros(frame_count, dtype=np.float32)
+    if compiled.muted or not compiled.points or frame_count <= 0:
+        return values
+    points = compiled.points
+    active = time_ms >= float(points[0].time_ms)
+    if not np.any(active):
+        return values
+    if len(points) == 1:
+        values[active] = float(np.clip(points[0].value, *compiled.value_range))
+        return values
+    for segment in compiled.segments:
+        mask = (time_ms >= segment.start_ms) & (time_ms <= segment.end_ms)
+        if not np.any(mask):
+            continue
+        if segment.curve == "hold" or segment.end_ms <= segment.start_ms:
+            values[mask] = float(np.clip(segment.start_value, *compiled.value_range))
+        else:
+            ratio = np.clip((time_ms[mask] - segment.start_ms) / max(1.0, segment.end_ms - segment.start_ms), 0.0, 1.0)
+            if segment.curve == "smooth":
+                ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+            values[mask] = (segment.start_value + (segment.end_value - segment.start_value) * ratio).astype(np.float32)
+    values[time_ms > float(points[-1].time_ms)] = float(np.clip(points[-1].value, *compiled.value_range))
+    return np.clip(values, compiled.value_range[0], compiled.value_range[1]).astype(np.float32)
+
+
+def _store_envelope_cache(cache_key: Tuple[str, int, int, str], envelope: np.ndarray) -> None:
+    global _AUTOMATION_ENVELOPE_CACHE_BYTES
+    if envelope.nbytes > _AUTOMATION_ENVELOPE_CACHE_MAX_BYTES // 2:
+        return
+    previous = _AUTOMATION_ENVELOPE_CACHE.pop(cache_key, None)
+    if previous is not None:
+        _AUTOMATION_ENVELOPE_CACHE_BYTES -= int(previous.nbytes)
+    _AUTOMATION_ENVELOPE_CACHE[cache_key] = envelope.copy()
+    _AUTOMATION_ENVELOPE_CACHE_BYTES += int(envelope.nbytes)
+    while _AUTOMATION_ENVELOPE_CACHE and (
+        len(_AUTOMATION_ENVELOPE_CACHE) > _AUTOMATION_ENVELOPE_CACHE_MAX_ENTRIES
+        or _AUTOMATION_ENVELOPE_CACHE_BYTES > _AUTOMATION_ENVELOPE_CACHE_MAX_BYTES
+    ):
+        _old_key, old_value = _AUTOMATION_ENVELOPE_CACHE.popitem(last=False)
+        _AUTOMATION_ENVELOPE_CACHE_BYTES -= int(old_value.nbytes)
+
+
+def clear_automation_envelope_cache() -> None:
+    global _AUTOMATION_ENVELOPE_CACHE_BYTES
+    _AUTOMATION_ENVELOPE_CACHE.clear()
+    _AUTOMATION_ENVELOPE_CACHE_BYTES = 0
+
+
+def automation_runtime_diagnostics() -> Dict[str, object]:
+    diagnostics = dict(_AUTOMATION_RUNTIME_DIAGNOSTICS)
+    diagnostics["envelope_cache_entries"] = len(_AUTOMATION_ENVELOPE_CACHE)
+    diagnostics["envelope_cache_bytes"] = int(_AUTOMATION_ENVELOPE_CACHE_BYTES)
+    return diagnostics
+
+
+def compiled_envelope_for_parameter(parameter: str, duration_ms: float, sample_rate: int, tracks: List["TimelineParameterTrack"] | None = None) -> np.ndarray:
+    frame_count = max(0, int(math.ceil(max(0.0, float(duration_ms)) * float(sample_rate) / 1000.0)))
+    if frame_count <= 0:
+        return np.zeros(0, dtype=np.float32)
+    tracks_hash = timeline_tracks_hash(tracks)
+    _AUTOMATION_RUNTIME_DIAGNOSTICS["timeline_tracks_hash"] = tracks_hash
+    cache_key = (str(parameter or ""), int(round(float(duration_ms))), int(sample_rate), tracks_hash)
+    cached = _AUTOMATION_ENVELOPE_CACHE.get(cache_key)
+    if cached is not None and len(cached) == frame_count:
+        _AUTOMATION_ENVELOPE_CACHE.move_to_end(cache_key)
+        _AUTOMATION_RUNTIME_DIAGNOSTICS["envelope_cache_hits"] = int(_AUTOMATION_RUNTIME_DIAGNOSTICS.get("envelope_cache_hits", 0)) + 1
+        return cached.copy()
+    _AUTOMATION_RUNTIME_DIAGNOSTICS["envelope_cache_misses"] = int(_AUTOMATION_RUNTIME_DIAGNOSTICS.get("envelope_cache_misses", 0)) + 1
+    started = time.perf_counter()
+    time_ms = (np.arange(frame_count, dtype=np.float32) * 1000.0) / float(sample_rate)
+    envelope = np.zeros(frame_count, dtype=np.float32)
+    compiled_tracks = compiled_timeline_tracks(tracks)
+    for compiled in compiled_tracks:
+        if compiled.track_kind != "automation" or compiled.target_parameter != parameter:
+            continue
+        envelope += _compiled_track_envelope(compiled, time_ms)
+    low, high = _timeline_value_range(parameter, "automation")
+    envelope = np.clip(envelope, low, high).astype(np.float32)
+    _AUTOMATION_RUNTIME_DIAGNOSTICS["envelope_generation_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+    _store_envelope_cache(cache_key, envelope)
+    return envelope.copy()
+
+
 def _clamped_timeline_point_value(track: "TimelineParameterTrack", value: float) -> float:
     low, high = _timeline_value_range(track.target_parameter, track.track_kind)
     return float(np.clip(float(value), low, high))
@@ -393,52 +638,33 @@ def automation_value_for_parameter(parameter: str, time_ms: float, tracks: List[
 
 
 def automation_envelope_for_parameter(parameter: str, duration_ms: float, sample_rate: int, tracks: List["TimelineParameterTrack"] | None = None) -> np.ndarray:
-    """Sample a parameter automation envelope through the shared track evaluator."""
-    frame_count = max(0, int(math.ceil(max(0.0, float(duration_ms)) * float(sample_rate) / 1000.0)))
-    if frame_count <= 0:
-        return np.zeros(0, dtype=np.float32)
-    if not tracks:
-        return np.zeros(frame_count, dtype=np.float32)
-    time_ms = (np.arange(frame_count, dtype=np.float32) * 1000.0) / float(sample_rate)
-    envelope = np.zeros(frame_count, dtype=np.float32)
-    for track in tracks:
-        if getattr(track, "track_kind", "automation") != "automation" or getattr(track, "target_parameter", "") != parameter:
-            continue
-        if bool(getattr(track, "muted", False)) or not getattr(track, "points", None):
-            continue
-        values = np.zeros(frame_count, dtype=np.float32)
-        active = np.zeros(frame_count, dtype=bool)
-        points = _sorted_timeline_points(track)
-        if not points:
-            continue
-        point_times = np.array([point.time_ms for point in points], dtype=np.float32)
-        active = time_ms >= point_times[0]
-        if not np.any(active):
-            continue
-        if len(points) == 1:
-            values[active] = _clamped_timeline_point_value(track, points[0].value)
-        else:
-            for left, right in zip(points, points[1:]):
-                mask = (time_ms >= float(left.time_ms)) & (time_ms <= float(right.time_ms))
-                if not np.any(mask):
-                    continue
-                curve = left.curve if left.curve in AUTOMATION_CURVES else "linear"
-                if curve == "hold" or right.time_ms <= left.time_ms:
-                    values[mask] = _clamped_timeline_point_value(track, left.value)
-                else:
-                    ratio = np.clip((time_ms[mask] - float(left.time_ms)) / max(1.0, float(right.time_ms - left.time_ms)), 0.0, 1.0)
-                    if curve == "smooth":
-                        ratio = ratio * ratio * (3.0 - 2.0 * ratio)
-                    values[mask] = (float(left.value) + (float(right.value) - float(left.value)) * ratio).astype(np.float32)
-            values[time_ms > float(points[-1].time_ms)] = _clamped_timeline_point_value(track, points[-1].value)
-        envelope += values
-    low, high = _timeline_value_range(parameter, "automation")
-    return np.clip(envelope, low, high).astype(np.float32)
+    """Sample a parameter automation envelope through the compiled/cached evaluator."""
+    return compiled_envelope_for_parameter(parameter, duration_ms, sample_rate, tracks)
 
 
 def _timeline_evaluation_self_check() -> bool:
-    track = TimelineParameterTrack(points=[TimelineParameterPoint(0, 0.0, "linear"), TimelineParameterPoint(100, 10.0, "smooth"), TimelineParameterPoint(200, 5.0, "hold")])
-    return evaluate_timeline_track(track, 0) == 0.0 and evaluate_timeline_track(track, 100) == 10.0 and evaluate_timeline_track(track, 250) == 5.0
+    """Manual/debug parity check for legacy point scanning and compiled segment evaluation."""
+    cases = [
+        TimelineParameterTrack(name="empty", points=[]),
+        TimelineParameterTrack(name="one", points=[TimelineParameterPoint(100, 4.0, "linear")]),
+        TimelineParameterTrack(name="hold", points=[TimelineParameterPoint(0, 0.0, "hold"), TimelineParameterPoint(100, 10.0, "linear")]),
+        TimelineParameterTrack(name="linear", points=[TimelineParameterPoint(0, 0.0, "linear"), TimelineParameterPoint(100, 10.0, "linear")]),
+        TimelineParameterTrack(name="smooth", points=[TimelineParameterPoint(0, 0.0, "smooth"), TimelineParameterPoint(100, 10.0, "linear")]),
+        TimelineParameterTrack(name="muted", muted=True, points=[TimelineParameterPoint(0, 9.0, "linear")]),
+        TimelineParameterTrack(name="clamped", points=[TimelineParameterPoint(0, -99.0, "linear"), TimelineParameterPoint(100, 99.0, "unknown")]),
+    ]
+    sample_times = [-10.0, 0.0, 25.0, 50.0, 100.0, 250.0]
+    for track in cases:
+        compiled = compile_timeline_track(track)
+        for sample_ms in sample_times:
+            expected = evaluate_timeline_track(track, sample_ms)
+            actual = evaluate_compiled_track(compiled, sample_ms)
+            if expected is None or actual is None:
+                if expected is not None or actual is not None:
+                    return False
+            elif not math.isclose(float(expected), float(actual), rel_tol=1e-5, abs_tol=1e-4):
+                return False
+    return True
 
 
 @dataclass
@@ -7979,6 +8205,7 @@ class WaveToyWindow(QMainWindow):
         self.automation_track_table: QTableWidget | None = None
         self.automation_points_table: QTableWidget | None = None
         self.automation_status_label: QLabel | None = None
+        self.performance_runtime_inspector_label: QLabel | None = None
         self.auto_save_interval_ms = 5 * 60 * 1000
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self._auto_save_project_recovery)
@@ -11259,6 +11486,7 @@ class WaveToyWindow(QMainWindow):
         current_measure = int(current_beat // max(1, timing.time_signature_numerator)) + 1 if timing.enabled else 0
         active_note = self._active_note_at_ms(self.articulation_playhead_ms)
         pitch_curve_pitch = self._pitch_at_ms(self.articulation_playhead_ms)
+        automation_runtime = automation_runtime_diagnostics()
         metrics = {
             "active_phoneme": phoneme.name,
             "target_phoneme": target_name,
@@ -11300,6 +11528,13 @@ class WaveToyWindow(QMainWindow):
             "accentuation_db_max": float(self.latest_automation_diagnostics.get("accentuation_db_max", 0.0) or 0.0),
             "pitch_bias_cents_min": float(self.latest_automation_diagnostics.get("pitch_bias_cents_min", 0.0) or 0.0),
             "pitch_bias_cents_max": float(self.latest_automation_diagnostics.get("pitch_bias_cents_max", 0.0) or 0.0),
+            "automation_runtime_backend": automation_runtime.get("automation_runtime_backend", "compiled_segments"),
+            "compiled_track_count": int(automation_runtime.get("compiled_track_count", 0) or 0),
+            "active_compiled_track_count": int(automation_runtime.get("active_compiled_track_count", 0) or 0),
+            "envelope_cache_hits": int(automation_runtime.get("envelope_cache_hits", 0) or 0),
+            "envelope_cache_misses": int(automation_runtime.get("envelope_cache_misses", 0) or 0),
+            "envelope_generation_ms": float(automation_runtime.get("envelope_generation_ms", 0.0) or 0.0),
+            "timeline_tracks_hash": str(automation_runtime.get("timeline_tracks_hash", "") or ""),
         }
         lines = [
             "Speech Diagnostics (read-only)",
@@ -11368,6 +11603,12 @@ class WaveToyWindow(QMainWindow):
             f"accentuation_db_max: {metrics['accentuation_db_max']:.2f}",
             f"pitch_bias_cents_min: {metrics['pitch_bias_cents_min']:.2f}",
             f"pitch_bias_cents_max: {metrics['pitch_bias_cents_max']:.2f}",
+            f"automation_runtime_backend: {metrics['automation_runtime_backend']}",
+            f"compiled_tracks: {metrics['active_compiled_track_count']}/{metrics['compiled_track_count']}",
+            f"envelope_cache_hits: {metrics['envelope_cache_hits']}",
+            f"envelope_cache_misses: {metrics['envelope_cache_misses']}",
+            f"envelope_generation_ms: {metrics['envelope_generation_ms']:.3f}",
+            f"timeline_tracks_hash: {metrics['timeline_tracks_hash'][:12]}",
         ])
         self.speech_diagnostics_text.setPlainText("\n".join(lines))
 
@@ -15340,6 +15581,7 @@ class WaveToyWindow(QMainWindow):
             write_pitch_timeline_track_to_pitch_automation_points(track, self.pitch_automation_points)
 
     def _mark_performance_dirty(self, reason: str = "performance timeline changed") -> None:
+        clear_automation_envelope_cache()
         self._sync_automation_tracks_from_timeline()
         self._mark_project_dirty(reason)
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
@@ -15593,18 +15835,39 @@ class WaveToyWindow(QMainWindow):
         self.automation_points_table.blockSignals(False)
 
     def _update_performance_status(self) -> None:
-        if self.automation_status_label is None:
-            return
         track = self._selected_timeline_track()
-        accent_tracks = [item for item in self.timeline_tracks if item.target_parameter == "accentuation_db" and not item.muted]
-        pitch_tracks = [item for item in self.timeline_tracks if item.target_parameter == "pitch_bias_cents" and not item.muted]
-        value = self._selected_track_value_at_playhead()
-        value_text = f" sampled={value:.3f}" if value is not None else " sampled=—"
-        selected = f"Selected: {track.name} → {track.target_parameter}{value_text}" if track is not None else "No selected track"
-        self.automation_status_label.setText(
-            f"{len(self.timeline_tracks)} visible/editable timeline lane(s). {selected}. Playhead {self.performance_playhead_ms} ms. "
-            f"Render applies {len(accent_tracks)} accentuation_db and {len(pitch_tracks)} pitch_bias_cents lane(s) non-destructively."
-        )
+        compiled_tracks_now = compiled_timeline_tracks(self.timeline_tracks)
+        diagnostics = automation_runtime_diagnostics()
+        if self.automation_status_label is not None:
+            accent_tracks = [item for item in self.timeline_tracks if item.target_parameter == "accentuation_db" and not item.muted]
+            pitch_tracks = [item for item in self.timeline_tracks if item.target_parameter == "pitch_bias_cents" and not item.muted]
+            value = self._selected_track_value_at_playhead()
+            value_text = f" sampled={value:.3f}" if value is not None else " sampled=—"
+            selected = f"Selected: {track.name} → {track.target_parameter}{value_text}" if track is not None else "No selected track"
+            self.automation_status_label.setText(
+                f"{len(self.timeline_tracks)} visible/editable timeline lane(s). {selected}. Playhead {self.performance_playhead_ms} ms. "
+                f"Render applies {len(accent_tracks)} accentuation_db and {len(pitch_tracks)} pitch_bias_cents lane(s) non-destructively. "
+                f"Runtime {diagnostics.get('automation_runtime_backend')} • compiled {diagnostics.get('active_compiled_track_count')}/{diagnostics.get('compiled_track_count')} • "
+                f"cache hit/miss {diagnostics.get('envelope_cache_hits')}/{diagnostics.get('envelope_cache_misses')} • "
+                f"last envelope {diagnostics.get('envelope_generation_ms')} ms • hash {str(diagnostics.get('timeline_tracks_hash', ''))[:10]}"
+            )
+        if self.performance_runtime_inspector_label is not None:
+            if track is None:
+                self.performance_runtime_inspector_label.setText("Runtime inspector: no selected track.")
+            else:
+                compiled = next((item for item in compiled_tracks_now if item.track_id == track.track_id), compile_timeline_track(track))
+                value = evaluate_compiled_track(compiled, self.performance_playhead_ms)
+                values = [float(point.value) for point in compiled.points]
+                low = min(values) if values else 0.0
+                high = max(values) if values else 0.0
+                value_text = f"{value:.3f}" if value is not None else "—"
+                self.performance_runtime_inspector_label.setText(
+                    f"Runtime inspector — {track.name} • target {track.target_parameter} • points {len(compiled.points)} • "
+                    f"segments {len(compiled.segments)} • current {value_text} • "
+                    f"min {low:.3f} • max {high:.3f} • muted {track.muted} • visible {track.visible} • "
+                    f"source {compiled.source_hash[:10]}"
+                )
+
 
     def _save_current_performance_to_library(self, checked: bool = False) -> None:
         del checked
@@ -15633,19 +15896,20 @@ class WaveToyWindow(QMainWindow):
         frame_count = len(time_ms)
         if frame_count <= 0 or not track.points or track.muted:
             return np.zeros(frame_count, dtype=np.float32)
-        return np.array([evaluate_timeline_track(track, float(ms)) or 0.0 for ms in time_ms], dtype=np.float32)
+        compiled = compile_timeline_track(track)
+        return np.array([evaluate_compiled_track(compiled, float(ms)) or 0.0 for ms in time_ms], dtype=np.float32)
 
     def automation_value_for_parameter(self, parameter: str, time_ms: float) -> float:
         return automation_value_for_parameter(parameter, time_ms, self.timeline_tracks)
 
     def automation_envelope_for_parameter(self, parameter: str, duration_ms: float, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
-        return automation_envelope_for_parameter(parameter, duration_ms, sample_rate, self.timeline_tracks)
+        return compiled_envelope_for_parameter(parameter, duration_ms, sample_rate, self.timeline_tracks)
 
     def _selected_track_value_at_playhead(self) -> float | None:
         track = self._selected_timeline_track()
         if track is None:
             return None
-        return evaluate_timeline_track(track, self.performance_playhead_ms)
+        return evaluate_compiled_track(compile_timeline_track(track), self.performance_playhead_ms)
 
     def _voiced_region_mask_for_pitch_bias(self, audio: np.ndarray) -> np.ndarray:
         if audio.size == 0:
@@ -15702,8 +15966,8 @@ class WaveToyWindow(QMainWindow):
         self._sync_timeline_bridges()
         active_tracks = [track for track in self.timeline_tracks if track.track_kind == "automation" and not track.muted and track.points]
         duration_ms = (len(audio) * 1000.0) / float(SAMPLE_RATE)
-        db_envelope = automation_envelope_for_parameter("accentuation_db", duration_ms, SAMPLE_RATE, active_tracks)[:len(audio)]
-        pitch_envelope = automation_envelope_for_parameter("pitch_bias_cents", duration_ms, SAMPLE_RATE, active_tracks)[:len(audio)]
+        db_envelope = compiled_envelope_for_parameter("accentuation_db", duration_ms, SAMPLE_RATE, self.timeline_tracks)[:len(audio)]
+        pitch_envelope = compiled_envelope_for_parameter("pitch_bias_cents", duration_ms, SAMPLE_RATE, self.timeline_tracks)[:len(audio)]
         rendered = np.array(audio, dtype=np.float32, copy=True)
         targets = sorted({track.target_parameter for track in active_tracks if track.target_parameter in {"accentuation_db", "pitch_bias_cents"}})
         pitch_active = bool(np.any(np.abs(pitch_envelope) > 0.1))
@@ -15721,6 +15985,7 @@ class WaveToyWindow(QMainWindow):
             "pitch_bias_cents_min": round(float(np.min(pitch_envelope)), 3) if pitch_envelope.size else 0.0,
             "pitch_bias_cents_max": round(float(np.max(pitch_envelope)), 3) if pitch_envelope.size else 0.0,
             "pitch_bias_active": pitch_active,
+            **automation_runtime_diagnostics(),
         }
         self.latest_automation_diagnostics = diagnostics
         if self.continuous_diagnostics_latest is not None:
@@ -15785,6 +16050,11 @@ class WaveToyWindow(QMainWindow):
         self.automation_points_table.itemChanged.connect(lambda item: self._automation_point_table_changed(item.row(), item.column()))
         tables.addWidget(self.automation_points_table, 2)
         layout.addWidget(inspector, 1)
+
+        self.performance_runtime_inspector_label = QLabel("Runtime inspector: select a timeline track to inspect compiled segments.")
+        self.performance_runtime_inspector_label.setObjectName("symbolHint")
+        self.performance_runtime_inspector_label.setWordWrap(True)
+        layout.addWidget(self.performance_runtime_inspector_label)
 
         self.automation_status_label = QLabel("No performance timeline tracks yet.")
         self.automation_status_label.setObjectName("symbolHint")
