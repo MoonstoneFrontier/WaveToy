@@ -58,3 +58,7 @@ The **Voice Range** display now derives its register label from the current note
 - Note preview uses a simple sine tone rather than the full synthesis chain.
 - In-memory preview requires `sounddevice`; otherwise WaveToy shows the existing playback warning path.
 - The first animation/export representation remains future work and should start with generic human-readable JSON before target-specific formats.
+
+## Task 085 synchronization note
+
+Task 085 tightened live refresh behavior for the Task 084 controls. Visible wheel dialogs now refresh when the home note changes, spelling and layout changes redraw labels/tooltips without changing the stored pitch class, and closing a dialog stops any active in-memory preview when safe. The Circle of Fifths layout still uses the fixed fifths order listed above.

@@ -1271,6 +1271,7 @@ def note_interval_summary(note: str, main_note: str, spelling_mode: str = "Auto"
 
 def note_wheel_order(main_note: str = "A", layout_mode: str = NOTE_WHEEL_LAYOUT_INTERVALS) -> List[str]:
     if layout_mode == NOTE_WHEEL_LAYOUT_FIFTHS:
+        # TODO: Future UX may add an optional mode that rotates fifths around Home.
         return list(NOTE_FIFTHS_ORDER)
     home_index = NOTE_TO_INDEX.get(str(main_note or "A"), NOTE_TO_INDEX["A"])
     return [NOTE_NAMES[(home_index + semitones) % 12] for semitones in range(12)]
@@ -7205,9 +7206,11 @@ class NoteWheelDialog(QDialog):
         main_note: str = "A",
         parent: QWidget | None = None,
         preview_callback: Callable[[str, str], None] | None = None,
+        preview_stop_callback: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.preview_callback = preview_callback
+        self.preview_stop_callback = preview_stop_callback
         self.setWindowTitle(f"🎡 Emotional Note Wheel - {wave_name}")
         self.setModal(True)
 
@@ -7301,6 +7304,16 @@ class NoteWheelDialog(QDialog):
             return
         mode = self.interval_preview_combo.currentText() if target == "interval" and hasattr(self, "interval_preview_combo") else target
         self.preview_callback(mode, self.picker.selected_note())
+
+    def done(self, result: int) -> None:
+        if self.preview_stop_callback is not None:
+            self.preview_stop_callback()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:
+        if self.preview_stop_callback is not None:
+            self.preview_stop_callback()
+        super().closeEvent(event)
 
 
 class VocalTractCanvas(QWidget):
@@ -20042,6 +20055,7 @@ class WaveToyWindow(QMainWindow):
                 self.note_combo.currentText(),
                 self,
                 preview_callback=lambda mode, note, wt=wave_type: self._preview_note_wheel_audio(wt, mode, note),
+                preview_stop_callback=self._stop_note_wheel_preview,
             )
             dialog.setModal(False)
             dialog.setWindowFlag(Qt.Tool, True)
@@ -20066,11 +20080,36 @@ class WaveToyWindow(QMainWindow):
         dialog.activateWindow()
 
 
+    def _refresh_note_pitch_panels(self) -> None:
+        for wave_type in list(self.wave_pitch_labels):
+            self._update_wave_pitch_label(wave_type, refresh_dialog=False)
+
+    def _refresh_note_wheel_dialogs(self) -> None:
+        home_note = self.note_combo.currentText() if hasattr(self, "note_combo") else "A"
+        for wave_type, dialog in list(getattr(self, "note_wheel_dialogs", {}).items()):
+            if not dialog.isVisible():
+                continue
+            combo = self.wave_note_combos.get(wave_type) if hasattr(self, "wave_note_combos") else None
+            selected_note = combo.currentText() if combo is not None else None
+            dialog.refresh_labels(selected_note, home_note)
+            picker = getattr(dialog, "picker", None)
+            if picker is not None:
+                picker.update()
+
+    def _stop_note_wheel_preview(self) -> None:
+        if sd is None:
+            return
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
     def _preview_note_wheel_audio(self, wave_type: str, preview_mode: str, selected_note: str) -> None:
         """Play a short in-memory note-wheel preview without exporting audio."""
         if sd is None:
             self._show_playback_warning("Note wheel previews require sounddevice for in-memory playback.")
             return
+        self._stop_note_wheel_preview()
         try:
             follows = self.wave_follow_pitch_buttons.get(wave_type).isChecked() if wave_type in self.wave_follow_pitch_buttons else False
             home_note = self.note_combo.currentText() if hasattr(self, "note_combo") else "A"
@@ -20114,7 +20153,7 @@ class WaveToyWindow(QMainWindow):
         except Exception as exc:
             self._show_playback_warning(str(exc))
 
-    def _update_wave_pitch_label(self, wave_type: str) -> None:
+    def _update_wave_pitch_label(self, wave_type: str, refresh_dialog: bool = True) -> None:
         if wave_type not in self.wave_pitch_labels:
             return
         follows = self.wave_follow_pitch_buttons.get(wave_type).isChecked() if wave_type in self.wave_follow_pitch_buttons else True
@@ -20156,6 +20195,8 @@ class WaveToyWindow(QMainWindow):
         ):
             if widget is not None:
                 widget.setEnabled(not follows)
+        if refresh_dialog:
+            self._refresh_note_wheel_dialogs()
         if hasattr(self, "duration_slider"):
             self._update_all_wave_previews()
 
@@ -20240,13 +20281,8 @@ class WaveToyWindow(QMainWindow):
         self.base_pitch_label.setText(
             f"Pitch: {self._pitch_picture_text(midi_value)} • {emotional_note_text(note, note, 'Auto')} {emotion['label']} • {tuning_name} • {base_frequency:.1f} Hz"
         )
-        for wave_type in list(self.wave_pitch_labels):
-            self._update_wave_pitch_label(wave_type)
-        if hasattr(self, "note_wheel_dialogs"):
-            for wt, dialog in list(self.note_wheel_dialogs.items()):
-                combo = self.wave_note_combos.get(wt)
-                if combo is not None and dialog.isVisible():
-                    dialog.refresh_labels(combo.currentText(), note)
+        self._refresh_note_pitch_panels()
+        self._refresh_note_wheel_dialogs()
 
         self.pitch_start.blockSignals(True)
         self.pitch_end.blockSignals(True)

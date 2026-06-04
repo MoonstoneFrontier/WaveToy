@@ -44,3 +44,11 @@ The note wheel now defaults to an interval layout that places the home note at t
 The picker can preview the home note, selected note, or interval relationship. Interval preview supports melodic playback (home then selected note) and harmonic playback (both notes together at reduced gain). Preview audio is generated in memory as a short sine tone and is not saved to disk.
 
 The Voice Range label is derived from the current tuned frequency when available, with the octave slider used only as a fallback. The labels remain musical register descriptors and avoid implying gender, body size, or biological identity.
+
+## Task 085 note wheel state synchronization
+
+Visible note wheel dialogs and wave pitch-panel note buttons now refresh from the same current pitch state. Home note changes update interval names, semitone counts, moods, colors, relationship labels, center labels, and tooltips while preserving the selected pitch class.
+
+Displayed spelling remains separate from stored pitch class: Auto, Sharps, and Flats only change visual note names. Preview buttons use the current home and selected pitch classes for audio and current spelling only for labels. Starting a new note-wheel preview replaces any current preview, and closing the dialog stops preview playback when safe. Preview audio remains in memory and is not exported.
+
+Voice Range labels refresh from the current tuned frequency whenever note, octave/range, cents, tuning method, tuning root, or A4 reference changes. Slider-threshold wording remains a fallback and continues to use musical register descriptors only. The Circle of Fifths view intentionally keeps its fixed fifths order rather than rotating around Home.
