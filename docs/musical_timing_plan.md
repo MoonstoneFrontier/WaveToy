@@ -46,3 +46,7 @@ Musical snap applies only to phoneme block durations for now. Transition windows
 `PerformanceTimelineEngine` now owns musical overlay queries for performance-time consumers. It exposes beat grids, measure grids, current beat/measure, and snap-time calculation while continuing to respect `MusicalTimingSettings`.
 
 Musical Timing remains disabled by default. When disabled, the engine returns empty grid overlays and zero beat/measure state instead of quantizing speech. Transition timing stays millisecond-based even when grid snap is enabled for timeline point editing.
+
+## Task 083 note picker spelling note
+
+The note/color/mood picker remains a pitch-class picker, not a full music theory engine. Mood and color are calculated from the interval between the selected note and the current base note/key. Auto spelling uses sharp labels for sharp-oriented keys and flat labels for flat-oriented keys, with manual Sharps and Flats overrides for compact enharmonic display.
