@@ -162,6 +162,8 @@ AUTOMATION_TARGET_TO_LANE: Dict[str, str] = {
 AUTOMATION_CURVES = ["linear", "hold", "smooth"]
 AUTOMATION_DEFAULT_COLORS = ["#ffd166", "#5cdb95", "#24d7ff", "#f1c0e8", "#d7b9ff", "#ffadad"]
 TIMELINE_TRACK_KINDS = ["automation", "pitch", "stress", "musical_grid", "marker"]
+TIMELINE_BRIDGE_PREFIXES = ("stress_bridge_", "pitch_bridge_")
+PERFORMANCE_TIMING_TRANSACTION_COALESCE_SECONDS = 0.75
 TIMELINE_SAFE_VALUE_RANGES: Dict[str, Tuple[float, float]] = {
     "accentuation_db": (-24.0, 24.0),
     "pitch_bias_cents": (-1200.0, 1200.0),
@@ -170,6 +172,18 @@ TIMELINE_SAFE_VALUE_RANGES: Dict[str, Tuple[float, float]] = {
     "normalized_voice_box": (0.0, 1.0),
     "normalized_resonance": (0.0, 1.0),
 }
+
+
+def _is_timeline_bridge_track_id(track_id: str | None) -> bool:
+    return str(track_id or "").startswith(TIMELINE_BRIDGE_PREFIXES)
+
+
+def _deduplicated_timeline_tracks(tracks: List["TimelineParameterTrack"] | None) -> List["TimelineParameterTrack"]:
+    deduped_by_id: Dict[str, TimelineParameterTrack] = {}
+    for track in tracks or []:
+        track_obj = track if isinstance(track, TimelineParameterTrack) else TimelineParameterTrack.from_json_dict(track)
+        deduped_by_id[track_obj.track_id] = track_obj
+    return sorted(deduped_by_id.values(), key=lambda item: item.lane_order)
 
 
 def _timeline_value_range(target_parameter: str, track_kind: str = "automation") -> Tuple[float, float]:
@@ -2241,6 +2255,48 @@ class MusicalTimingSettings:
         return cls(**{field_name: data[field_name] for field_name in cls.__dataclass_fields__ if field_name in data}).clamped()
 
 
+@dataclass
+class PerformanceEditSnapshot:
+    """JSON-safe undo snapshot for performance timeline edits; never stores audio arrays."""
+
+    timeline_tracks: List[Dict[str, object]] = field(default_factory=list)
+    musical_timing_settings: Dict[str, object] = field(default_factory=dict)
+    selected_track_id: str | None = None
+    selected_point_index: int | None = None
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "timeline_tracks": [dict(track) for track in self.timeline_tracks],
+            "musical_timing_settings": dict(self.musical_timing_settings),
+            "selected_track_id": self.selected_track_id,
+            "selected_point_index": self.selected_point_index,
+        }
+
+
+@dataclass
+class PerformanceEditTransaction:
+    """In-memory transaction for undoing/redoing performance timeline edits."""
+
+    transaction_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    label: str = "Performance Edit"
+    created_at: str = field(default_factory=_utc_now_iso)
+    before_state: PerformanceEditSnapshot = field(default_factory=PerformanceEditSnapshot)
+    after_state: PerformanceEditSnapshot = field(default_factory=PerformanceEditSnapshot)
+    affected_track_ids: List[str] = field(default_factory=list)
+    reason: str = "performance timeline edited"
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "transaction_id": self.transaction_id,
+            "label": self.label,
+            "created_at": self.created_at,
+            "before_state": self.before_state.to_json_dict(),
+            "after_state": self.after_state.to_json_dict(),
+            "affected_track_ids": list(self.affected_track_ids),
+            "reason": self.reason,
+        }
+
+
 MUSICAL_SNAP_SUBDIVISIONS: Dict[str, float | None] = {
     "Off": None,
     "1/4": 1.0,
@@ -2329,9 +2385,12 @@ class PerformanceTimelineEngine:
         elif self.selected_point_index is not None:
             self.selected_point_index = int(np.clip(self.selected_point_index, 0, len(track.points) - 1))
 
-    def set_tracks(self, timeline_tracks: List[TimelineParameterTrack] | None, reason: str = "tracks changed") -> None:
-        self.timeline_tracks = list(timeline_tracks or [])
-        self.sync_bridges(reason=reason)
+    def set_tracks(self, timeline_tracks: List[TimelineParameterTrack] | None, reason: str = "tracks changed", *, sync_bridge_lanes: bool = True) -> None:
+        self.timeline_tracks = _deduplicated_timeline_tracks(timeline_tracks)
+        if sync_bridge_lanes:
+            self.sync_bridges(reason=reason)
+        else:
+            self._clamp_selection()
         self.mark_tracks_dirty(reason)
 
     def set_musical_timing_settings(self, settings: MusicalTimingSettings | None) -> None:
@@ -2356,8 +2415,7 @@ class PerformanceTimelineEngine:
         self.set_playhead_ms(0, reason="reset")
 
     def sync_bridges(self, pitch_points: List[PitchAutomationPoint] | None = None, stress_markers: List[SyllableStressMarker] | None = None, reason: str = "bridge lanes synced") -> List[TimelineParameterTrack]:
-        bridge_prefixes = ("stress_bridge_", "pitch_bridge_")
-        self.timeline_tracks = [track for track in self.timeline_tracks if not str(track.track_id).startswith(bridge_prefixes)]
+        self.timeline_tracks = [track for track in _deduplicated_timeline_tracks(self.timeline_tracks) if not _is_timeline_bridge_track_id(track.track_id)]
         self.stress_bridge_active = bool(stress_markers)
         self.pitch_bridge_active = bool(pitch_points)
         stress_track = stress_timeline_track_from_syllable_stress_markers(list(stress_markers or []))
@@ -8428,6 +8486,7 @@ class PerformanceTimelineCanvas(QWidget):
         pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
         track, point_index = self._hit_test(pos)
         if track is not None and point_index is not None:
+            self.owner._begin_performance_transaction("Move Point", "timeline point dragged")
             self.owner._select_timeline_point(track.track_id, point_index)
             self.drag_track_id = track.track_id
             self.drag_point_index = point_index
@@ -8445,6 +8504,7 @@ class PerformanceTimelineCanvas(QWidget):
         del event
         self.drag_track_id = None
         self.drag_point_index = None
+        self.owner._commit_performance_transaction()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt override
         pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
@@ -8505,6 +8565,15 @@ class WaveToyWindow(QMainWindow):
         self.automation_points_table: QTableWidget | None = None
         self.automation_status_label: QLabel | None = None
         self.performance_runtime_inspector_label: QLabel | None = None
+        self.performance_undo_stack: List[PerformanceEditTransaction] = []
+        self.performance_redo_stack: List[PerformanceEditTransaction] = []
+        self.performance_undo_stack_limit = 50
+        self._performance_pending_transaction: Tuple[str, str, PerformanceEditSnapshot] | None = None
+        self._performance_restoring_transaction = False
+        self._last_performance_transaction_monotonic = 0.0
+        self.performance_last_undo_redo_label = "Undo/redo idle"
+        self.performance_undo_action: QAction | None = None
+        self.performance_redo_action: QAction | None = None
         self.auto_save_interval_ms = 5 * 60 * 1000
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self._auto_save_project_recovery)
@@ -9006,6 +9075,10 @@ class WaveToyWindow(QMainWindow):
             self.performance_timeline_engine.set_tracks(self.timeline_tracks)
             self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
         self._sync_automation_tracks_from_timeline()
+        self.performance_undo_stack.clear()
+        self.performance_redo_stack.clear()
+        self.performance_last_undo_redo_label = "Undo/redo idle"
+        self._update_performance_undo_actions()
         self.performance_timeline_engine.set_selected_track(self.timeline_tracks[0].track_id if self.timeline_tracks else None)
         self._sync_performance_state_from_engine()
         profiles = data.get("profiles", {})
@@ -9501,6 +9574,17 @@ class WaveToyWindow(QMainWindow):
         refresh_library_action = QAction("Refresh Speech Asset Library", self)
         refresh_library_action.triggered.connect(self._refresh_asset_library_view)
         library_menu.addAction(refresh_library_action)
+
+        edit_menu = self.menuBar().addMenu("Edit")
+        self.performance_undo_action = QAction("Undo Performance Edit", self)
+        self.performance_undo_action.setShortcut(QKeySequence.Undo)
+        self.performance_undo_action.triggered.connect(self._undo_performance_edit)
+        edit_menu.addAction(self.performance_undo_action)
+        self.performance_redo_action = QAction("Redo Performance Edit", self)
+        self.performance_redo_action.setShortcut(QKeySequence("Ctrl+Shift+Z"))
+        self.performance_redo_action.triggered.connect(self._redo_performance_edit)
+        edit_menu.addAction(self.performance_redo_action)
+        self._update_performance_undo_actions()
 
         view_menu = self.menuBar().addMenu("View")
         diagnostics_action = QAction("Speech Diagnostics", self)
@@ -13083,20 +13167,26 @@ class WaveToyWindow(QMainWindow):
         self.performance_timeline_engine.set_musical_timing_settings(self.musical_timing_settings)
         self.performance_timeline_engine.mark_timing_dirty("musical timing changed")
         self.articulation_word_render_settings["musical_timing_settings"] = self.musical_timing_settings.to_json_dict()
+        self._refresh_musical_timing_controls()
         if self.articulation_timeline_canvas is not None:
             self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
         self._mark_articulation_word_dirty()
         self._update_speech_diagnostics_panel(self.current_phoneme)
 
     def _set_musical_timing_enabled(self, enabled: bool) -> None:
+        before = self._performance_edit_snapshot()
         self.musical_timing_settings.enabled = bool(enabled)
         self._sync_musical_timing_to_timeline()
+        self._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
 
     def _set_musical_bpm(self, bpm: float) -> None:
+        before = self._performance_edit_snapshot()
         self.musical_timing_settings.bpm = float(bpm)
         self._sync_musical_timing_to_timeline()
+        self._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
 
     def _set_musical_time_signature(self, text: str) -> None:
+        before = self._performance_edit_snapshot()
         try:
             numerator_text, denominator_text = str(text).split("/", 1)
             self.musical_timing_settings.time_signature_numerator = int(numerator_text)
@@ -13105,19 +13195,26 @@ class WaveToyWindow(QMainWindow):
             self.musical_timing_settings.time_signature_numerator = 4
             self.musical_timing_settings.time_signature_denominator = 4
         self._sync_musical_timing_to_timeline()
+        self._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
 
     def _set_musical_snap_subdivision(self, text: str) -> None:
+        before = self._performance_edit_snapshot()
         self.musical_timing_settings.snap_subdivision = str(text)
         self.musical_timing_settings.snap_enabled = str(text) != "Off"
         self._sync_musical_timing_to_timeline()
+        self._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
 
     def _set_musical_count_in_enabled(self, enabled: bool) -> None:
+        before = self._performance_edit_snapshot()
         self.musical_timing_settings.count_in_enabled = bool(enabled)
         self._sync_musical_timing_to_timeline()
+        self._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
 
     def _set_musical_grid_visible(self, enabled: bool) -> None:
+        before = self._performance_edit_snapshot()
         self.musical_timing_settings.grid_visible = bool(enabled)
         self._sync_musical_timing_to_timeline()
+        self._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
 
     def _set_singing_mode_enabled(self, enabled: bool) -> None:
         self.articulation_word_render_settings["singing_mode_enabled"] = bool(enabled)
@@ -15838,6 +15935,193 @@ class WaveToyWindow(QMainWindow):
         layout.addWidget(filters, 1)
         return panel
 
+    def _normalized_performance_snapshot(self, snapshot: PerformanceEditSnapshot) -> PerformanceEditSnapshot:
+        tracks = [TimelineParameterTrack.from_json_dict(item) for item in snapshot.timeline_tracks if isinstance(item, dict)]
+        return PerformanceEditSnapshot(
+            timeline_tracks=[track.to_json_dict() for track in _deduplicated_timeline_tracks(tracks)],
+            musical_timing_settings=MusicalTimingSettings.from_json_dict(snapshot.musical_timing_settings).to_json_dict(),
+            selected_track_id=snapshot.selected_track_id,
+            selected_point_index=snapshot.selected_point_index,
+        )
+
+    def _performance_edit_snapshot(self) -> PerformanceEditSnapshot:
+        """Capture JSON-safe performance timeline state for in-memory undo/redo."""
+        engine = self.performance_timeline_engine
+        return self._normalized_performance_snapshot(
+            PerformanceEditSnapshot(
+                timeline_tracks=[track.to_json_dict() for track in engine.timeline_tracks],
+                musical_timing_settings=self.musical_timing_settings.to_json_dict(),
+                selected_track_id=engine.selected_track_id,
+                selected_point_index=engine.selected_point_index,
+            )
+        )
+
+    def _performance_snapshot_key(self, snapshot: PerformanceEditSnapshot, *, include_selection: bool = True) -> str:
+        payload = self._normalized_performance_snapshot(snapshot).to_json_dict()
+        if not include_selection:
+            payload.pop("selected_track_id", None)
+            payload.pop("selected_point_index", None)
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def _performance_affected_track_ids(self, before: PerformanceEditSnapshot, after: PerformanceEditSnapshot) -> List[str]:
+        before_ids = {str(track.get("track_id")) for track in before.timeline_tracks if isinstance(track, dict)}
+        after_ids = {str(track.get("track_id")) for track in after.timeline_tracks if isinstance(track, dict)}
+        return sorted(track_id for track_id in before_ids | after_ids if track_id)
+
+    def _push_performance_transaction(self, label: str, reason: str, before: PerformanceEditSnapshot) -> None:
+        if self._performance_restoring_transaction:
+            return
+        before = self._normalized_performance_snapshot(before)
+        after = self._performance_edit_snapshot()
+        if self._performance_snapshot_key(before, include_selection=False) == self._performance_snapshot_key(after, include_selection=False):
+            return
+        label = str(label or "Performance Edit")
+        reason = str(reason or label or "performance timeline edited")
+        now = time.monotonic()
+        can_coalesce = (
+            label == "Musical Timing Change"
+            and self.performance_undo_stack
+            and not self.performance_redo_stack
+            and self.performance_undo_stack[-1].label == label
+            and now - self._last_performance_transaction_monotonic <= PERFORMANCE_TIMING_TRANSACTION_COALESCE_SECONDS
+        )
+        if can_coalesce:
+            transaction = self.performance_undo_stack[-1]
+            transaction.after_state = after
+            transaction.affected_track_ids = self._performance_affected_track_ids(transaction.before_state, after)
+            transaction.created_at = _utc_now_iso()
+        else:
+            transaction = PerformanceEditTransaction(
+                label=label,
+                reason=reason,
+                before_state=before,
+                after_state=after,
+                affected_track_ids=self._performance_affected_track_ids(before, after),
+            )
+            self.performance_undo_stack.append(transaction)
+            if len(self.performance_undo_stack) > self.performance_undo_stack_limit:
+                self.performance_undo_stack = self.performance_undo_stack[-self.performance_undo_stack_limit:]
+        self._last_performance_transaction_monotonic = now
+        self.performance_redo_stack.clear()
+        self.performance_last_undo_redo_label = f"Undo available: {transaction.label}"
+        self._update_performance_undo_actions()
+
+    def _begin_performance_transaction(self, label: str, reason: str | None = None) -> None:
+        if self._performance_pending_transaction is None:
+            self._performance_pending_transaction = (str(label or "Performance Edit"), str(reason or label or "performance timeline edited"), self._performance_edit_snapshot())
+
+    def _commit_performance_transaction(self) -> None:
+        if self._performance_pending_transaction is None:
+            return
+        label, reason, before = self._performance_pending_transaction
+        self._performance_pending_transaction = None
+        self._push_performance_transaction(label, reason, before)
+
+    def _refresh_musical_timing_controls(self) -> None:
+        """Reflect restored musical timing settings without creating more transactions."""
+        widgets = [
+            getattr(self, "musical_timing_enabled_checkbox", None),
+            getattr(self, "musical_bpm_spin", None),
+            getattr(self, "musical_time_signature_combo", None),
+            getattr(self, "musical_snap_combo", None),
+            getattr(self, "musical_count_in_checkbox", None),
+            getattr(self, "musical_grid_checkbox", None),
+        ]
+        for widget in widgets:
+            if widget is not None:
+                widget.blockSignals(True)
+        try:
+            if getattr(self, "musical_timing_enabled_checkbox", None) is not None:
+                self.musical_timing_enabled_checkbox.setChecked(self.musical_timing_settings.enabled)
+            if getattr(self, "musical_bpm_spin", None) is not None:
+                self.musical_bpm_spin.setValue(float(self.musical_timing_settings.bpm))
+            if getattr(self, "musical_time_signature_combo", None) is not None:
+                self.musical_time_signature_combo.setCurrentText(f"{self.musical_timing_settings.time_signature_numerator}/{self.musical_timing_settings.time_signature_denominator}")
+            if getattr(self, "musical_snap_combo", None) is not None:
+                self.musical_snap_combo.setCurrentText(self.musical_timing_settings.snap_subdivision if self.musical_timing_settings.snap_enabled else "Off")
+            if getattr(self, "musical_count_in_checkbox", None) is not None:
+                self.musical_count_in_checkbox.setChecked(self.musical_timing_settings.count_in_enabled)
+            if getattr(self, "musical_grid_checkbox", None) is not None:
+                self.musical_grid_checkbox.setChecked(self.musical_timing_settings.grid_visible)
+        finally:
+            for widget in widgets:
+                if widget is not None:
+                    widget.blockSignals(False)
+
+    def _apply_performance_edit_snapshot(self, snapshot: PerformanceEditSnapshot, reason: str) -> None:
+        snapshot = self._normalized_performance_snapshot(snapshot)
+        tracks = [TimelineParameterTrack.from_json_dict(item) for item in snapshot.timeline_tracks if isinstance(item, dict)]
+        bridge_tracks = [track for track in tracks if _is_timeline_bridge_track_id(track.track_id)]
+        base_tracks = [track for track in tracks if not _is_timeline_bridge_track_id(track.track_id)]
+        self._performance_restoring_transaction = True
+        try:
+            for track in bridge_tracks:
+                if track.track_id == "stress_bridge_syllable_markers":
+                    write_stress_timeline_track_to_syllable_stress_markers(track, self.syllable_stress_markers)
+                elif track.track_id == "pitch_bridge_pitch_curve":
+                    write_pitch_timeline_track_to_pitch_automation_points(track, self.pitch_automation_points)
+            self.musical_timing_settings = MusicalTimingSettings.from_json_dict(snapshot.musical_timing_settings)
+            self.performance_timeline_engine.set_musical_timing_settings(self.musical_timing_settings)
+            self.performance_timeline_engine.set_tracks(base_tracks, reason=reason, sync_bridge_lanes=False)
+            self._sync_timeline_bridges()
+            self.performance_timeline_engine.set_selected_point(snapshot.selected_track_id, snapshot.selected_point_index)
+            self.performance_timeline_engine.invalidate_runtime_cache(reason)
+            self._sync_automation_tracks_from_timeline()
+            self._sync_performance_state_from_engine()
+            self.articulation_word_render_settings["musical_timing_settings"] = self.musical_timing_settings.to_json_dict()
+            self._refresh_musical_timing_controls()
+            if self.articulation_timeline_canvas is not None:
+                self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
+            self._mark_project_dirty(reason)
+            self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+            self.articulation_word_render_signature = None
+            self.articulation_last_word_render_path = None
+            self.articulation_last_word_render_created_at = None
+            self._update_articulation_word_status()
+            self._refresh_performance_tables()
+            self._update_articulation_waveform_diagnostics_canvas()
+            self._update_speech_diagnostics_panel(self.current_phoneme)
+        finally:
+            self._performance_restoring_transaction = False
+
+    def _undo_performance_edit(self, checked: bool = False) -> None:
+        del checked
+        if not self.performance_undo_stack:
+            self.performance_last_undo_redo_label = "Nothing to undo"
+            self._update_performance_undo_actions()
+            self._update_performance_status()
+            return
+        transaction = self.performance_undo_stack.pop()
+        self.performance_redo_stack.append(transaction)
+        self._apply_performance_edit_snapshot(transaction.before_state, f"undo: {transaction.reason}")
+        self.performance_last_undo_redo_label = f"Undid: {transaction.label}"
+        self._update_performance_undo_actions()
+        self._update_performance_status()
+
+    def _redo_performance_edit(self, checked: bool = False) -> None:
+        del checked
+        if not self.performance_redo_stack:
+            self.performance_last_undo_redo_label = "Nothing to redo"
+            self._update_performance_undo_actions()
+            self._update_performance_status()
+            return
+        transaction = self.performance_redo_stack.pop()
+        self.performance_undo_stack.append(transaction)
+        self._apply_performance_edit_snapshot(transaction.after_state, f"redo: {transaction.reason}")
+        self.performance_last_undo_redo_label = f"Redid: {transaction.label}"
+        self._update_performance_undo_actions()
+        self._update_performance_status()
+
+    def _update_performance_undo_actions(self) -> None:
+        if self.performance_undo_action is not None:
+            label = self.performance_undo_stack[-1].label if self.performance_undo_stack else "Performance Edit"
+            self.performance_undo_action.setText(f"Undo Performance Edit: {label}" if self.performance_undo_stack else "Undo Performance Edit")
+            self.performance_undo_action.setEnabled(bool(self.performance_undo_stack))
+        if self.performance_redo_action is not None:
+            label = self.performance_redo_stack[-1].label if self.performance_redo_stack else "Performance Edit"
+            self.performance_redo_action.setText(f"Redo Performance Edit: {label}" if self.performance_redo_stack else "Redo Performance Edit")
+            self.performance_redo_action.setEnabled(bool(self.performance_redo_stack))
+
     def _performance_asset_snapshot(self) -> PerformanceAsset:
         self._sync_timeline_bridges()
         self.performance_asset.timeline_tracks = list(self.performance_timeline_engine.timeline_tracks)
@@ -15951,12 +16235,14 @@ class WaveToyWindow(QMainWindow):
         )
         if target in {"accentuation_db", "pitch_bias_cents"}:
             track.points.append(TimelineParameterPoint(time_ms=0, value=0.0, curve="linear"))
+        before = self._performance_edit_snapshot()
         self.timeline_tracks.append(track)
         self.performance_timeline_engine.set_tracks(self.timeline_tracks, reason="timeline track added")
         self.performance_timeline_engine.set_selected_point(track.track_id, 0 if track.points else None)
         self._sync_performance_state_from_engine()
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline track added")
+        self._push_performance_transaction("Add Track", "timeline track added", before)
 
     def _delete_selected_automation_track(self, checked: bool = False) -> None:
         del checked
@@ -15967,6 +16253,7 @@ class WaveToyWindow(QMainWindow):
         if track.track_kind in {"stress", "pitch"} and str(track.track_id).startswith(("stress_bridge_", "pitch_bridge_")):
             QMessageBox.information(self, "Performance", "Bridge lanes are derived from existing stress or pitch data; delete the source data instead.")
             return
+        before = self._performance_edit_snapshot()
         self.timeline_tracks = [item for item in self.timeline_tracks if item.track_id != track.track_id]
         self.performance_timeline_engine.set_tracks(self.timeline_tracks, reason="timeline track deleted")
         self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
@@ -15975,6 +16262,7 @@ class WaveToyWindow(QMainWindow):
         self._sync_performance_state_from_engine()
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline track deleted")
+        self._push_performance_transaction("Delete Track", "timeline track deleted", before)
 
     def _add_automation_point(self, checked: bool = False) -> None:
         del checked
@@ -15982,6 +16270,7 @@ class WaveToyWindow(QMainWindow):
         if track is None:
             QMessageBox.information(self, "Performance", "Add or select a timeline track first.")
             return
+        before = self._performance_edit_snapshot()
         next_time = (track.points[-1].time_ms + 250) if track.points else 0
         point = TimelineParameterPoint(time_ms=next_time, value=0.0, curve="linear")
         self._clamp_timeline_point(track, point)
@@ -15992,11 +16281,13 @@ class WaveToyWindow(QMainWindow):
         self._apply_bridge_track_edits(track)
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline point added")
+        self._push_performance_transaction("Add Point", "timeline point added", before)
 
     def _add_timeline_point_from_canvas(self, track_id: str, time_ms: int, value: float) -> None:
         track = next((item for item in self.timeline_tracks if item.track_id == track_id), None)
         if track is None:
             return
+        before = self._performance_edit_snapshot()
         point = TimelineParameterPoint(time_ms=time_ms, value=value, curve="linear")
         self._clamp_timeline_point(track, point)
         track.points.append(point)
@@ -16005,6 +16296,7 @@ class WaveToyWindow(QMainWindow):
         self._select_timeline_point(track.track_id, track.points.index(point))
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline point double-click added")
+        self._push_performance_transaction("Add Point", "timeline point double-click added", before)
 
     def _remove_selected_automation_point(self, checked: bool = False) -> None:
         del checked
@@ -16015,12 +16307,14 @@ class WaveToyWindow(QMainWindow):
         if track is None or row is None or row < 0 or row >= len(track.points):
             QMessageBox.information(self, "Performance", "Select a timeline point first.")
             return
+        before = self._performance_edit_snapshot()
         del track.points[row]
         self.performance_timeline_engine.set_selected_point(track.track_id, min(row, len(track.points) - 1) if track.points else None)
         self._sync_performance_state_from_engine()
         self._apply_bridge_track_edits(track)
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline point removed")
+        self._push_performance_transaction("Delete Point", "timeline point removed", before)
 
     def _select_timeline_point(self, track_id: str, point_index: int | None) -> None:
         self.performance_timeline_engine.set_selected_point(track_id, point_index)
@@ -16042,6 +16336,7 @@ class WaveToyWindow(QMainWindow):
             return
         tracks = self.performance_timeline_canvas._tracks()
         lane = self.performance_timeline_canvas._lane_rect(tracks.index(track), len(tracks)) if track in tracks else QRectF()
+        before = None if self._performance_pending_transaction is not None else self._performance_edit_snapshot()
         point = track.points[point_index]
         point.time_ms = time_ms
         point.value = self.performance_timeline_canvas._value_for_y(track, y, lane)
@@ -16052,6 +16347,8 @@ class WaveToyWindow(QMainWindow):
         self._apply_bridge_track_edits(track)
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline point dragged")
+        if before is not None:
+            self._push_performance_transaction("Move Point", "timeline point dragged", before)
 
     def _set_performance_playhead_ms(self, time_ms: int, *, scrub: bool = False) -> None:
         self.performance_timeline_engine.scrub_to_ms(time_ms) if scrub else self.performance_timeline_engine.set_playhead_ms(time_ms, reason="articulation playback")
@@ -16076,6 +16373,8 @@ class WaveToyWindow(QMainWindow):
         item = self.automation_track_table.item(row, column) if self.automation_track_table is not None else None
         if item is None:
             return
+        before = self._performance_edit_snapshot()
+        label = "Rename Track" if column == 1 else "Mute Track" if column == 4 else "Toggle Track Visibility" if column == 5 else "Edit Track"
         track = self.timeline_tracks[row]
         if column == 1:
             track.name = item.text().strip() or track.name
@@ -16085,6 +16384,7 @@ class WaveToyWindow(QMainWindow):
             track.visible = item.checkState() == Qt.Checked
         self._refresh_performance_canvas()
         self._mark_performance_dirty("timeline track edited")
+        self._push_performance_transaction(label, "timeline track edited", before)
 
     def _automation_point_table_changed(self, row: int, column: int) -> None:
         track = self._selected_timeline_track()
@@ -16093,6 +16393,8 @@ class WaveToyWindow(QMainWindow):
         item = self.automation_points_table.item(row, column) if self.automation_points_table is not None else None
         if item is None:
             return
+        before = self._performance_edit_snapshot()
+        label = "Move Point" if column == 0 else "Edit Point Value" if column == 1 else "Edit Point Curve" if column == 2 else "Edit Point"
         point = track.points[row]
         try:
             if column == 0:
@@ -16112,6 +16414,7 @@ class WaveToyWindow(QMainWindow):
         self._apply_bridge_track_edits(track)
         self._refresh_automation_points_table()
         self._mark_performance_dirty("timeline point edited")
+        self._push_performance_transaction(label, "timeline point edited", before)
 
     def _refresh_performance_tables(self) -> None:
         self._sync_timeline_bridges()
@@ -16181,7 +16484,8 @@ class WaveToyWindow(QMainWindow):
                 f"Render applies {len(accent_tracks)} accentuation_db and {len(pitch_tracks)} pitch_bias_cents lane(s) non-destructively. "
                 f"Runtime {diagnostics.get('backend')} • compiled {diagnostics.get('active_compiled_track_count')}/{diagnostics.get('compiled_track_count')} • "
                 f"cache hit/miss {diagnostics.get('cache_hits')}/{diagnostics.get('cache_misses')} • "
-                f"last envelope {diagnostics.get('last_generation_ms')} ms • hash {str(diagnostics.get('timeline_hash', ''))[:10]}"
+                f"last envelope {diagnostics.get('last_generation_ms')} ms • hash {str(diagnostics.get('timeline_hash', ''))[:10]} • "
+                f"{self.performance_last_undo_redo_label}"
             )
         if self.performance_runtime_inspector_label is not None:
             if track is None:
