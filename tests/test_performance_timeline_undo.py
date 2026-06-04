@@ -74,10 +74,12 @@ try:
         MusicalTimingSettings,
         PerformanceAsset,
         PerformanceTimelineEngine,
+        PitchAutomationPoint,
         SyllableStressMarker,
         TimelineParameterPoint,
         TimelineParameterTrack,
         WaveToyWindow,
+        pitch_timeline_track_from_pitch_automation_points,
         stress_timeline_track_from_syllable_stress_markers,
     )
 except ImportError:
@@ -87,10 +89,12 @@ except ImportError:
         MusicalTimingSettings,
         PerformanceAsset,
         PerformanceTimelineEngine,
+        PitchAutomationPoint,
         SyllableStressMarker,
         TimelineParameterPoint,
         TimelineParameterTrack,
         WaveToyWindow,
+        pitch_timeline_track_from_pitch_automation_points,
         stress_timeline_track_from_syllable_stress_markers,
     )
 
@@ -285,3 +289,163 @@ def test_undo_redo_after_project_reload_are_runtime_only():
     assert [track.track_id for track in reloaded.performance_timeline_engine.timeline_tracks] == ["track_a"]
     assert reloaded.performance_undo_stack == []
     assert reloaded.performance_redo_stack == []
+
+
+class _FakeAction:
+    def __init__(self):
+        self.text = ""
+        self.enabled = None
+
+    def setText(self, text):
+        self.text = text
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+
+
+def test_stack_limit_evicts_oldest_transaction_safely():
+    window = make_harness()
+    window.performance_undo_stack_limit = 3
+
+    for index in range(5):
+        track = make_track(f"track_{index}")
+        transact(window, f"Add Track {index}", lambda track=track: window.performance_timeline_engine.set_tracks([*window.performance_timeline_engine.timeline_tracks, track], reason="stress add"))
+
+    assert len(window.performance_undo_stack) == 3
+    assert [transaction.label for transaction in window.performance_undo_stack] == ["Add Track 2", "Add Track 3", "Add Track 4"]
+
+    window._undo_performance_edit()
+    window._undo_performance_edit()
+    window._undo_performance_edit()
+
+    assert [track.track_id for track in window.performance_timeline_engine.timeline_tracks] == ["track_0", "track_1"]
+    assert window.performance_undo_stack == []
+    assert len(window.performance_redo_stack) == 3
+
+
+def test_redo_stack_clears_after_new_edit_and_labels_update():
+    window = make_harness()
+    window.performance_undo_action = _FakeAction()
+    window.performance_redo_action = _FakeAction()
+    first = make_track("first")
+    second = make_track("second")
+    replacement = make_track("replacement")
+
+    transact(window, "Add First", lambda: window.performance_timeline_engine.set_tracks([first], reason="first"))
+    transact(window, "Add Second", lambda: window.performance_timeline_engine.set_tracks([first, second], reason="second"))
+    assert window.performance_undo_action.text == "Undo Performance Edit: Add Second"
+    assert window.performance_redo_action.text == "Redo Performance Edit"
+    assert window.performance_redo_action.enabled is False
+
+    window._undo_performance_edit()
+    assert window.performance_redo_action.text == "Redo Performance Edit: Add Second"
+    assert window.performance_redo_action.enabled is True
+
+    transact(window, "Add Replacement", lambda: window.performance_timeline_engine.set_tracks([first, replacement], reason="replacement"))
+
+    assert window.performance_redo_stack == []
+    assert window.performance_undo_action.text == "Undo Performance Edit: Add Replacement"
+    assert window.performance_redo_action.text == "Redo Performance Edit"
+    assert window.performance_redo_action.enabled is False
+
+
+def test_selection_index_clamps_after_point_deletion_restore():
+    track = make_track()
+    track.points.extend([
+        TimelineParameterPoint(time_ms=250, value=2.0),
+        TimelineParameterPoint(time_ms=500, value=4.0),
+    ])
+    window = make_harness([track])
+    window.performance_timeline_engine.set_selected_point(track.track_id, 2)
+
+    before = window._performance_edit_snapshot()
+    del track.points[2]
+    window.performance_timeline_engine.set_selected_point(track.track_id, 2)
+    window._push_performance_transaction("Delete Point", "delete selected", before)
+
+    assert window.performance_timeline_engine.selected_point_index == 1
+    window._undo_performance_edit()
+    assert window.performance_timeline_engine.selected_point_index == 2
+    window._redo_performance_edit()
+    assert window.performance_timeline_engine.selected_point_index == 1
+
+
+def test_selection_only_change_does_not_create_transaction():
+    track = make_track()
+    track.points.append(TimelineParameterPoint(time_ms=250, value=2.0))
+    window = make_harness([track])
+
+    before = window._performance_edit_snapshot()
+    window.performance_timeline_engine.set_selected_point(track.track_id, 1)
+    window._push_performance_transaction("Select Point", "selection only", before)
+
+    assert window.performance_undo_stack == []
+
+
+def test_no_recursive_transaction_during_undo_restore():
+    track = make_track()
+    window = make_harness([track])
+    transact(window, "Move Point", lambda: setattr(track.points[0], "time_ms", 500))
+
+    original_apply = window._apply_performance_edit_snapshot
+
+    def recursive_apply(snapshot, reason):
+        original_apply(snapshot, reason)
+        before = window._performance_edit_snapshot()
+        window.performance_timeline_engine.mark_tracks_dirty("callback-like dirty")
+        window._push_performance_transaction("Recursive Dirty", "callback-like dirty", before)
+
+    window._apply_performance_edit_snapshot = types.MethodType(lambda self, snapshot, reason: recursive_apply(snapshot, reason), window)
+
+    window._undo_performance_edit()
+
+    assert [transaction.label for transaction in window.performance_undo_stack] == []
+    assert [transaction.label for transaction in window.performance_redo_stack] == ["Move Point"]
+
+
+def test_pitch_bridge_restore_deduplicates_tracks_and_updates_source_points():
+    window = make_harness()
+    pitch_point = PitchAutomationPoint(time_ms=0.0, pitch_hz=220.0, curve="linear", source="manual")
+    window.pitch_automation_points = [pitch_point]
+    original_bridge = pitch_timeline_track_from_pitch_automation_points([pitch_point])
+    edited_bridge = pitch_timeline_track_from_pitch_automation_points([pitch_point])
+    edited_bridge.points[0].value = 440.0
+    edited_bridge.points[0].time_ms = 125
+    snapshot = window._normalized_performance_snapshot(
+        window._performance_edit_snapshot().__class__(
+            timeline_tracks=[original_bridge.to_json_dict(), edited_bridge.to_json_dict()],
+            musical_timing_settings=window.musical_timing_settings.to_json_dict(),
+        )
+    )
+
+    window._apply_performance_edit_snapshot(snapshot, "restore pitch bridge")
+
+    bridge_tracks = [track for track in window.performance_timeline_engine.timeline_tracks if track.track_id == "pitch_bridge_pitch_curve"]
+    assert len(bridge_tracks) == 1
+    assert window.pitch_automation_points[0].pitch_hz == pytest.approx(440.0)
+    assert window.pitch_automation_points[0].time_ms == pytest.approx(125.0)
+
+
+def test_timing_coalescing_starts_new_entry_after_window():
+    window = make_harness()
+
+    before = window._performance_edit_snapshot()
+    window.musical_timing_settings.bpm = 130.0
+    window.performance_timeline_engine.set_musical_timing_settings(window.musical_timing_settings)
+    window._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
+
+    window._last_performance_transaction_monotonic -= 999.0
+    before = window._performance_edit_snapshot()
+    window.musical_timing_settings.bpm = 150.0
+    window.performance_timeline_engine.set_musical_timing_settings(window.musical_timing_settings)
+    window._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
+
+    assert len(window.performance_undo_stack) == 2
+    assert window.performance_undo_stack[0].after_state.musical_timing_settings["bpm"] == 130.0
+    assert window.performance_undo_stack[1].before_state.musical_timing_settings["bpm"] == 130.0
+    assert window.performance_undo_stack[1].after_state.musical_timing_settings["bpm"] == 150.0
+
+    window._undo_performance_edit()
+    assert window.musical_timing_settings.bpm == 130.0
+    window._redo_performance_edit()
+    assert window.musical_timing_settings.bpm == 150.0

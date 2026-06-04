@@ -102,3 +102,9 @@ Menu labels include the next undo/redo transaction label when available. The Per
 - Undo/redo after project reload remaining runtime-only.
 
 The tests provide lightweight Qt stubs if local Qt system libraries (for example `libGL`) are unavailable, so the non-GUI transaction logic can still run in headless environments.
+
+## Task 082 QA hardening notes
+
+Task 082 expands the regression suite around stack limit eviction, redo clearing, menu action labels, selection-only changes, recursive restore guards, stale selected point clamping, and pitch bridge restoration. Manual stress testing should still be performed in a desktop session for long drag gestures and full render/waveform/Speech Diagnostics verification.
+
+The selected point index is clamped after engine selection changes before the automation point table is reselected, so stale UI indices do not outlive point deletion or snapshot restore.
