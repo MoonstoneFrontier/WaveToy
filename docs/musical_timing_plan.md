@@ -40,3 +40,9 @@ Musical snap applies only to phoneme block durations for now. Transition windows
 - Multi-tempo maps.
 - Lyric syllable lanes and note editing UI.
 - Task 071/072 may expand the read-only pitch lane into a safe note lane if it does not crowd the Visual Speech Timeline.
+
+## Task 079 engine bridge
+
+`PerformanceTimelineEngine` now owns musical overlay queries for performance-time consumers. It exposes beat grids, measure grids, current beat/measure, and snap-time calculation while continuing to respect `MusicalTimingSettings`.
+
+Musical Timing remains disabled by default. When disabled, the engine returns empty grid overlays and zero beat/measure state instead of quantizing speech. Transition timing stays millisecond-based even when grid snap is enabled for timeline point editing.

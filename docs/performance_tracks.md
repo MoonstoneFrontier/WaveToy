@@ -68,3 +68,9 @@ Compilation behavior:
 `evaluate_compiled_track()` samples these segments while preserving Task 077 behavior for `hold`, `linear`, `smooth`, before-first-point silence, and after-last-point hold. The compact Runtime inspector in the Performance Timeline tab shows the selected track's point count, segment count, sampled playhead value, min/max point values, mute/visible state, and source hash short form.
 
 Runtime diagnostics shown in the Performance Timeline status and Speech Diagnostics include compiled track counts, active compiled track counts, envelope cache hits/misses, last envelope generation time, timeline hash, and backend name.
+
+## Task 079 unified engine
+
+`PerformanceTimelineEngine` is now the central runtime service for `PerformanceAsset.timeline_tracks`. It owns bridge-lane sync, compiled track access, selected-track sampling, playhead state, timeline hashing, cache invalidation, musical grid data, and runtime diagnostics. `TimelineParameterTrack` remains the persistent model; the engine is an in-memory runtime layer.
+
+The Performance Timeline canvas reads visible lanes and playhead state through the engine. Bridge lanes for pitch and stress are derived from their source models and should be edited only through safe point updates that can write back to those source models.

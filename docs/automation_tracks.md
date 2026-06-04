@@ -34,3 +34,9 @@ The envelope cache stores only numeric `float32` parameter envelopes, never rend
 The cache is bounded by entry count and memory budget. Old entries are evicted least-recently-used style when the budget is exceeded. Runtime diagnostics report cache hit/miss behavior and the last envelope generation time.
 
 `accentuation_db` and `pitch_bias_cents` both use the compiled envelope path. Gain automation and conservative pitch-bias behavior are intended to stay audibly compatible with Task 077 while avoiding repeated point scans for longer or denser phrases.
+
+## Task 079 engine-owned automation envelopes
+
+Automation rendering now routes through `PerformanceTimelineEngine.automation_envelope_for_parameter()`. The compatibility helpers remain in place, but Window render code asks the engine for `accentuation_db` and `pitch_bias_cents` envelopes so diagnostics, hashing, cache behavior, and compiled-track access all come from one runtime service.
+
+This keeps generated audio as a render copy only. Automation never mutates phoneme presets, articulation chain items, or stored raw audio arrays.
