@@ -36,3 +36,11 @@ The engine exposes `pitch_value_at_ms()`, `pitch_curve_envelope()`, `stress_valu
 ## Task 083 Voice Range wording
 
 The main octave control is labeled **Voice Range** because it changes pitch/register rather than loudness. Its labels are musical register descriptors only: contrabass, bass, baritone, tenor, alto, mezzo-soprano, soprano, high soprano, and whistle range. This wording avoids implying physical size, volume, gender, or biological identity while preserving the existing audio behavior.
+
+## Task 084 interval note wheel and preview
+
+The note wheel now defaults to an interval layout that places the home note at the top and moves chromatically around the wheel. The optional circle-of-fifths layout preserves the previous fifths ordering for educational comparison. In both layouts, color and mood are computed from the selected note's interval relationship to the current home note.
+
+The picker can preview the home note, selected note, or interval relationship. Interval preview supports melodic playback (home then selected note) and harmonic playback (both notes together at reduced gain). Preview audio is generated in memory as a short sine tone and is not saved to disk.
+
+The Voice Range label is derived from the current tuned frequency when available, with the octave slider used only as a fallback. The labels remain musical register descriptors and avoid implying gender, body size, or biological identity.
