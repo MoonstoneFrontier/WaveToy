@@ -82,3 +82,9 @@ The Performance Timeline canvas reads visible lanes and playhead state through t
 The engine also owns lightweight runtime callbacks for playhead, selection, track, and diagnostics changes. These callbacks keep UI refresh local and simple while leaving explicit refresh calls in place where they are safer.
 
 Track and point edits should invalidate runtime caches through engine dirty helpers. Project persistence remains unchanged: only canonical timeline tracks and points are saved, not runtime playhead, selection, cache, or diagnostics state.
+
+## Task 082 undo/redo QA notes
+
+Performance Timeline undo/redo stress testing treats bridge lanes as regenerated projections and normal tracks as persisted timeline data. Repeated drag, point delete, and snapshot restore flows should leave selection mirrored from `PerformanceTimelineEngine` with any selected point index clamped to the active track's point count.
+
+The transaction stack is bounded at runtime. Once the undo stack exceeds its configured limit, the oldest transaction is discarded; project files remain unchanged because undo/redo transactions are never serialized.

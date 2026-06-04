@@ -16324,8 +16324,9 @@ class WaveToyWindow(QMainWindow):
             selected_row = next((idx for idx, track in enumerate(self.timeline_tracks) if track.track_id == track_id), -1)
             if selected_row >= 0:
                 self.automation_track_table.selectRow(selected_row)
-        if self.automation_points_table is not None and point_index is not None and point_index >= 0:
-            self.automation_points_table.selectRow(point_index)
+        clamped_point_index = self.selected_timeline_point_index
+        if self.automation_points_table is not None and clamped_point_index is not None and clamped_point_index >= 0:
+            self.automation_points_table.selectRow(clamped_point_index)
         self._refresh_performance_canvas()
         self._update_performance_status()
         self._update_articulation_waveform_diagnostics_canvas()

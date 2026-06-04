@@ -46,3 +46,9 @@ This keeps generated audio as a render copy only. Automation never mutates phone
 Automation envelope cache invalidation is centralized in `PerformanceTimelineEngine.invalidate_runtime_cache()` and the related dirty helpers. Track edits, point edits, mute toggles, bridge changes, and musical-timing changes should mark the engine dirty instead of clearing the envelope cache directly from `WaveToyWindow`.
 
 This does not change automation-track persistence. Legacy automation compatibility remains a load/library bridge into canonical `performance.timeline_tracks`.
+
+## Task 082 render regression notes
+
+Undo/redo restore invalidates the `PerformanceTimelineEngine` runtime cache and clears the current articulation word render signature. Manual QA should render after undo/redo and confirm both `accentuation_db` gain automation and `pitch_bias_cents` automation still route through the compiled envelope path.
+
+Because a new timeline edit clears redo history, cache and diagnostics validation should use the currently restored timeline state rather than expecting redo transactions to survive subsequent edits.
