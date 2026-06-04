@@ -74,3 +74,11 @@ Runtime diagnostics shown in the Performance Timeline status and Speech Diagnost
 `PerformanceTimelineEngine` is now the central runtime service for `PerformanceAsset.timeline_tracks`. It owns bridge-lane sync, compiled track access, selected-track sampling, playhead state, timeline hashing, cache invalidation, musical grid data, and runtime diagnostics. `TimelineParameterTrack` remains the persistent model; the engine is an in-memory runtime layer.
 
 The Performance Timeline canvas reads visible lanes and playhead state through the engine. Bridge lanes for pitch and stress are derived from their source models and should be edited only through safe point updates that can write back to those source models.
+
+## Task 080 runtime state ownership
+
+`PerformanceTimelineEngine` is now the owner of Performance Timeline runtime state: playhead position, selected track id, selected point index, dirty generation, and last change reason. `WaveToyWindow` may still expose compatibility mirrors for older table/canvas paths, but those mirrors are synchronized from the engine rather than treated as separate authority.
+
+The engine also owns lightweight runtime callbacks for playhead, selection, track, and diagnostics changes. These callbacks keep UI refresh local and simple while leaving explicit refresh calls in place where they are safer.
+
+Track and point edits should invalidate runtime caches through engine dirty helpers. Project persistence remains unchanged: only canonical timeline tracks and points are saved, not runtime playhead, selection, cache, or diagnostics state.

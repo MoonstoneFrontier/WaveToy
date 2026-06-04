@@ -28,3 +28,9 @@ After a word render, Speech Diagnostics reports active automation targets plus m
 The waveform diagnostics overlay now follows the Performance Timeline engine's selected runtime data and playhead state. This keeps the waveform overlay read-only while avoiding duplicate playhead and sampled-value logic in the window.
 
 Diagnostics shown alongside the waveform should be treated as engine-owned runtime diagnostics rather than independently recalculated waveform-editor state.
+
+## Task 080 engine-owned overlay state
+
+The waveform overlay should read Performance Timeline selection and playhead from `PerformanceTimelineEngine`. `WaveToyWindow` compatibility mirrors may still be present for older UI plumbing, but the overlay state follows the engine so the canvas, Performance Timeline status, and Speech Diagnostics agree during point selection and scrubbing.
+
+Runtime callbacks (`on_playhead_changed`, `on_selection_changed`, `on_tracks_changed`, and `on_diagnostics_changed`) provide a lightweight refresh seam without adding a new dependency or event bus.
