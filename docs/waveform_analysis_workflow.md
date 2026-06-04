@@ -1,17 +1,24 @@
 # Waveform Analysis Workflow
 
-WaveToy's waveform diagnostics view remains focused on render inspection while gaining a lightweight performance overlay hook.
+The Articulation waveform diagnostics view shows the latest word render and lightweight overlays for render debugging.
 
-## Performance overlay API
+## Performance overlay sync
 
-The diagnostics canvas can receive:
+The waveform overlay uses the currently selected Performance Timeline track. It displays that track's points and follows the Performance Timeline playhead.
 
-- `performance_points`: JSON-safe marker dictionaries for the selected performance track;
-- `active_track`: the selected lane name;
-- `playhead_ms`: the current performance playhead.
+The overlay refreshes when:
 
-This allows selected automation points to appear over the waveform without rewriting the waveform editor.
+- the selected timeline track changes,
+- a point is added, removed, edited, or dragged,
+- the Performance Timeline playhead changes,
+- a word render refreshes.
 
-## Current scope
+The waveform editor is not rewritten by this workflow; the overlay remains a read-only diagnostic view.
 
-The overlay is intentionally simple: it shows selected-track markers and the playhead. It does not yet provide waveform-side automation editing, Bezier handles, or DAW-style region tools. Those belong in a future Task 077-style waveform integration pass.
+## Automation diagnostics
+
+After a word render, Speech Diagnostics reports active automation targets plus min/max values for `accentuation_db` and `pitch_bias_cents`. The selected track's sampled value at the playhead is shown for scrubbing and review.
+
+## Render notes
+
+`accentuation_db` changes should be audible as non-destructive gain automation on the render copy. `pitch_bias_cents` is deliberately conservative and avoids obvious noisy regions where possible; if a phrase contains only unvoiced/noisy material, the pitch-bias mask may leave it unchanged.

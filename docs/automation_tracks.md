@@ -1,25 +1,26 @@
-# Automation Tracks
+# Automation Tracks Compatibility
 
-Automation tracks from Task 075 remain load-compatible but are now represented internally by unified timeline lanes.
+Older WaveToy projects may contain automation data in legacy automation-track form. Current projects use canonical `performance.timeline_tracks` instead.
 
-## Compatibility
+## Canonical model
 
-Legacy `AutomationTrack` / `AutomationPoint` JSON can still load from:
+`timeline_tracks` are the authoritative internal model. New render code samples `TimelineParameterTrack` through the shared evaluation engine instead of using parameter-specific ad-hoc automation logic.
 
-- `performance.automation_tracks`
-- legacy top-level `automation_tracks` when no canonical timeline is present
-- `automation_curve` library assets
+`automation_tracks` remains only for compatibility:
 
-On load, legacy automation becomes `TimelineParameterTrack(track_kind="automation")` with `TimelineParameterPoint` entries.
+- loading older project snapshots,
+- bridging old automation-curve assets,
+- exporting legacy-compatible automation payloads where needed,
+- temporary adapters while older UI/library paths are migrated.
 
-## New save behavior
+WaveToy should avoid writing separate live automation state when the same information can be represented as `performance.timeline_tracks`.
 
-New project snapshots use the canonical `performance.timeline_tracks` schema. WaveToy does not write duplicate top-level `automation_tracks` in normal project snapshots, reducing synchronization risk.
+## Load migration
 
-## Active render targets
+On load, legacy automation becomes `TimelineParameterTrack(track_kind="automation")` with `TimelineParameterPoint` entries. If canonical timeline tracks are present, they win.
 
-`accentuation_db` remains non-destructive gain automation. `pitch_bias_cents` is now a second working target, implemented as a lightweight post-render pitch-bias hook and included in the word-render signature through canonical timeline tracks.
+## Render targets
 
-## Roadmap
+`accentuation_db` is sampled as a gain envelope and applied to a render copy only.
 
-Future automation work should extend the timeline-lane model rather than adding separate time-based containers. Candidate follow-ups include Bezier curves, richer voiced-region pitch integration, marker lanes, and DAW-style lane folding.
+`pitch_bias_cents` is sampled through the same envelope helper. Pitch bias currently uses a conservative post-render approximation: it limits active bias to `±300 cents` and blends into voiced-looking regions based on RMS and zero-crossing analysis. This is intentionally safer for stops and fricatives, but not a replacement for future frame-aware voiced-source resynthesis.

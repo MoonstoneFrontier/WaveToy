@@ -309,6 +309,138 @@ class TimelineParameterTrack:
         )
 
 
+def _clamped_timeline_point_value(track: "TimelineParameterTrack", value: float) -> float:
+    low, high = _timeline_value_range(track.target_parameter, track.track_kind)
+    return float(np.clip(float(value), low, high))
+
+
+def _sorted_timeline_points(track: "TimelineParameterTrack") -> List["TimelineParameterPoint"]:
+    return sorted(
+        [point if isinstance(point, TimelineParameterPoint) else TimelineParameterPoint.from_json_dict(point) for point in (track.points or [])],
+        key=lambda point: (int(point.time_ms), float(point.value)),
+    )
+
+
+def evaluate_timeline_track(track: "TimelineParameterTrack", time_ms: float) -> float | None:
+    """Sample one canonical timeline track at a millisecond timestamp.
+
+    Muted and empty tracks return None. Invisible tracks still evaluate because
+    visibility is an editor concern; muting is the render/audition bypass.
+    """
+    if track is None or bool(getattr(track, "muted", False)):
+        return None
+    points = _sorted_timeline_points(track)
+    if not points:
+        return None
+    sample_ms = float(max(0.0, float(time_ms)))
+    if sample_ms < float(points[0].time_ms):
+        return None
+    if len(points) == 1 or sample_ms >= float(points[-1].time_ms):
+        return _clamped_timeline_point_value(track, points[-1].value)
+    for left, right in zip(points, points[1:]):
+        left_ms = float(left.time_ms)
+        right_ms = float(right.time_ms)
+        if sample_ms < left_ms or sample_ms > right_ms:
+            continue
+        curve = left.curve if left.curve in AUTOMATION_CURVES else "linear"
+        if curve == "hold" or right_ms <= left_ms:
+            return _clamped_timeline_point_value(track, left.value)
+        ratio = float(np.clip((sample_ms - left_ms) / max(1.0, right_ms - left_ms), 0.0, 1.0))
+        if curve == "smooth":
+            ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+        value = float(left.value) + (float(right.value) - float(left.value)) * ratio
+        return _clamped_timeline_point_value(track, value)
+    return _clamped_timeline_point_value(track, points[-1].value)
+
+
+def evaluate_timeline_tracks(tracks: List["TimelineParameterTrack"], time_ms: float) -> Dict[str, float]:
+    """Sample all active timeline tracks and sum values by target parameter."""
+    values: Dict[str, float] = {}
+    for track in tracks or []:
+        if getattr(track, "track_kind", "automation") not in TIMELINE_TRACK_KINDS:
+            continue
+        value = evaluate_timeline_track(track, time_ms)
+        if value is None:
+            continue
+        target = str(getattr(track, "target_parameter", "") or "")
+        if not target:
+            continue
+        values[target] = float(values.get(target, 0.0) + value)
+        low, high = _timeline_value_range(target, getattr(track, "track_kind", "automation"))
+        values[target] = float(np.clip(values[target], low, high))
+    return values
+
+
+def automation_value_for_parameter(parameter: str, time_ms: float, tracks: List["TimelineParameterTrack"] | None = None) -> float:
+    """Return the summed automation value for one parameter at a time."""
+    parameter = str(parameter or "")
+    if not parameter or not tracks:
+        return 0.0
+    value = 0.0
+    found = False
+    for track in tracks:
+        if getattr(track, "track_kind", "automation") != "automation" or getattr(track, "target_parameter", "") != parameter:
+            continue
+        sample = evaluate_timeline_track(track, time_ms)
+        if sample is None:
+            continue
+        value += float(sample)
+        found = True
+    if not found:
+        return 0.0
+    low, high = _timeline_value_range(parameter, "automation")
+    return float(np.clip(value, low, high))
+
+
+def automation_envelope_for_parameter(parameter: str, duration_ms: float, sample_rate: int, tracks: List["TimelineParameterTrack"] | None = None) -> np.ndarray:
+    """Sample a parameter automation envelope through the shared track evaluator."""
+    frame_count = max(0, int(math.ceil(max(0.0, float(duration_ms)) * float(sample_rate) / 1000.0)))
+    if frame_count <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if not tracks:
+        return np.zeros(frame_count, dtype=np.float32)
+    time_ms = (np.arange(frame_count, dtype=np.float32) * 1000.0) / float(sample_rate)
+    envelope = np.zeros(frame_count, dtype=np.float32)
+    for track in tracks:
+        if getattr(track, "track_kind", "automation") != "automation" or getattr(track, "target_parameter", "") != parameter:
+            continue
+        if bool(getattr(track, "muted", False)) or not getattr(track, "points", None):
+            continue
+        values = np.zeros(frame_count, dtype=np.float32)
+        active = np.zeros(frame_count, dtype=bool)
+        points = _sorted_timeline_points(track)
+        if not points:
+            continue
+        point_times = np.array([point.time_ms for point in points], dtype=np.float32)
+        active = time_ms >= point_times[0]
+        if not np.any(active):
+            continue
+        if len(points) == 1:
+            values[active] = _clamped_timeline_point_value(track, points[0].value)
+        else:
+            for left, right in zip(points, points[1:]):
+                mask = (time_ms >= float(left.time_ms)) & (time_ms <= float(right.time_ms))
+                if not np.any(mask):
+                    continue
+                curve = left.curve if left.curve in AUTOMATION_CURVES else "linear"
+                if curve == "hold" or right.time_ms <= left.time_ms:
+                    values[mask] = _clamped_timeline_point_value(track, left.value)
+                else:
+                    ratio = np.clip((time_ms[mask] - float(left.time_ms)) / max(1.0, float(right.time_ms - left.time_ms)), 0.0, 1.0)
+                    if curve == "smooth":
+                        ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+                    values[mask] = (float(left.value) + (float(right.value) - float(left.value)) * ratio).astype(np.float32)
+            values[time_ms > float(points[-1].time_ms)] = _clamped_timeline_point_value(track, points[-1].value)
+        envelope += values
+    low, high = _timeline_value_range(parameter, "automation")
+    return np.clip(envelope, low, high).astype(np.float32)
+
+
+def _timeline_evaluation_self_check() -> bool:
+    track = TimelineParameterTrack(points=[TimelineParameterPoint(0, 0.0, "linear"), TimelineParameterPoint(100, 10.0, "smooth"), TimelineParameterPoint(200, 5.0, "hold")])
+    return evaluate_timeline_track(track, 0) == 0.0 and evaluate_timeline_track(track, 100) == 10.0 and evaluate_timeline_track(track, 250) == 5.0
+
+
 @dataclass
 class AutomationPoint:
     """One editable automation value at a millisecond timestamp."""
@@ -1761,6 +1893,83 @@ class CharacterVoiceProfile:
     @classmethod
     def from_json_dict(cls, data: Dict[str, object]) -> "CharacterVoiceProfile":
         return cls(**{field_name: data[field_name] for field_name in cls.__dataclass_fields__ if field_name in data})
+
+
+def stress_timeline_track_from_syllable_stress_markers(markers: List[SyllableStressMarker]) -> TimelineParameterTrack | None:
+    if not markers:
+        return None
+    return TimelineParameterTrack(
+        track_id="stress_bridge_syllable_markers",
+        name="Syllable Stress",
+        track_kind="stress",
+        target_parameter="stress_level",
+        points=[
+            TimelineParameterPoint(
+                time_ms=int(round(marker.start_ms)),
+                value=float(np.clip(marker.stress_level, 0.0, 1.0)),
+                curve="hold",
+                label=marker.label,
+                metadata={
+                    "marker_id": marker.marker_id,
+                    "end_ms": marker.end_ms,
+                    "accentuation_db": marker.accentuation_db,
+                    "timing_bias": marker.timing_bias,
+                    "pitch_bias_cents": marker.pitch_bias_cents,
+                },
+            )
+            for marker in markers
+        ],
+        muted=False,
+        visible=True,
+        color="#f1c0e8",
+        lane_order=900,
+    )
+
+
+def write_stress_timeline_track_to_syllable_stress_markers(track: TimelineParameterTrack, markers: List[SyllableStressMarker]) -> None:
+    by_id = {marker.marker_id: marker for marker in markers}
+    for point in track.points:
+        marker_id = str(point.metadata.get("marker_id", "") or "")
+        marker = by_id.get(marker_id)
+        if marker is None:
+            continue
+        marker.start_ms = float(point.time_ms)
+        marker.end_ms = max(marker.start_ms, float(point.metadata.get("end_ms", marker.end_ms) or marker.end_ms))
+        marker.stress_level = float(np.clip(point.value, 0.0, 1.0))
+        marker.label = point.label
+
+
+def pitch_timeline_track_from_pitch_automation_points(points: List[PitchAutomationPoint]) -> TimelineParameterTrack | None:
+    if not points:
+        return None
+    return TimelineParameterTrack(
+        track_id="pitch_bridge_pitch_curve",
+        name="Pitch Curve",
+        track_kind="pitch",
+        target_parameter="pitch_hz",
+        points=[
+            TimelineParameterPoint(
+                time_ms=int(round(point.time_ms)),
+                value=float(point.pitch_hz),
+                curve=point.curve,
+                label=point.source,
+                metadata={"source": point.source},
+            )
+            for point in points
+        ],
+        muted=False,
+        visible=True,
+        color="#24d7ff",
+        lane_order=901,
+    )
+
+
+def write_pitch_timeline_track_to_pitch_automation_points(track: TimelineParameterTrack, points: List[PitchAutomationPoint]) -> None:
+    for point, pitch_point in zip(track.points, points):
+        pitch_point.time_ms = float(point.time_ms)
+        pitch_point.pitch_hz = float(np.clip(point.value, 40.0, 2000.0))
+        pitch_point.curve = point.curve
+
 
 
 @dataclass
@@ -7940,6 +8149,14 @@ class WaveToyWindow(QMainWindow):
         self.musical_grid_checkbox: QCheckBox | None = None
         self.singing_mode_checkbox: QCheckBox | None = None
         self.continuous_diagnostics_latest: Dict[str, object] = {}
+        self.latest_automation_diagnostics: Dict[str, object] = {
+            "active_automation_targets": [],
+            "accentuation_db_min": 0.0,
+            "accentuation_db_max": 0.0,
+            "pitch_bias_cents_min": 0.0,
+            "pitch_bias_cents_max": 0.0,
+            "pitch_bias_active": False,
+        }
         self.continuous_diagnostics_status_label: QLabel | None = None
         self.continuous_diagnostics_metrics_label: QLabel | None = None
         self.continuous_validation_results_label: QLabel | None = None
@@ -11076,6 +11293,13 @@ class WaveToyWindow(QMainWindow):
             "portamento_ms": active_note.portamento_ms if active_note is not None else 0.0,
             "singing_mode_enabled": self._singing_mode_enabled(),
             "timeline_tracks": self._timeline_tracks_json(),
+            "active_automation_targets": list(self.latest_automation_diagnostics.get("active_automation_targets", [])),
+            "selected_performance_track": self._selected_timeline_track().name if self._selected_timeline_track() is not None else "—",
+            "selected_track_value_at_playhead": self._selected_track_value_at_playhead(),
+            "accentuation_db_min": float(self.latest_automation_diagnostics.get("accentuation_db_min", 0.0) or 0.0),
+            "accentuation_db_max": float(self.latest_automation_diagnostics.get("accentuation_db_max", 0.0) or 0.0),
+            "pitch_bias_cents_min": float(self.latest_automation_diagnostics.get("pitch_bias_cents_min", 0.0) or 0.0),
+            "pitch_bias_cents_max": float(self.latest_automation_diagnostics.get("pitch_bias_cents_max", 0.0) or 0.0),
         }
         lines = [
             "Speech Diagnostics (read-only)",
@@ -11135,6 +11359,15 @@ class WaveToyWindow(QMainWindow):
             f"vibrato_depth: {metrics['vibrato_depth']:.1f} cents",
             f"portamento_ms: {metrics['portamento_ms']:.0f}",
             f"singing_mode_enabled: {metrics['singing_mode_enabled']}",
+            "",
+            "Performance Automation",
+            f"active_automation_targets: {', '.join(metrics['active_automation_targets']) if metrics['active_automation_targets'] else '—'}",
+            f"selected_performance_track: {metrics['selected_performance_track']}",
+            f"selected_track_value_at_playhead: {metrics['selected_track_value_at_playhead'] if metrics['selected_track_value_at_playhead'] is not None else '—'}",
+            f"accentuation_db_min: {metrics['accentuation_db_min']:.2f}",
+            f"accentuation_db_max: {metrics['accentuation_db_max']:.2f}",
+            f"pitch_bias_cents_min: {metrics['pitch_bias_cents_min']:.2f}",
+            f"pitch_bias_cents_max: {metrics['pitch_bias_cents_max']:.2f}",
         ])
         self.speech_diagnostics_text.setPlainText("\n".join(lines))
 
@@ -12633,8 +12866,7 @@ class WaveToyWindow(QMainWindow):
         progress = 0.0 if self.articulation_motion_total_ms <= 0 else float(np.clip(elapsed_ms / self.articulation_motion_total_ms, 0.0, 1.0))
         timeline_elapsed_ms = progress * float(max(1, self.word_motion_timeline_total_ms))
         self._set_articulation_motion_elapsed(timeline_elapsed_ms)
-        self.performance_playhead_ms = int(round(timeline_elapsed_ms))
-        self._refresh_performance_canvas()
+        self._set_performance_playhead_ms(int(round(timeline_elapsed_ms)), scrub=False)
 
     def _mark_articulation_word_dirty(self) -> None:
         self._mark_project_dirty("articulation chain changed")
@@ -15089,42 +15321,12 @@ class WaveToyWindow(QMainWindow):
     def _sync_timeline_bridges(self) -> None:
         bridge_ids = {track.track_id for track in self.timeline_tracks if str(track.track_id).startswith(("stress_bridge_", "pitch_bridge_"))}
         self.timeline_tracks = [track for track in self.timeline_tracks if track.track_id not in bridge_ids]
-        if self.syllable_stress_markers:
-            self.timeline_tracks.append(TimelineParameterTrack(
-                track_id="stress_bridge_syllable_markers",
-                name="Syllable Stress",
-                track_kind="stress",
-                target_parameter="stress_level",
-                points=[TimelineParameterPoint(
-                    time_ms=int(round(marker.start_ms)),
-                    value=float(np.clip(marker.stress_level, 0.0, 1.0)),
-                    curve="hold",
-                    label=marker.label,
-                    metadata={"marker_id": marker.marker_id, "end_ms": marker.end_ms, "accentuation_db": marker.accentuation_db, "timing_bias": marker.timing_bias, "pitch_bias_cents": marker.pitch_bias_cents},
-                ) for marker in self.syllable_stress_markers],
-                muted=False,
-                visible=True,
-                color="#f1c0e8",
-                lane_order=900,
-            ))
-        if self.pitch_automation_points:
-            self.timeline_tracks.append(TimelineParameterTrack(
-                track_id="pitch_bridge_pitch_curve",
-                name="Pitch Curve",
-                track_kind="pitch",
-                target_parameter="pitch_hz",
-                points=[TimelineParameterPoint(
-                    time_ms=int(round(point.time_ms)),
-                    value=float(point.pitch_hz),
-                    curve=point.curve,
-                    label=point.source,
-                    metadata={"source": point.source},
-                ) for point in self.pitch_automation_points],
-                muted=False,
-                visible=True,
-                color="#24d7ff",
-                lane_order=901,
-            ))
+        stress_track = stress_timeline_track_from_syllable_stress_markers(self.syllable_stress_markers)
+        if stress_track is not None:
+            self.timeline_tracks.append(stress_track)
+        pitch_track = pitch_timeline_track_from_pitch_automation_points(self.pitch_automation_points)
+        if pitch_track is not None:
+            self.timeline_tracks.append(pitch_track)
         for index, track in enumerate(sorted(self.timeline_tracks, key=lambda item: item.lane_order)):
             if track.lane_order == 0 and index > 0:
                 track.lane_order = index
@@ -15133,21 +15335,9 @@ class WaveToyWindow(QMainWindow):
 
     def _apply_bridge_track_edits(self, track: TimelineParameterTrack) -> None:
         if track.track_id == "stress_bridge_syllable_markers":
-            by_id = {marker.marker_id: marker for marker in self.syllable_stress_markers}
-            for point in track.points:
-                marker_id = str(point.metadata.get("marker_id", "") or "")
-                marker = by_id.get(marker_id)
-                if marker is None:
-                    continue
-                marker.start_ms = float(point.time_ms)
-                marker.end_ms = max(marker.start_ms, float(point.metadata.get("end_ms", marker.end_ms) or marker.end_ms))
-                marker.stress_level = float(np.clip(point.value, 0.0, 1.0))
-                marker.label = point.label
+            write_stress_timeline_track_to_syllable_stress_markers(track, self.syllable_stress_markers)
         elif track.track_id == "pitch_bridge_pitch_curve":
-            for point, pitch_point in zip(track.points, self.pitch_automation_points):
-                pitch_point.time_ms = float(point.time_ms)
-                pitch_point.pitch_hz = float(np.clip(point.value, 40.0, 2000.0))
-                pitch_point.curve = point.curve
+            write_pitch_timeline_track_to_pitch_automation_points(track, self.pitch_automation_points)
 
     def _mark_performance_dirty(self, reason: str = "performance timeline changed") -> None:
         self._sync_automation_tracks_from_timeline()
@@ -15273,6 +15463,7 @@ class WaveToyWindow(QMainWindow):
             self.automation_points_table.selectRow(point_index)
         self._refresh_performance_canvas()
         self._update_performance_status()
+        self._update_articulation_waveform_diagnostics_canvas()
 
     def _move_timeline_point_from_canvas(self, track_id: str, point_index: int, time_ms: int, y: float) -> None:
         track = next((item for item in self.timeline_tracks if item.track_id == track_id), None)
@@ -15298,6 +15489,8 @@ class WaveToyWindow(QMainWindow):
                 self.articulation_motion_timeline.set_playhead_ms(self.articulation_playhead_ms)
         self._refresh_performance_canvas()
         self._update_performance_status()
+        self._update_articulation_waveform_diagnostics_canvas()
+        self._update_speech_diagnostics_panel(self.current_phoneme)
 
     def _automation_track_row_selected(self, row: int, column: int = 0) -> None:
         del column
@@ -15405,7 +15598,9 @@ class WaveToyWindow(QMainWindow):
         track = self._selected_timeline_track()
         accent_tracks = [item for item in self.timeline_tracks if item.target_parameter == "accentuation_db" and not item.muted]
         pitch_tracks = [item for item in self.timeline_tracks if item.target_parameter == "pitch_bias_cents" and not item.muted]
-        selected = f"Selected: {track.name} → {track.target_parameter}" if track is not None else "No selected track"
+        value = self._selected_track_value_at_playhead()
+        value_text = f" sampled={value:.3f}" if value is not None else " sampled=—"
+        selected = f"Selected: {track.name} → {track.target_parameter}{value_text}" if track is not None else "No selected track"
         self.automation_status_label.setText(
             f"{len(self.timeline_tracks)} visible/editable timeline lane(s). {selected}. Playhead {self.performance_playhead_ms} ms. "
             f"Render applies {len(accent_tracks)} accentuation_db and {len(pitch_tracks)} pitch_bias_cents lane(s) non-destructively."
@@ -15433,70 +15628,103 @@ class WaveToyWindow(QMainWindow):
         self._save_library_asset("automation_curve", track.name, payload, description=f"Timeline curve for {track.target_parameter}")
 
     def _automation_value_at_ms(self, track: TimelineParameterTrack | AutomationTrack, time_ms: np.ndarray) -> np.ndarray:
-        if not track.points:
-            return np.zeros_like(time_ms, dtype=np.float32)
-        points = sorted(track.points, key=lambda point: point.time_ms)
-        envelope = np.full_like(time_ms, float(points[0].value), dtype=np.float32)
-        if len(points) == 1:
-            envelope[time_ms < points[0].time_ms] = 0.0
-            return envelope
-        envelope[time_ms < points[0].time_ms] = 0.0
-        for left, right in zip(points, points[1:]):
-            mask = (time_ms >= left.time_ms) & (time_ms <= right.time_ms)
-            if not np.any(mask):
-                continue
-            if left.curve == "hold":
-                envelope[mask] = float(left.value)
-            else:
-                span = max(1.0, float(right.time_ms - left.time_ms))
-                t = np.clip((time_ms[mask] - float(left.time_ms)) / span, 0.0, 1.0)
-                if left.curve == "smooth":
-                    t = t * t * (3.0 - 2.0 * t)
-                envelope[mask] = float(left.value) + (float(right.value) - float(left.value)) * t
-        envelope[time_ms > points[-1].time_ms] = float(points[-1].value)
-        return envelope.astype(np.float32)
+        if isinstance(track, AutomationTrack):
+            track = TimelineParameterTrack.from_automation_track(track)
+        frame_count = len(time_ms)
+        if frame_count <= 0 or not track.points or track.muted:
+            return np.zeros(frame_count, dtype=np.float32)
+        return np.array([evaluate_timeline_track(track, float(ms)) or 0.0 for ms in time_ms], dtype=np.float32)
 
-    def _pitch_shift_audio_constant(self, audio: np.ndarray, cents: float) -> np.ndarray:
-        if audio.size == 0 or abs(cents) < 0.1:
+    def automation_value_for_parameter(self, parameter: str, time_ms: float) -> float:
+        return automation_value_for_parameter(parameter, time_ms, self.timeline_tracks)
+
+    def automation_envelope_for_parameter(self, parameter: str, duration_ms: float, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+        return automation_envelope_for_parameter(parameter, duration_ms, sample_rate, self.timeline_tracks)
+
+    def _selected_track_value_at_playhead(self) -> float | None:
+        track = self._selected_timeline_track()
+        if track is None:
+            return None
+        return evaluate_timeline_track(track, self.performance_playhead_ms)
+
+    def _voiced_region_mask_for_pitch_bias(self, audio: np.ndarray) -> np.ndarray:
+        if audio.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        mono = np.mean(audio, axis=1) if audio.ndim == 2 else np.asarray(audio, dtype=np.float32)
+        frame = max(128, int(SAMPLE_RATE * 0.02))
+        hop = max(64, frame // 2)
+        rms_values: List[float] = []
+        zcr_values: List[float] = []
+        centers: List[int] = []
+        for start in range(0, len(mono), hop):
+            chunk = mono[start:start + frame]
+            if len(chunk) < 2:
+                break
+            rms_values.append(float(np.sqrt(np.mean(chunk * chunk))))
+            zcr_values.append(float(np.mean(np.abs(np.diff(np.signbit(chunk).astype(np.int8))))))
+            centers.append(start + len(chunk) // 2)
+        if not rms_values:
+            return np.zeros(len(mono), dtype=np.float32)
+        rms = np.array(rms_values, dtype=np.float32)
+        zcr = np.array(zcr_values, dtype=np.float32)
+        threshold = max(0.01, float(np.max(rms)) * 0.12)
+        frame_mask = ((rms >= threshold) & (zcr <= 0.22)).astype(np.float32)
+        mask = np.interp(np.arange(len(mono)), np.array(centers, dtype=np.float32), frame_mask, left=frame_mask[0], right=frame_mask[-1]).astype(np.float32)
+        smooth = max(1, int(SAMPLE_RATE * 0.005))
+        if smooth > 1:
+            kernel = np.ones(smooth, dtype=np.float32) / float(smooth)
+            mask = np.convolve(mask, kernel, mode="same").astype(np.float32)
+        return np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+    def _apply_pitch_bias_to_voiced_regions(self, audio: np.ndarray, cents: float) -> np.ndarray:
+        shifted = self._pitch_shift_audio_constant(audio, cents)
+        mask = self._voiced_region_mask_for_pitch_bias(audio)
+        if mask.size != len(audio) or not np.any(mask > 0.05):
             return audio.astype(np.float32)
-        factor = float(2.0 ** (np.clip(cents, -1200.0, 1200.0) / 1200.0))
-        original_x = np.arange(len(audio), dtype=np.float32)
-        source_x = np.clip(original_x * factor, 0.0, max(0.0, len(audio) - 1.0))
-        shifted = np.zeros_like(audio, dtype=np.float32)
-        for channel in range(audio.shape[1] if audio.ndim == 2 else 1):
-            source = audio[:, channel] if audio.ndim == 2 else audio
-            values = np.interp(source_x, original_x, source).astype(np.float32)
-            if audio.ndim == 2:
-                shifted[:, channel] = values
-            else:
-                shifted = values
-        return shifted.astype(np.float32)
+        if audio.ndim == 2:
+            mask2 = mask[:, None]
+        else:
+            mask2 = mask
+        return (audio * (1.0 - mask2) + shifted * mask2).astype(np.float32)
 
     def _apply_performance_automation_to_audio(self, audio: np.ndarray) -> np.ndarray:
+        base_diagnostics = {
+            "active_automation_targets": [],
+            "accentuation_db_min": 0.0,
+            "accentuation_db_max": 0.0,
+            "pitch_bias_cents_min": 0.0,
+            "pitch_bias_cents_max": 0.0,
+            "pitch_bias_active": False,
+        }
         if audio.size == 0:
+            self.latest_automation_diagnostics = base_diagnostics
             return audio.astype(np.float32)
         self._sync_timeline_bridges()
         active_tracks = [track for track in self.timeline_tracks if track.track_kind == "automation" and not track.muted and track.points]
-        if not active_tracks:
-            return audio.astype(np.float32)
+        duration_ms = (len(audio) * 1000.0) / float(SAMPLE_RATE)
+        db_envelope = automation_envelope_for_parameter("accentuation_db", duration_ms, SAMPLE_RATE, active_tracks)[:len(audio)]
+        pitch_envelope = automation_envelope_for_parameter("pitch_bias_cents", duration_ms, SAMPLE_RATE, active_tracks)[:len(audio)]
         rendered = np.array(audio, dtype=np.float32, copy=True)
-        time_ms = (np.arange(len(rendered), dtype=np.float32) * 1000.0) / float(SAMPLE_RATE)
-        db_envelope = np.zeros(len(rendered), dtype=np.float32)
-        pitch_envelope = np.zeros(len(rendered), dtype=np.float32)
-        for track in active_tracks:
-            if track.target_parameter == "accentuation_db":
-                db_envelope += self._automation_value_at_ms(track, time_ms)
-            elif track.target_parameter == "pitch_bias_cents":
-                pitch_envelope += self._automation_value_at_ms(track, time_ms)
-        if np.any(np.abs(pitch_envelope) > 0.1):
-            # Lightweight Task 076 hook: use the median active pitch bias for voiced regions in the rendered word copy.
-            # A frame-aware oscillator implementation remains a future DAW-style refinement.
-            rendered = self._pitch_shift_audio_constant(rendered, float(np.median(pitch_envelope[np.abs(pitch_envelope) > 0.1])))
-            if self.continuous_diagnostics_latest is not None:
-                self.continuous_diagnostics_latest["active_pitch_bias_cents"] = round(float(np.max(np.abs(pitch_envelope))), 3)
+        targets = sorted({track.target_parameter for track in active_tracks if track.target_parameter in {"accentuation_db", "pitch_bias_cents"}})
+        pitch_active = bool(np.any(np.abs(pitch_envelope) > 0.1))
+        if pitch_active:
+            active_values = pitch_envelope[np.abs(pitch_envelope) > 0.1]
+            conservative_cents = float(np.clip(np.median(active_values), -300.0, 300.0)) if active_values.size else 0.0
+            rendered = self._apply_pitch_bias_to_voiced_regions(rendered, conservative_cents)
         if np.any(np.abs(db_envelope) > 0.001):
             gain = np.power(10.0, np.clip(db_envelope, -24.0, 24.0) / 20.0).astype(np.float32)
-            rendered *= gain[:, None]
+            rendered *= gain[:, None] if rendered.ndim == 2 else gain
+        diagnostics = {
+            "active_automation_targets": targets,
+            "accentuation_db_min": round(float(np.min(db_envelope)), 3) if db_envelope.size else 0.0,
+            "accentuation_db_max": round(float(np.max(db_envelope)), 3) if db_envelope.size else 0.0,
+            "pitch_bias_cents_min": round(float(np.min(pitch_envelope)), 3) if pitch_envelope.size else 0.0,
+            "pitch_bias_cents_max": round(float(np.max(pitch_envelope)), 3) if pitch_envelope.size else 0.0,
+            "pitch_bias_active": pitch_active,
+        }
+        self.latest_automation_diagnostics = diagnostics
+        if self.continuous_diagnostics_latest is not None:
+            self.continuous_diagnostics_latest.update(diagnostics)
         return np.clip(rendered, -1.0, 1.0).astype(np.float32)
 
     def _build_performance_tab(self) -> None:
