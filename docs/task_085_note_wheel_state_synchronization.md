@@ -39,3 +39,7 @@ Preview audio uses pitch class and current tuning values for sound. Current spel
 ## Voice Range refresh behavior
 
 The Voice Range label continues to derive from the current tuned frequency when available and falls back to the slider threshold labels when frequency is unavailable. Main note, octave/range, cents, tuning method, tuning root, and A4 reference changes all flow through pitch synchronization, so the visible register label updates with the current tuned frequency. The wording remains musical-register-only and does not imply gender, body size, volume, or biological identity.
+
+## Task 086 follow-up
+
+Note wheel state synchronization now includes optional harmony highlights. Highlighted scale and chord tones are independent from the selected pitch class, and the highlight set refreshes across root, spelling, scale/chord, and layout changes.

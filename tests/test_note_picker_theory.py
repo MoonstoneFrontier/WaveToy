@@ -137,3 +137,12 @@ def test_voice_range_label_changes_when_frequency_changes():
     low = wave_toy.voice_register_label_for_frequency(70.0)
     high = wave_toy.voice_register_label_for_frequency(1200.0)
     assert low != high
+
+
+def test_highlight_set_preserves_selected_pitch_class_without_selecting_root(qapp):
+    picker = wave_toy.CircleOfFifthsNotePicker()
+    picker.set_note("C#")
+    picker.set_highlight_notes(["A", "C#", "E"], "A")
+    assert picker.selected_note() == "C#"
+    assert picker.highlighted_notes() == {"A", "C#", "E"}
+    assert picker.highlight_root() == "A"

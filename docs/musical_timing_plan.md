@@ -54,3 +54,7 @@ The note/color/mood picker remains a pitch-class picker, not a full music theory
 ## Task 084 note wheel layout reminder
 
 The note/color/mood picker now distinguishes **Intervals** layout from **Circle of Fifths** layout. Intervals is the default because mood and color are interval-relative to the current home note; Circle of Fifths remains an optional educational geometry. This does not change the future Musical Timing plan: current speech timing remains millisecond-based, and beat/measure timing is still future architecture work.
+
+## Task 086 harmonic asset roadmap note
+
+Scale, chord, and arpeggio previews remain millisecond/audio-preview features for now. Future musical timing work may promote `scale_pattern`, `chord_pattern`, and `chord_progression` into beat-aware reusable assets, but Task 086 deliberately avoids schema changes or a full progression editor.
