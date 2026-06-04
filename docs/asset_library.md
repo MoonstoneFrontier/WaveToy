@@ -48,3 +48,9 @@ Library records retain descriptive fields such as name, tags, notes, favorite st
 The Speech Asset Library now recognizes `performance` and `automation_curve` asset types. A performance asset stores the current persistent automation tracks. An automation curve asset stores one selected track and its points. Existing library CRUD operations such as duplicate, rename, delete, favorite, import, and export continue to operate through the shared asset envelope.
 
 Loading a performance asset replaces the current performance tracks with a fresh imported performance UUID. Loading an automation curve appends the imported track with a fresh track UUID.
+
+## Task 087 reserved harmony assets
+
+WaveToy now reserves lightweight JSON-safe shapes for future harmony assets: `scale_pattern`, `chord_pattern`, and `chord_progression`. Each reserved shape carries `uuid`, `name`, `root_note`, `spelling_mode`, `scale_type`, `chord_type`, `chord_steps`, `tags`, `notes`, `created_at`, and `modified_at`.
+
+These foundations do not yet add Asset Library CRUD integration or a project-schema migration. The Harmony Workbench metadata export is separate from audio export and writes only root, scale, chord, pitch-class, displayed-name, spelling, and timestamp metadata.

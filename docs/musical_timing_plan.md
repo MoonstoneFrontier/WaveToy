@@ -58,3 +58,7 @@ The note/color/mood picker now distinguishes **Intervals** layout from **Circle 
 ## Task 086 harmonic asset roadmap note
 
 Scale, chord, and arpeggio previews remain millisecond/audio-preview features for now. Future musical timing work may promote `scale_pattern`, `chord_pattern`, and `chord_progression` into beat-aware reusable assets, but Task 086 deliberately avoids schema changes or a full progression editor.
+
+## Task 087 harmony timing boundary
+
+The Harmony Workbench now has synchronized scale/chord state and reserved `scale_pattern`, `chord_pattern`, and `chord_progression` asset shapes. These remain metadata foundations only. Musical Timing still defaults to millisecond speech timing, and Task 087 does not add beat-aware progression editing, MIDI export, or a piano roll.

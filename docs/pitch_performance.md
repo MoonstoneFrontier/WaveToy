@@ -56,3 +56,7 @@ Voice Range labels refresh from the current tuned frequency whenever note, octav
 ## Task 086 Harmony Workbench foundation
 
 The pitch tools now include foundational scale and chord helpers. Internal pitch classes remain normalized to sharp names, while user-facing display still respects Auto, Sharps, and Flats spelling. The Harmony Workbench can highlight scale and chord tones on the note wheel without changing the selected pitch class, and its previews use in-memory sine audio only.
+
+## Task 087 harmony preview lifecycle
+
+Harmony Workbench previews are pitch-class previews rather than spelling-dependent audio. Play Scale, Play Chord, and Play Arpeggio stop any active note-wheel preview before starting the next in-memory preview, use the current octave/range, cents, tuning method, tuning root, and A4 reference when available, and do not save preview audio to disk. Chord preview keeps conservative summed gain and clipping protection.
