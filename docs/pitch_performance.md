@@ -26,3 +26,9 @@ Singing pitch belongs mainly to vowels and sustained voiced material:
 ## Stress marker integration
 
 `SyllableStressMarker` should eventually influence `accentuation_db`, `timing_bias`, and `pitch_bias_cents` together. Automatic syllable detection and stress editing UI remain deferred.
+
+## Task 079 pitch/stress timeline bridge
+
+Pitch and stress are now visible through the shared Performance Timeline engine. `PitchAutomationPoint` data is converted to a derived `pitch` lane targeting `pitch_hz`, and `SyllableStressMarker` data is converted to a derived `stress` lane targeting `stress_level`.
+
+The engine exposes `pitch_value_at_ms()`, `pitch_curve_envelope()`, `stress_value_at_ms()`, and `stress_envelope()` for render, diagnostics, and future animation tracks. Note-event-derived pitch behavior remains lightweight and compatible; Task 079 does not add full vibrato or portamento editing.

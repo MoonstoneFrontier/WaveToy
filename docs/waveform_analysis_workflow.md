@@ -22,3 +22,9 @@ After a word render, Speech Diagnostics reports active automation targets plus m
 ## Render notes
 
 `accentuation_db` changes should be audible as non-destructive gain automation on the render copy. `pitch_bias_cents` is deliberately conservative and avoids obvious noisy regions where possible; if a phrase contains only unvoiced/noisy material, the pitch-bias mask may leave it unchanged.
+
+## Task 079 engine-sourced overlay data
+
+The waveform diagnostics overlay now follows the Performance Timeline engine's selected runtime data and playhead state. This keeps the waveform overlay read-only while avoiding duplicate playhead and sampled-value logic in the window.
+
+Diagnostics shown alongside the waveform should be treated as engine-owned runtime diagnostics rather than independently recalculated waveform-editor state.
