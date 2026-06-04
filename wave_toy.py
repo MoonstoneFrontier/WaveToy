@@ -1277,6 +1277,85 @@ def note_wheel_order(main_note: str = "A", layout_mode: str = NOTE_WHEEL_LAYOUT_
     return [NOTE_NAMES[(home_index + semitones) % 12] for semitones in range(12)]
 
 
+SCALE_TYPES: Dict[str, Dict[str, object]] = {
+    "major": {"label": "Major", "offsets": [0, 2, 4, 5, 7, 9, 11], "description": "bright/stable"},
+    "natural_minor": {"label": "Natural Minor", "offsets": [0, 2, 3, 5, 7, 8, 10], "description": "moody/classic minor"},
+    "harmonic_minor": {"label": "Harmonic Minor", "offsets": [0, 2, 3, 5, 7, 8, 11], "description": "dark with a strong leading tone"},
+    "melodic_minor_ascending": {"label": "Melodic Minor Ascending", "offsets": [0, 2, 3, 5, 7, 9, 11], "description": "minor color with lifted motion"},
+    "major_pentatonic": {"label": "Major Pentatonic", "offsets": [0, 2, 4, 7, 9], "description": "open/folk-friendly"},
+    "minor_pentatonic": {"label": "Minor Pentatonic", "offsets": [0, 3, 5, 7, 10], "description": "direct/blues-rock"},
+    "blues": {"label": "Blues", "offsets": [0, 3, 5, 6, 7, 10], "description": "gritty/bluesy"},
+    "chromatic": {"label": "Chromatic", "offsets": list(range(12)), "description": "all pitch classes"},
+}
+
+CHORD_TYPES: Dict[str, Dict[str, object]] = {
+    "major_triad": {"label": "Major Triad", "offsets": [0, 4, 7], "description": "bright/stable"},
+    "minor_triad": {"label": "Minor Triad", "offsets": [0, 3, 7], "description": "soft/melancholy"},
+    "diminished_triad": {"label": "Diminished Triad", "offsets": [0, 3, 6], "description": "tense/unstable"},
+    "augmented_triad": {"label": "Augmented Triad", "offsets": [0, 4, 8], "description": "floating/uncanny"},
+    "sus2": {"label": "Sus2", "offsets": [0, 2, 7], "description": "open/suspended"},
+    "sus4": {"label": "Sus4", "offsets": [0, 5, 7], "description": "resolved-or-waiting"},
+    "dominant_7": {"label": "Dominant 7", "offsets": [0, 4, 7, 10], "description": "bluesy/pulling"},
+    "major_7": {"label": "Major 7", "offsets": [0, 4, 7, 11], "description": "lush/bright"},
+    "minor_7": {"label": "Minor 7", "offsets": [0, 3, 7, 10], "description": "warm/soulful"},
+    "minor_major_7": {"label": "Minor Major 7", "offsets": [0, 3, 7, 11], "description": "noir/yearning"},
+    "diminished_7": {"label": "Diminished 7", "offsets": [0, 3, 6, 9], "description": "dramatic/symmetrical"},
+    "half_diminished_7": {"label": "Half-Diminished 7", "offsets": [0, 3, 6, 10], "description": "shadowy/jazzy"},
+    "power_chord": {"label": "Power Chord", "offsets": [0, 7], "description": "open/strong"},
+}
+
+HARMONY_ASSET_CATEGORY_SCALE_PATTERN = "scale_pattern"  # TODO: future reusable harmonic asset CRUD.
+HARMONY_ASSET_CATEGORY_CHORD_PATTERN = "chord_pattern"  # TODO: future reusable harmonic asset CRUD.
+HARMONY_ASSET_CATEGORY_CHORD_PROGRESSION = "chord_progression"  # TODO: future progression asset CRUD.
+
+
+def _pitch_classes_from_offsets(root_note: str, offsets: List[int]) -> List[str]:
+    root_index = NOTE_TO_INDEX.get(str(root_note or "A"), NOTE_TO_INDEX["A"])
+    return [NOTE_NAMES[(root_index + int(offset)) % 12] for offset in offsets]
+
+
+def scale_pitch_classes(root_note: str, scale_type: str) -> List[str]:
+    scale = SCALE_TYPES.get(scale_type, SCALE_TYPES["major"])
+    return _pitch_classes_from_offsets(root_note, scale["offsets"])  # type: ignore[arg-type]
+
+
+def chord_pitch_classes(root_note: str, chord_type: str) -> List[str]:
+    chord = CHORD_TYPES.get(chord_type, CHORD_TYPES["major_triad"])
+    return _pitch_classes_from_offsets(root_note, chord["offsets"])  # type: ignore[arg-type]
+
+
+def display_pitch_class_set(notes: List[str], root_note: str = "A", spelling_mode: str = "Auto") -> List[str]:
+    return [display_note_name(normalize_note_name(note), root_note, spelling_mode) for note in notes]
+
+
+def scale_degree_for_note(note: str, root_note: str, scale_type: str) -> int | None:
+    pitch_class = normalize_note_name(note)
+    for index, scale_note in enumerate(scale_pitch_classes(root_note, scale_type), start=1):
+        if scale_note == pitch_class:
+            return index
+    return None
+
+
+def chord_degree_for_note(note: str, root_note: str, chord_type: str) -> int | None:
+    pitch_class = normalize_note_name(note)
+    root_index = NOTE_TO_INDEX.get(str(root_note or "A"), NOTE_TO_INDEX["A"])
+    if pitch_class not in chord_pitch_classes(root_note, chord_type):
+        return None
+    semitones = (NOTE_TO_INDEX[pitch_class] - root_index) % 12
+    return {0: 1, 2: 2, 3: 3, 4: 3, 5: 4, 6: 5, 7: 5, 8: 5, 9: 7, 10: 7, 11: 7}.get(semitones)
+
+
+def harmonic_summary(root_note: str, selected_notes: List[str]) -> Dict[str, object]:
+    root = normalize_note_name(root_note)
+    normalized = [normalize_note_name(note) for note in selected_notes]
+    return {
+        "root": root,
+        "selected_notes": normalized,
+        "selected_display": display_pitch_class_set(normalized, root_note, "Auto"),
+        "intervals": [interval_theory_name(note, root) for note in normalized],
+    }
+
+
 def voice_register_label_for_frequency(frequency_hz: float | None, fallback_slider_value: int | None = None) -> str:
     if frequency_hz is None or frequency_hz <= 0.0:
         if fallback_slider_value is None:
@@ -7029,6 +7108,8 @@ class CircleOfFifthsNotePicker(QWidget):
         self._note_bubbles: Dict[str, QRectF] = {}
         self._spelling_mode = "Auto"
         self._layout_mode = NOTE_WHEEL_LAYOUT_INTERVALS
+        self._highlight_notes: set[str] = set()
+        self._highlight_root: str | None = None
         self.setMinimumSize(QSize(330, 330))
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -7072,6 +7153,20 @@ class CircleOfFifthsNotePicker(QWidget):
 
     def layout_notes(self) -> List[str]:
         return note_wheel_order(self._main_note, self._layout_mode)
+
+    def set_highlight_notes(self, notes: List[str] | set[str] | None, root_note: str | None = None) -> None:
+        highlight_notes = {normalize_note_name(note) for note in (notes or [])}
+        highlight_root = normalize_note_name(root_note) if root_note else None
+        if highlight_notes != self._highlight_notes or highlight_root != self._highlight_root:
+            self._highlight_notes = highlight_notes
+            self._highlight_root = highlight_root
+            self.update()
+
+    def highlighted_notes(self) -> set[str]:
+        return set(self._highlight_notes)
+
+    def highlight_root(self) -> str | None:
+        return self._highlight_root
 
     def _bubble_tooltip(self, note: str) -> str:
         return (
@@ -7133,6 +7228,14 @@ class CircleOfFifthsNotePicker(QWidget):
             selected = note == self._selected_note
             emotion = note_emotion(note, self._main_note)
             fill = QColor(emotion["color"])
+            highlighted = note in self._highlight_notes
+            highlight_root = highlighted and note == self._highlight_root
+            if highlighted:
+                halo = QColor("#ffffff" if not highlight_root else "#fff176")
+                halo.setAlpha(150 if highlight_root else 110)
+                painter.setPen(QPen(halo, 7 if highlight_root else 5))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(bubble.adjusted(-5, -5, 5, 5))
             if selected:
                 fill = fill.lighter(118)
                 glow = QColor(fill)
@@ -7140,8 +7243,8 @@ class CircleOfFifthsNotePicker(QWidget):
                 painter.setPen(QPen(glow, 9))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawEllipse(bubble.adjusted(-4, -4, 4, 4))
-            outline = QColor("#263238") if selected else QColor(255, 255, 255, 235)
-            pen_width = 5 if selected else 2
+            outline = QColor("#263238") if selected else QColor("#fff176") if highlight_root else QColor(255, 255, 255, 235)
+            pen_width = 5 if selected else 4 if highlight_root else 3 if highlighted else 2
 
             painter.setPen(QPen(outline, pen_width))
             painter.setBrush(fill)
@@ -7273,9 +7376,60 @@ class NoteWheelDialog(QDialog):
         preview_row.addWidget(play_interval_button)
         layout.addLayout(preview_row)
 
+        workbench = QGroupBox("Harmony Workbench")
+        workbench.setObjectName("toyGroup")
+        wb_layout = QVBoxLayout(workbench)
+        wb_layout.setContentsMargins(8, 8, 8, 8)
+        wb_layout.setSpacing(5)
+
+        wb_row = QHBoxLayout()
+        self.harmony_root_combo = NoWheelComboBox()
+        self.harmony_root_combo.addItems(["C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb", "G", "G#", "Ab", "A", "A#", "Bb", "B"])
+        self.harmony_root_combo.setCurrentText(normalize_note_name(main_note))
+        self.harmony_scale_combo = NoWheelComboBox()
+        for key, meta in SCALE_TYPES.items():
+            self.harmony_scale_combo.addItem(str(meta["label"]), key)
+        self.harmony_chord_combo = NoWheelComboBox()
+        for key, meta in CHORD_TYPES.items():
+            self.harmony_chord_combo.addItem(str(meta["label"]), key)
+        wb_row.addWidget(QLabel("Root"))
+        wb_row.addWidget(self.harmony_root_combo)
+        wb_row.addWidget(QLabel("Scale"))
+        wb_row.addWidget(self.harmony_scale_combo)
+        wb_row.addWidget(QLabel("Chord"))
+        wb_row.addWidget(self.harmony_chord_combo)
+        wb_layout.addLayout(wb_row)
+
+        wb_toggle_row = QHBoxLayout()
+        self.highlight_scale_check = QCheckBox("Highlight Scale")
+        self.highlight_chord_check = QCheckBox("Highlight Chord")
+        play_scale_button = QPushButton("Play Scale")
+        play_chord_button = QPushButton("Play Chord")
+        play_arpeggio_button = QPushButton("Play Arpeggio")
+        play_scale_button.clicked.connect(lambda: self._request_preview("scale"))
+        play_chord_button.clicked.connect(lambda: self._request_preview("chord"))
+        play_arpeggio_button.clicked.connect(lambda: self._request_preview("arpeggio"))
+        wb_toggle_row.addWidget(self.highlight_scale_check)
+        wb_toggle_row.addWidget(self.highlight_chord_check)
+        wb_toggle_row.addWidget(play_scale_button)
+        wb_toggle_row.addWidget(play_chord_button)
+        wb_toggle_row.addWidget(play_arpeggio_button)
+        wb_layout.addLayout(wb_toggle_row)
+
+        self.harmony_summary_label = QLabel()
+        self.harmony_summary_label.setObjectName("symbolHint")
+        self.harmony_summary_label.setWordWrap(True)
+        wb_layout.addWidget(self.harmony_summary_label)
+        layout.addWidget(workbench)
+
         self.picker.noteSelected.connect(lambda note: self.refresh_labels(note, self.picker.main_note()))
         self.spelling_mode_combo.currentTextChanged.connect(lambda mode: self.refresh_labels())
         self.layout_mode_combo.currentTextChanged.connect(lambda mode: self.refresh_labels())
+        self.harmony_root_combo.currentTextChanged.connect(lambda note: self.refresh_labels(main_note=note))
+        self.harmony_scale_combo.currentIndexChanged.connect(lambda index: self.refresh_labels())
+        self.harmony_chord_combo.currentIndexChanged.connect(lambda index: self.refresh_labels())
+        self.highlight_scale_check.toggled.connect(lambda checked: self.refresh_labels())
+        self.highlight_chord_check.toggled.connect(lambda checked: self.refresh_labels())
         self.refresh_labels(selected_note, main_note)
 
         close_button = QPushButton("Done")
@@ -7286,7 +7440,12 @@ class NoteWheelDialog(QDialog):
         if selected_note is not None:
             self.picker.set_note(selected_note)
         if main_note is not None:
-            self.picker.set_main_note(main_note)
+            normalized_home = normalize_note_name(main_note)
+            self.picker.set_main_note(normalized_home)
+            if hasattr(self, "harmony_root_combo") and self.harmony_root_combo.currentText() != normalized_home:
+                old_state = self.harmony_root_combo.blockSignals(True)
+                self.harmony_root_combo.setCurrentText(normalized_home)
+                self.harmony_root_combo.blockSignals(old_state)
         spelling_mode = self.spelling_mode_combo.currentText() if hasattr(self, "spelling_mode_combo") else "Auto"
         layout_mode = self.layout_mode_combo.currentText() if hasattr(self, "layout_mode_combo") else NOTE_WHEEL_LAYOUT_INTERVALS
         self.picker.set_spelling_mode(spelling_mode)
@@ -7298,9 +7457,59 @@ class NoteWheelDialog(QDialog):
             f"Home: {display_note_name(home, home, spelling_mode)} • Spelling: {active_spelling} • Layout: {layout_mode}"
         )
         self.selected_label.setText(f"Selected Note: {note_interval_summary(note, home, spelling_mode)}")
+        self._refresh_harmony_workbench()
+
+    def _current_scale_type(self) -> str:
+        return str(self.harmony_scale_combo.currentData() or "major") if hasattr(self, "harmony_scale_combo") else "major"
+
+    def _current_chord_type(self) -> str:
+        return str(self.harmony_chord_combo.currentData() or "major_triad") if hasattr(self, "harmony_chord_combo") else "major_triad"
+
+    def _refresh_harmony_workbench(self) -> None:
+        if not hasattr(self, "harmony_summary_label"):
+            return
+        root = self.harmony_root_combo.currentText() if hasattr(self, "harmony_root_combo") else self.picker.main_note()
+        root = normalize_note_name(root)
+        self.picker.set_main_note(root)
+        spelling_mode = self.spelling_mode_combo.currentText() if hasattr(self, "spelling_mode_combo") else "Auto"
+        scale_type = self._current_scale_type()
+        chord_type = self._current_chord_type()
+        scale_notes = scale_pitch_classes(root, scale_type)
+        chord_notes = chord_pitch_classes(root, chord_type)
+        highlight_notes: set[str] = set()
+        if self.highlight_scale_check.isChecked():
+            highlight_notes.update(scale_notes)
+        if self.highlight_chord_check.isChecked():
+            highlight_notes.update(chord_notes)
+        self.picker.set_highlight_notes(highlight_notes, root if highlight_notes else None)
+        scale_meta = SCALE_TYPES.get(scale_type, SCALE_TYPES["major"])
+        chord_meta = CHORD_TYPES.get(chord_type, CHORD_TYPES["major_triad"])
+        scale_display = " ".join(display_pitch_class_set(scale_notes, root, spelling_mode))
+        chord_display = " ".join(display_pitch_class_set(chord_notes, root, spelling_mode))
+        selected = self.picker.selected_note()
+        selected_display = display_note_name(selected, root, spelling_mode)
+        scale_degree = scale_degree_for_note(selected, root, scale_type)
+        chord_degree = chord_degree_for_note(selected, root, chord_type)
+        degree_bits = []
+        if scale_degree is not None:
+            degree_bits.append(f"scale degree {scale_degree} / {interval_theory_name(selected, root)}")
+        if chord_degree is not None:
+            degree_bits.append(f"chord degree {chord_degree}")
+        degree_text = f"{selected_display} is " + " • ".join(degree_bits) if degree_bits else f"{selected_display} is outside the current scale/chord."
+        root_display = display_note_name(root, root, spelling_mode)
+        self.harmony_summary_label.setText(
+            f"{root_display} {scale_meta['label']}: {scale_display} — {scale_meta['description']}\n"
+            f"{root_display} {chord_meta['label']}: {chord_display} — {chord_meta['description']}\n"
+            f"{degree_text}"
+        )
 
     def _request_preview(self, target: str) -> None:
         if self.preview_callback is None:
+            return
+        if target in {"scale", "chord", "arpeggio"}:
+            mode = f"{target}:{self._current_scale_type() if target == 'scale' else self._current_chord_type()}"
+            root = self.harmony_root_combo.currentText() if hasattr(self, "harmony_root_combo") else self.picker.main_note()
+            self.preview_callback(mode, normalize_note_name(root))
             return
         mode = self.interval_preview_combo.currentText() if target == "interval" and hasattr(self, "interval_preview_combo") else target
         self.preview_callback(mode, self.picker.selected_note())
@@ -20138,7 +20347,23 @@ class WaveToyWindow(QMainWindow):
                 return (gain * np.sin(2.0 * np.pi * frequency * t) * envelope).astype(np.float32)
 
             mode = str(preview_mode or "note")
-            if mode == "home":
+            if mode.startswith("scale:"):
+                scale_type = mode.split(":", 1)[1] or "major"
+                notes = scale_pitch_classes(selected_note, scale_type)
+                gap = np.zeros(int(SAMPLE_RATE * 0.025), dtype=np.float32)
+                audio = np.concatenate([part for note in notes for part in (tone(note, 0.15, 0.14), gap)])
+            elif mode.startswith("chord:"):
+                chord_type = mode.split(":", 1)[1] or "major_triad"
+                notes = chord_pitch_classes(selected_note, chord_type)
+                gain = max(0.055, 0.18 / max(1, len(notes)))
+                audio = sum((tone(note, 0.36, gain) for note in notes), np.zeros(int(SAMPLE_RATE * 0.36), dtype=np.float32))
+                audio = np.clip(audio, -0.75, 0.75).astype(np.float32)
+            elif mode.startswith("arpeggio:"):
+                chord_type = mode.split(":", 1)[1] or "major_triad"
+                notes = chord_pitch_classes(selected_note, chord_type)
+                gap = np.zeros(int(SAMPLE_RATE * 0.025), dtype=np.float32)
+                audio = np.concatenate([part for note in notes for part in (tone(note, 0.16, 0.15), gap)])
+            elif mode == "home":
                 audio = tone(home_note, 0.22)
             elif mode == "Melodic":
                 gap = np.zeros(int(SAMPLE_RATE * 0.035), dtype=np.float32)

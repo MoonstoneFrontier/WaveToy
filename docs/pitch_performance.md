@@ -52,3 +52,7 @@ Visible note wheel dialogs and wave pitch-panel note buttons now refresh from th
 Displayed spelling remains separate from stored pitch class: Auto, Sharps, and Flats only change visual note names. Preview buttons use the current home and selected pitch classes for audio and current spelling only for labels. Starting a new note-wheel preview replaces any current preview, and closing the dialog stops preview playback when safe. Preview audio remains in memory and is not exported.
 
 Voice Range labels refresh from the current tuned frequency whenever note, octave/range, cents, tuning method, tuning root, or A4 reference changes. Slider-threshold wording remains a fallback and continues to use musical register descriptors only. The Circle of Fifths view intentionally keeps its fixed fifths order rather than rotating around Home.
+
+## Task 086 Harmony Workbench foundation
+
+The pitch tools now include foundational scale and chord helpers. Internal pitch classes remain normalized to sharp names, while user-facing display still respects Auto, Sharps, and Flats spelling. The Harmony Workbench can highlight scale and chord tones on the note wheel without changing the selected pitch class, and its previews use in-memory sine audio only.

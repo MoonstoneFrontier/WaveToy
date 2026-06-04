@@ -62,3 +62,7 @@ The **Voice Range** display now derives its register label from the current note
 ## Task 085 synchronization note
 
 Task 085 tightened live refresh behavior for the Task 084 controls. Visible wheel dialogs now refresh when the home note changes, spelling and layout changes redraw labels/tooltips without changing the stored pitch class, and closing a dialog stops any active in-memory preview when safe. The Circle of Fifths layout still uses the fixed fifths order listed above.
+
+## Task 086 follow-up
+
+The note wheel preview system now also supports scale, chord, and arpeggio workbench previews. These still use the same in-memory preview path and do not write preview audio files.
