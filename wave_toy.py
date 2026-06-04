@@ -1164,19 +1164,53 @@ NOTE_INTERVAL_ROLES = [
 # emotional label from its distance to the selected base note/key, not from the
 # absolute spelling displayed on the wheel.
 NOTE_INTERVAL_EMOTIONS = {
-    "root": {"emoji": "🏠", "label": "Home Root", "color": "#F4F1DE"},
-    "minor_second": {"emoji": "😬", "label": "Close Tension", "color": "#277DA1"},
-    "major_second": {"emoji": "🚶", "label": "Gentle Step", "color": "#F8961E"},
-    "minor_third": {"emoji": "🥲", "label": "Tender Minor", "color": "#4D908E"},
-    "major_third": {"emoji": "😁", "label": "Bright Major", "color": "#FFD166"},
-    "perfect_fourth": {"emoji": "🫂", "label": "Warm Support", "color": "#90BE6D"},
-    "tritone": {"emoji": "🌗", "label": "Unstable Tritone", "color": "#6A4C93"},
-    "perfect_fifth": {"emoji": "🚀", "label": "Open Fifth", "color": "#F3722C"},
-    "minor_sixth": {"emoji": "🌙", "label": "Dreamy Sixth", "color": "#4361EE"},
-    "major_sixth": {"emoji": "🤩", "label": "Lifted Sixth", "color": "#F9C74F"},
-    "minor_seventh": {"emoji": "🔥", "label": "Pulling Seventh", "color": "#F94144"},
-    "major_seventh": {"emoji": "🔮", "label": "Yearning Seventh", "color": "#577590"},
+    "root": {"emoji": "🏠", "label": "Home / Stable", "color": "#F4F1DE"},
+    "minor_second": {"emoji": "😬", "label": "Tense / Close", "color": "#277DA1"},
+    "major_second": {"emoji": "🚶", "label": "Step / Moving", "color": "#F8961E"},
+    "minor_third": {"emoji": "🥲", "label": "Melancholy / Emotional", "color": "#4D908E"},
+    "major_third": {"emoji": "😁", "label": "Bright / Happy", "color": "#FFD166"},
+    "perfect_fourth": {"emoji": "🫂", "label": "Supportive / Suspended", "color": "#90BE6D"},
+    "tritone": {"emoji": "🌗", "label": "Unstable / Dramatic", "color": "#6A4C93"},
+    "perfect_fifth": {"emoji": "🚀", "label": "Open / Strong", "color": "#F3722C"},
+    "minor_sixth": {"emoji": "🌙", "label": "Dark / Dreamlike", "color": "#4361EE"},
+    "major_sixth": {"emoji": "🤩", "label": "Lifted / Warm", "color": "#F9C74F"},
+    "minor_seventh": {"emoji": "🔥", "label": "Pulling / Bluesy", "color": "#F94144"},
+    "major_seventh": {"emoji": "🔮", "label": "Yearning / Leading", "color": "#577590"},
 }
+
+NOTE_INTERVAL_THEORY = {
+    "root": "Root",
+    "minor_second": "Minor Second",
+    "major_second": "Major Second",
+    "minor_third": "Minor Third",
+    "major_third": "Major Third",
+    "perfect_fourth": "Perfect Fourth",
+    "tritone": "Tritone",
+    "perfect_fifth": "Perfect Fifth",
+    "minor_sixth": "Minor Sixth",
+    "major_sixth": "Major Sixth",
+    "minor_seventh": "Minor Seventh",
+    "major_seventh": "Major Seventh",
+}
+
+NOTE_INTERVAL_RELATIONSHIPS = {
+    "root": "Home",
+    "minor_second": "Half-Step Tension",
+    "major_second": "Step Away",
+    "minor_third": "Minor Color",
+    "major_third": "Major Color",
+    "perfect_fourth": "Fourth Support",
+    "tritone": "Tritone Pull",
+    "perfect_fifth": "Fifth Anchor",
+    "minor_sixth": "Minor Sixth Color",
+    "major_sixth": "Major Sixth Color",
+    "minor_seventh": "Seventh Pull",
+    "major_seventh": "Leading Tone",
+}
+
+NOTE_WHEEL_LAYOUT_INTERVALS = "Intervals"
+NOTE_WHEEL_LAYOUT_FIFTHS = "Circle of Fifths"
+NOTE_FIFTHS_ORDER = ["C", "G", "D", "A", "E", "B", "F#", "C#", "G#", "D#", "A#", "F"]
 
 
 def normalize_note_name(note: str) -> str:
@@ -1184,10 +1218,18 @@ def normalize_note_name(note: str) -> str:
     return NOTE_NAMES[index]
 
 
-def interval_role(note: str, main_note: str) -> str:
+def interval_semitones(note: str, main_note: str) -> int:
     note_index = NOTE_TO_INDEX.get(str(note or "A"), NOTE_TO_INDEX["A"])
     home_index = NOTE_TO_INDEX.get(str(main_note or "A"), NOTE_TO_INDEX["A"])
-    return NOTE_INTERVAL_ROLES[(note_index - home_index) % 12]
+    return (note_index - home_index) % 12
+
+
+def interval_role(note: str, main_note: str) -> str:
+    return NOTE_INTERVAL_ROLES[interval_semitones(note, main_note)]
+
+
+def interval_theory_name(note: str, main_note: str) -> str:
+    return NOTE_INTERVAL_THEORY.get(interval_role(note, main_note), "Interval")
 
 
 def note_spelling_mode_for_key(main_note: str, spelling_mode: str = "Auto") -> str:
@@ -1215,21 +1257,65 @@ def note_emotion(note: str, main_note: str = "A") -> Dict[str, str]:
 
 def note_relationship(note: str, main_note: str) -> str:
     role = interval_role(note, main_note)
-    labels = {
-        "root": "🏠 Home",
-        "minor_second": "😬 Half-Step Tension",
-        "major_second": "🚶 Step Away",
-        "minor_third": "🥲 Minor Color",
-        "major_third": "😁 Major Color",
-        "perfect_fourth": "🫂 Fourth Support",
-        "tritone": "🌗 Tritone Pull",
-        "perfect_fifth": "🤝 Fifth Anchor",
-        "minor_sixth": "🌙 Minor Sixth",
-        "major_sixth": "🤩 Major Sixth",
-        "minor_seventh": "🔥 Seventh Pull",
-        "major_seventh": "🔮 Leading Tone",
-    }
-    return labels.get(role, "🌈 Partner")
+    return NOTE_INTERVAL_RELATIONSHIPS.get(role, "Partner")
+
+
+def note_interval_summary(note: str, main_note: str, spelling_mode: str = "Auto") -> str:
+    semitones = interval_semitones(note, main_note)
+    emotion = note_emotion(note, main_note)
+    return (
+        f"{display_note_name(note, main_note, spelling_mode)} • {interval_theory_name(note, main_note)} • "
+        f"{semitones} semitone{'s' if semitones != 1 else ''} • {emotion['label']} • {note_relationship(note, main_note)}"
+    )
+
+
+def note_wheel_order(main_note: str = "A", layout_mode: str = NOTE_WHEEL_LAYOUT_INTERVALS) -> List[str]:
+    if layout_mode == NOTE_WHEEL_LAYOUT_FIFTHS:
+        return list(NOTE_FIFTHS_ORDER)
+    home_index = NOTE_TO_INDEX.get(str(main_note or "A"), NOTE_TO_INDEX["A"])
+    return [NOTE_NAMES[(home_index + semitones) % 12] for semitones in range(12)]
+
+
+def voice_register_label_for_frequency(frequency_hz: float | None, fallback_slider_value: int | None = None) -> str:
+    if frequency_hz is None or frequency_hz <= 0.0:
+        if fallback_slider_value is None:
+            return "🎚️ Mid register"
+        return voice_register_label_for_octave_value(fallback_slider_value)
+    if frequency_hz < 82.41:
+        return "🎚️ Contrabass — very low register"
+    if frequency_hz < 146.83:
+        return "🎚️ Bass — low register"
+    if frequency_hz < 196.00:
+        return "🎚️ Baritone — low-mid register"
+    if frequency_hz < 261.63:
+        return "🎚️ Tenor — mid register"
+    if frequency_hz < 349.23:
+        return "🎚️ Alto — upper-mid register"
+    if frequency_hz < 523.25:
+        return "🎚️ Mezzo-soprano — high register"
+    if frequency_hz < 783.99:
+        return "🎚️ Soprano — very high register"
+    if frequency_hz < 1046.50:
+        return "🎚️ High soprano — extreme high register"
+    return "🎚️ Whistle range — highest register"
+
+
+def voice_register_label_for_octave_value(value: int) -> str:
+    voice_value = value / OCTAVE_SLIDER_SCALE
+    ranges = [
+        (2.45, "🎚️ Contrabass — very low register"),
+        (2.95, "🎚️ Bass — low register"),
+        (3.35, "🎚️ Baritone — low-mid register"),
+        (3.80, "🎚️ Tenor — mid register"),
+        (4.25, "🎚️ Alto — upper-mid register"),
+        (4.70, "🎚️ Mezzo-soprano — high register"),
+        (5.15, "🎚️ Soprano — very high register"),
+        (5.60, "🎚️ High soprano — extreme high register"),
+    ]
+    for threshold, label in ranges:
+        if voice_value <= threshold:
+            return label
+    return "🎚️ Whistle range — highest register"
 
 
 def emotional_note_text(note: str, main_note: str | None = None, spelling_mode: str = "Auto") -> str:
@@ -6928,11 +7014,11 @@ class StereoFieldPreview(QWidget):
 
 
 class CircleOfFifthsNotePicker(QWidget):
-    """Visual circular note selector arranged in circle-of-fifths order."""
+    """Visual circular note selector with interval and circle-of-fifths layouts."""
 
     noteSelected = Signal(str)
 
-    FIFTHS_ORDER = ["C", "G", "D", "A", "E", "B", "F#", "C#", "G#", "D#", "A#", "F"]
+    FIFTHS_ORDER = NOTE_FIFTHS_ORDER
 
     def __init__(self, accent_color: QColor | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -6941,10 +7027,11 @@ class CircleOfFifthsNotePicker(QWidget):
         self._accent_color = QColor(accent_color or QColor("#ff8cc6"))
         self._note_bubbles: Dict[str, QRectF] = {}
         self._spelling_mode = "Auto"
+        self._layout_mode = NOTE_WHEEL_LAYOUT_INTERVALS
         self.setMinimumSize(QSize(330, 330))
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setToolTip("The wheel picks the note. Each note has a color, mood, and relationship to Home.")
+        self.setToolTip("The wheel picks the note. Colors and moods are interval-relative to Home.")
 
     def sizeHint(self) -> QSize:
         return QSize(330, 330)
@@ -6973,14 +7060,37 @@ class CircleOfFifthsNotePicker(QWidget):
             self._spelling_mode = mode
             self.update()
 
+    def set_layout_mode(self, mode: str) -> None:
+        mode = mode if mode in {NOTE_WHEEL_LAYOUT_INTERVALS, NOTE_WHEEL_LAYOUT_FIFTHS} else NOTE_WHEEL_LAYOUT_INTERVALS
+        if mode != self._layout_mode:
+            self._layout_mode = mode
+            self.update()
+
+    def layout_mode(self) -> str:
+        return self._layout_mode
+
+    def layout_notes(self) -> List[str]:
+        return note_wheel_order(self._main_note, self._layout_mode)
+
+    def _bubble_tooltip(self, note: str) -> str:
+        return (
+            f"{display_note_name(note, self._main_note, self._spelling_mode)} • "
+            f"{interval_theory_name(note, self._main_note)} • "
+            f"{interval_semitones(note, self._main_note)} semitones • "
+            f"{note_emotion(note, self._main_note)['label']} • "
+            f"Spelling: {note_spelling_mode_for_key(self._main_note, self._spelling_mode)} • "
+            f"Layout: {self._layout_mode}"
+        )
+
     def _bubble_rects(self) -> Dict[str, QRectF]:
         rect = QRectF(self.rect()).adjusted(16, 16, -16, -16)
         center = rect.center()
         radius = min(rect.width(), rect.height()) * 0.36
         bubble_radius = max(20.0, min(rect.width(), rect.height()) * 0.075)
         bubble_rects: Dict[str, QRectF] = {}
-        for index, note in enumerate(self.FIFTHS_ORDER):
-            angle = -math.pi / 2.0 + index * 2.0 * math.pi / len(self.FIFTHS_ORDER)
+        notes = self.layout_notes()
+        for index, note in enumerate(notes):
+            angle = -math.pi / 2.0 + index * 2.0 * math.pi / len(notes)
             x = center.x() + math.cos(angle) * radius
             y = center.y() + math.sin(angle) * radius
             size = bubble_radius * (2.35 if note == self._selected_note else 2.0)
@@ -7012,10 +7122,12 @@ class CircleOfFifthsNotePicker(QWidget):
         painter.setFont(QFont("Arial", 16, QFont.Bold))
         painter.drawText(rect.adjusted(0, 10, 0, 0), Qt.AlignTop | Qt.AlignHCenter, "Note Wheel")
         painter.setFont(QFont("Arial", 9, QFont.Bold))
-        painter.drawText(rect.adjusted(34, 0, -34, -16), Qt.AlignBottom | Qt.AlignHCenter, "Around the circle: C → G → D → A ...")
+        caption = "Around the circle: chromatic intervals from Home" if self._layout_mode == NOTE_WHEEL_LAYOUT_INTERVALS else "Around the circle: C → G → D → A ..."
+        painter.drawText(rect.adjusted(34, 0, -34, -16), Qt.AlignBottom | Qt.AlignHCenter, caption)
 
+        notes = self.layout_notes()
         self._note_bubbles = self._bubble_rects()
-        for index, note in enumerate(self.FIFTHS_ORDER):
+        for index, note in enumerate(notes):
             bubble = self._note_bubbles[note]
             selected = note == self._selected_note
             emotion = note_emotion(note, self._main_note)
@@ -7040,8 +7152,11 @@ class CircleOfFifthsNotePicker(QWidget):
             painter.setFont(QFont("Arial", 12 if selected else 10, QFont.Bold))
             painter.drawText(bubble.adjusted(0, 22, 0, -2), Qt.AlignCenter, display_note_name(note, self._main_note, self._spelling_mode))
 
-        selected_emotion = note_emotion(self._selected_note, self._main_note)
-        center_text = f"Home: {emotional_note_text(self._main_note, self._main_note, self._spelling_mode)}\n{display_note_name(self._selected_note, self._main_note, self._spelling_mode)} • {selected_emotion['label']}"
+        center_text = (
+            f"Home: {display_note_name(self._main_note, self._main_note, self._spelling_mode)}\n"
+            f"Spelling: {note_spelling_mode_for_key(self._main_note, self._spelling_mode)}\n"
+            f"Layout: {self._layout_mode}"
+        )
         painter.setFont(QFont("Arial", 12, QFont.Bold))
         painter.setPen(QColor("#263238"))
         painter.drawText(QRectF(center.x() - 76, center.y() - 42, 152, 84), Qt.AlignCenter, center_text)
@@ -7058,16 +7173,15 @@ class CircleOfFifthsNotePicker(QWidget):
     def mouseMoveEvent(self, event) -> None:
         for note, bubble in self._bubble_rects().items():
             if bubble.contains(event.position()):
-                emotion = note_emotion(note, self._main_note)
-                self.setToolTip(f"{display_note_name(note, self._main_note, self._spelling_mode)} — {emotion['label']} • {note_relationship(note, self._main_note)}")
+                self.setToolTip(self._bubble_tooltip(note))
                 return
-        self.setToolTip("The wheel picks the note. Each note has a color, mood, and relationship to Home.")
+        self.setToolTip("The wheel picks the note. Colors and moods are interval-relative to Home.")
         super().mouseMoveEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key_Left, Qt.Key_Up, Qt.Key_Right, Qt.Key_Down):
-            notes = self.FIFTHS_ORDER
-            index = notes.index(self._selected_note) if self._selected_note in notes else notes.index("A")
+            notes = self.layout_notes()
+            index = notes.index(self._selected_note) if self._selected_note in notes else 0
             step = -1 if event.key() in (Qt.Key_Left, Qt.Key_Up) else 1
             self.set_note(notes[(index + step) % len(notes)])
             self.noteSelected.emit(self._selected_note)
@@ -7090,8 +7204,10 @@ class NoteWheelDialog(QDialog):
         accent_color: QColor,
         main_note: str = "A",
         parent: QWidget | None = None,
+        preview_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         super().__init__(parent)
+        self.preview_callback = preview_callback
         self.setWindowTitle(f"🎡 Emotional Note Wheel - {wave_name}")
         self.setModal(True)
 
@@ -7112,6 +7228,14 @@ class NoteWheelDialog(QDialog):
         self.spelling_mode_combo.setToolTip("Auto follows the selected base note/key; Sharps or Flats force one enharmonic spelling style.")
         spelling_row.addWidget(spelling_label)
         spelling_row.addWidget(self.spelling_mode_combo)
+        spelling_row.addSpacing(12)
+        layout_label = QLabel("Wheel Layout")
+        layout_label.setObjectName("tinyPitchLabel")
+        self.layout_mode_combo = NoWheelComboBox()
+        self.layout_mode_combo.addItems([NOTE_WHEEL_LAYOUT_INTERVALS, NOTE_WHEEL_LAYOUT_FIFTHS])
+        self.layout_mode_combo.setToolTip("Intervals places Home at the top and moves chromatically; Circle of Fifths preserves fifth relationships.")
+        spelling_row.addWidget(layout_label)
+        spelling_row.addWidget(self.layout_mode_combo)
         spelling_row.addStretch(1)
         layout.addLayout(spelling_row)
 
@@ -7129,8 +7253,26 @@ class NoteWheelDialog(QDialog):
         self.selected_label.setWordWrap(True)
         layout.addWidget(self.selected_label)
 
+        preview_row = QHBoxLayout()
+        self.interval_preview_combo = NoWheelComboBox()
+        self.interval_preview_combo.addItems(["Melodic", "Harmonic"])
+        self.interval_preview_combo.setToolTip("Melodic plays Home then the selected note; Harmonic plays both together at a safe level.")
+        play_home_button = QPushButton("Play Home")
+        play_note_button = QPushButton("Play Note")
+        play_interval_button = QPushButton("Play Interval")
+        play_home_button.clicked.connect(lambda: self._request_preview("home"))
+        play_note_button.clicked.connect(lambda: self._request_preview("note"))
+        play_interval_button.clicked.connect(lambda: self._request_preview("interval"))
+        preview_row.addWidget(QLabel("Preview"))
+        preview_row.addWidget(self.interval_preview_combo)
+        preview_row.addWidget(play_home_button)
+        preview_row.addWidget(play_note_button)
+        preview_row.addWidget(play_interval_button)
+        layout.addLayout(preview_row)
+
         self.picker.noteSelected.connect(lambda note: self.refresh_labels(note, self.picker.main_note()))
         self.spelling_mode_combo.currentTextChanged.connect(lambda mode: self.refresh_labels())
+        self.layout_mode_combo.currentTextChanged.connect(lambda mode: self.refresh_labels())
         self.refresh_labels(selected_note, main_note)
 
         close_button = QPushButton("Done")
@@ -7143,15 +7285,22 @@ class NoteWheelDialog(QDialog):
         if main_note is not None:
             self.picker.set_main_note(main_note)
         spelling_mode = self.spelling_mode_combo.currentText() if hasattr(self, "spelling_mode_combo") else "Auto"
+        layout_mode = self.layout_mode_combo.currentText() if hasattr(self, "layout_mode_combo") else NOTE_WHEEL_LAYOUT_INTERVALS
         self.picker.set_spelling_mode(spelling_mode)
+        self.picker.set_layout_mode(layout_mode)
         note = self.picker.selected_note()
         home = self.picker.main_note()
-        emotion = note_emotion(note, home)
-        role = interval_role(note, home).replace("_", " ")
-        self.center_label.setText(f"Home: {emotional_note_text(home, home, spelling_mode)} • Spelling: {note_spelling_mode_for_key(home, spelling_mode)}")
-        self.selected_label.setText(
-            f"Selected Note: {emotional_note_text(note, home, spelling_mode)} • {emotion['label']} • {role} • {note_relationship(note, home)}"
+        active_spelling = note_spelling_mode_for_key(home, spelling_mode)
+        self.center_label.setText(
+            f"Home: {display_note_name(home, home, spelling_mode)} • Spelling: {active_spelling} • Layout: {layout_mode}"
         )
+        self.selected_label.setText(f"Selected Note: {note_interval_summary(note, home, spelling_mode)}")
+
+    def _request_preview(self, target: str) -> None:
+        if self.preview_callback is None:
+            return
+        mode = self.interval_preview_combo.currentText() if target == "interval" and hasattr(self, "interval_preview_combo") else target
+        self.preview_callback(mode, self.picker.selected_note())
 
 
 class VocalTractCanvas(QWidget):
@@ -19608,23 +19757,9 @@ class WaveToyWindow(QMainWindow):
             return "🌿 Medium"
         return "🌳 Big"
 
-    def _octave_picture_text(self, value: int) -> str:
-        """Map the pitch/register slider to musical range descriptors only."""
-        voice_value = value / OCTAVE_SLIDER_SCALE
-        ranges = [
-            (2.45, "🎚️ Contrabass"),
-            (2.95, "🎚️ Bass"),
-            (3.35, "🎚️ Baritone"),
-            (3.80, "🎚️ Tenor"),
-            (4.25, "🎚️ Alto"),
-            (4.70, "🎚️ Mezzo-soprano"),
-            (5.15, "🎚️ Soprano"),
-            (5.60, "🎚️ High soprano"),
-        ]
-        for threshold, label in ranges:
-            if voice_value <= threshold:
-                return label
-        return "🎚️ Whistle range"
+    def _octave_picture_text(self, value: int, frequency_hz: float | None = None) -> str:
+        """Map the current pitch/register to musical range descriptors only."""
+        return voice_register_label_for_frequency(frequency_hz, value)
 
     def _cents_picture_text(self, value: int) -> str:
         cents_value = value / 100.0
@@ -19906,6 +20041,7 @@ class WaveToyWindow(QMainWindow):
                 accent,
                 self.note_combo.currentText(),
                 self,
+                preview_callback=lambda mode, note, wt=wave_type: self._preview_note_wheel_audio(wt, mode, note),
             )
             dialog.setModal(False)
             dialog.setWindowFlag(Qt.Tool, True)
@@ -19928,6 +20064,55 @@ class WaveToyWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+
+    def _preview_note_wheel_audio(self, wave_type: str, preview_mode: str, selected_note: str) -> None:
+        """Play a short in-memory note-wheel preview without exporting audio."""
+        if sd is None:
+            self._show_playback_warning("Note wheel previews require sounddevice for in-memory playback.")
+            return
+        try:
+            follows = self.wave_follow_pitch_buttons.get(wave_type).isChecked() if wave_type in self.wave_follow_pitch_buttons else False
+            home_note = self.note_combo.currentText() if hasattr(self, "note_combo") else "A"
+            if follows:
+                octave = int(round(self.octave_slider.value() / OCTAVE_SLIDER_SCALE))
+                cents = float(self.cents_slider.value()) / 100.0
+            else:
+                octave_spin = self.wave_octave_spins.get(wave_type)
+                cents_slider = self.wave_cents_sliders.get(wave_type)
+                octave = int(octave_spin.value()) if octave_spin is not None else int(round(self.octave_slider.value() / OCTAVE_SLIDER_SCALE))
+                cents = float(cents_slider.value()) / 100.0 if cents_slider is not None else float(self.cents_slider.value()) / 100.0
+            method = str(self.tuning_method_combo.currentData()) if hasattr(self, "tuning_method_combo") else "equal_temperament_12"
+            root = self.tuning_root_combo.currentText() if hasattr(self, "tuning_root_combo") else "A"
+            reference = float(self.tuning_reference_spin.value()) if hasattr(self, "tuning_reference_spin") else 440.0
+
+            def tone(note: str, seconds: float, gain: float = 0.18) -> np.ndarray:
+                frequency = frequency_for_note(note, octave, cents, method, root, reference)
+                sample_count = max(1, int(SAMPLE_RATE * seconds))
+                t = np.arange(sample_count, dtype=np.float32) / SAMPLE_RATE
+                envelope = np.ones(sample_count, dtype=np.float32)
+                ramp = min(sample_count // 2, int(SAMPLE_RATE * 0.015))
+                if ramp > 0:
+                    fade = np.linspace(0.0, 1.0, ramp, dtype=np.float32)
+                    envelope[:ramp] = fade
+                    envelope[-ramp:] = fade[::-1]
+                return (gain * np.sin(2.0 * np.pi * frequency * t) * envelope).astype(np.float32)
+
+            mode = str(preview_mode or "note")
+            if mode == "home":
+                audio = tone(home_note, 0.22)
+            elif mode == "Melodic":
+                gap = np.zeros(int(SAMPLE_RATE * 0.035), dtype=np.float32)
+                audio = np.concatenate([tone(home_note, 0.18), gap, tone(selected_note, 0.18)])
+            elif mode == "Harmonic":
+                audio = tone(home_note, 0.26, 0.12) + tone(selected_note, 0.26, 0.12)
+                audio = np.clip(audio, -0.8, 0.8).astype(np.float32)
+            else:
+                audio = tone(selected_note, 0.22)
+            sd.stop()
+            sd.play(audio, SAMPLE_RATE, blocking=False)
+        except Exception as exc:
+            self._show_playback_warning(str(exc))
 
     def _update_wave_pitch_label(self, wave_type: str) -> None:
         if wave_type not in self.wave_pitch_labels:
@@ -20041,7 +20226,7 @@ class WaveToyWindow(QMainWindow):
                 float(self.tuning_reference_spin.value()),
             )
 
-        self.octave_label.setText(self._octave_picture_text(self.octave_slider.value()))
+        self.octave_label.setText(self._octave_picture_text(self.octave_slider.value(), base_frequency))
         self.cents_label.setText(self._cents_picture_text(cents))
         note = self.note_combo.currentText()
         emotion = note_emotion(note, note)

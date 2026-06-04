@@ -50,3 +50,7 @@ Musical Timing remains disabled by default. When disabled, the engine returns em
 ## Task 083 note picker spelling note
 
 The note/color/mood picker remains a pitch-class picker, not a full music theory engine. Mood and color are calculated from the interval between the selected note and the current base note/key. Auto spelling uses sharp labels for sharp-oriented keys and flat labels for flat-oriented keys, with manual Sharps and Flats overrides for compact enharmonic display.
+
+## Task 084 note wheel layout reminder
+
+The note/color/mood picker now distinguishes **Intervals** layout from **Circle of Fifths** layout. Intervals is the default because mood and color are interval-relative to the current home note; Circle of Fifths remains an optional educational geometry. This does not change the future Musical Timing plan: current speech timing remains millisecond-based, and beat/measure timing is still future architecture work.
