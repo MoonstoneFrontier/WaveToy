@@ -46,7 +46,7 @@ import wave
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 
 from wavetoy.speech_organs import ResonanceTractState, SpeechOrganState, VoiceBoxState
 from wavetoy.svg import anatomical_mouth_svg, svg_metadata_for_clip, vocal_tract_side_svg
@@ -2289,25 +2289,73 @@ class PerformanceTimelineEngine:
         self.timeline_tracks: List[TimelineParameterTrack] = list(timeline_tracks or [])
         self.musical_timing_settings = (musical_timing_settings or MusicalTimingSettings()).clamped()
         self.playhead_ms = 0
+        self.selected_track_id: str | None = None
+        self.selected_point_index: int | None = None
+        self.dirty_generation = 0
+        self.last_change_reason = "initialized"
         self.pitch_bridge_active = False
         self.stress_bridge_active = False
+        self.on_playhead_changed: Callable[["PerformanceTimelineEngine"], None] | None = None
+        self.on_selection_changed: Callable[["PerformanceTimelineEngine"], None] | None = None
+        self.on_tracks_changed: Callable[["PerformanceTimelineEngine"], None] | None = None
+        self.on_diagnostics_changed: Callable[["PerformanceTimelineEngine"], None] | None = None
+        self._notifying_callbacks: set[str] = set()
         self._compiled_tracks: List[CompiledTimelineTrack] = []
         self._compiled_hash = ""
-        self.sync_bridges()
+        self.sync_bridges(reason="initialized")
         self.compile_tracks()
 
-    def set_tracks(self, timeline_tracks: List[TimelineParameterTrack] | None) -> None:
+    def _notify(self, callback_name: str) -> None:
+        callback = getattr(self, callback_name, None)
+        if callback is None or callback_name in self._notifying_callbacks:
+            return
+        self._notifying_callbacks.add(callback_name)
+        try:
+            callback(self)
+        finally:
+            self._notifying_callbacks.discard(callback_name)
+
+    def _bump_dirty_generation(self, reason: str) -> None:
+        self.dirty_generation += 1
+        self.last_change_reason = str(reason or "runtime changed")
+
+    def _clamp_selection(self) -> None:
+        track = self.selected_track()
+        if track is None:
+            self.selected_track_id = self.timeline_tracks[0].track_id if self.timeline_tracks else None
+            track = self.selected_track()
+        if track is None or not track.points:
+            self.selected_point_index = None
+        elif self.selected_point_index is not None:
+            self.selected_point_index = int(np.clip(self.selected_point_index, 0, len(track.points) - 1))
+
+    def set_tracks(self, timeline_tracks: List[TimelineParameterTrack] | None, reason: str = "tracks changed") -> None:
         self.timeline_tracks = list(timeline_tracks or [])
-        self.sync_bridges()
-        self.compile_tracks()
+        self.sync_bridges(reason=reason)
+        self.mark_tracks_dirty(reason)
 
     def set_musical_timing_settings(self, settings: MusicalTimingSettings | None) -> None:
         self.musical_timing_settings = (settings or MusicalTimingSettings()).clamped()
 
-    def set_playhead_ms(self, time_ms: float) -> None:
-        self.playhead_ms = int(max(0, round(float(time_ms))))
+    def set_playhead_ms(self, time_ms: float, reason: str = "ui") -> None:
+        new_ms = int(max(0, round(float(time_ms))))
+        if new_ms == self.playhead_ms:
+            return
+        self.playhead_ms = new_ms
+        self.last_change_reason = str(reason or "playhead changed")
+        self._notify("on_playhead_changed")
+        self._notify("on_diagnostics_changed")
 
-    def sync_bridges(self, pitch_points: List[PitchAutomationPoint] | None = None, stress_markers: List[SyllableStressMarker] | None = None) -> List[TimelineParameterTrack]:
+    def playhead_seconds(self) -> float:
+        return float(self.playhead_ms) / 1000.0
+
+    def scrub_to_ms(self, time_ms: float) -> None:
+        self.set_playhead_ms(time_ms, reason="scrub")
+
+    def reset_playhead(self) -> None:
+        self.set_playhead_ms(0, reason="reset")
+
+    def sync_bridges(self, pitch_points: List[PitchAutomationPoint] | None = None, stress_markers: List[SyllableStressMarker] | None = None, reason: str = "bridge lanes synced") -> List[TimelineParameterTrack]:
         bridge_prefixes = ("stress_bridge_", "pitch_bridge_")
         self.timeline_tracks = [track for track in self.timeline_tracks if not str(track.track_id).startswith(bridge_prefixes)]
         self.stress_bridge_active = bool(stress_markers)
@@ -2322,6 +2370,10 @@ class PerformanceTimelineEngine:
             if track.lane_order == 0 and index > 0:
                 track.lane_order = index
         self.compile_tracks()
+        self._clamp_selection()
+        self.last_change_reason = str(reason or "bridge lanes synced")
+        self._notify("on_tracks_changed")
+        self._notify("on_diagnostics_changed")
         return self.timeline_tracks
 
     def apply_bridge_track_edits(self, track: TimelineParameterTrack, pitch_points: List[PitchAutomationPoint], stress_markers: List[SyllableStressMarker]) -> None:
@@ -2329,7 +2381,8 @@ class PerformanceTimelineEngine:
             write_stress_timeline_track_to_syllable_stress_markers(track, stress_markers)
         elif track.track_id == "pitch_bridge_pitch_curve":
             write_pitch_timeline_track_to_pitch_automation_points(track, pitch_points)
-        self.sync_bridges(pitch_points, stress_markers)
+        self.sync_bridges(pitch_points, stress_markers, reason="bridge lane edited")
+        self.mark_bridge_dirty("bridge lane edited")
 
     def compile_tracks(self) -> List[CompiledTimelineTrack]:
         current_hash = timeline_tracks_hash(self.timeline_tracks)
@@ -2340,31 +2393,103 @@ class PerformanceTimelineEngine:
             compiled_timeline_tracks(self.timeline_tracks)
         return list(self._compiled_tracks)
 
-    def invalidate_cache(self) -> None:
+    def invalidate_runtime_cache(self, reason: str = "runtime cache invalidated") -> None:
         self._compiled_hash = ""
         clear_automation_envelope_cache()
         self.compile_tracks()
+        self._bump_dirty_generation(reason)
+        self._notify("on_diagnostics_changed")
+
+    def invalidate_cache(self) -> None:
+        self.invalidate_runtime_cache("runtime cache invalidated")
+
+    def mark_tracks_dirty(self, reason: str) -> None:
+        self.invalidate_runtime_cache(reason)
+        self._notify("on_tracks_changed")
+
+    def mark_timing_dirty(self, reason: str) -> None:
+        self.invalidate_runtime_cache(reason)
+
+    def mark_bridge_dirty(self, reason: str) -> None:
+        self.invalidate_runtime_cache(reason)
+        self._notify("on_tracks_changed")
+
+    def mark_runtime_dirty(self, reason: str) -> None:
+        self._bump_dirty_generation(reason)
+        self._notify("on_diagnostics_changed")
+
+    def selected_track(self) -> TimelineParameterTrack | None:
+        if self.selected_track_id:
+            for track in self.timeline_tracks:
+                if track.track_id == self.selected_track_id:
+                    return track
+        return None
+
+    def selected_point(self) -> TimelineParameterPoint | None:
+        track = self.selected_track()
+        if track is None or self.selected_point_index is None or not (0 <= self.selected_point_index < len(track.points)):
+            return None
+        return track.points[self.selected_point_index]
+
+    def set_selected_track(self, track_id: str | None) -> None:
+        old = (self.selected_track_id, self.selected_point_index)
+        self.selected_track_id = track_id if any(track.track_id == track_id for track in self.timeline_tracks) else None
+        self._clamp_selection()
+        if old != (self.selected_track_id, self.selected_point_index):
+            self.last_change_reason = "selection changed"
+            self._notify("on_selection_changed")
+            self._notify("on_diagnostics_changed")
+
+    def set_selected_point(self, track_id: str | None, point_index: int | None) -> None:
+        old = (self.selected_track_id, self.selected_point_index)
+        self.selected_track_id = track_id if any(track.track_id == track_id for track in self.timeline_tracks) else None
+        self.selected_point_index = int(point_index) if point_index is not None else None
+        self._clamp_selection()
+        if old != (self.selected_track_id, self.selected_point_index):
+            self.last_change_reason = "selection changed"
+            self._notify("on_selection_changed")
+            self._notify("on_diagnostics_changed")
+
+    def clear_selection(self) -> None:
+        old = (self.selected_track_id, self.selected_point_index)
+        self.selected_track_id = None
+        self.selected_point_index = None
+        if old != (None, None):
+            self.last_change_reason = "selection cleared"
+            self._notify("on_selection_changed")
+            self._notify("on_diagnostics_changed")
 
     def diagnostics(self) -> Dict[str, object]:
         self.compile_tracks()
         runtime = automation_runtime_diagnostics()
+        compiled_tracks_now = self.compile_tracks()
+        selected_track = self.selected_track()
+        selected_value = self.selected_track_value()
+        bridge_active_flags = {"pitch": bool(self.pitch_bridge_active), "stress": bool(self.stress_bridge_active)}
         return {
             "backend": runtime.get("automation_runtime_backend", "compiled_segments"),
             "automation_runtime_backend": runtime.get("automation_runtime_backend", "compiled_segments"),
-            "compiled_track_count": int(runtime.get("compiled_track_count", 0) or 0),
-            "active_compiled_track_count": int(runtime.get("active_compiled_track_count", 0) or 0),
+            "compiled_track_count": len(compiled_tracks_now),
+            "active_compiled_track_count": sum(1 for track in compiled_tracks_now if not track.muted),
             "cache_hits": int(runtime.get("envelope_cache_hits", 0) or 0),
             "cache_misses": int(runtime.get("envelope_cache_misses", 0) or 0),
             "envelope_cache_hits": int(runtime.get("envelope_cache_hits", 0) or 0),
             "envelope_cache_misses": int(runtime.get("envelope_cache_misses", 0) or 0),
             "last_generation_ms": float(runtime.get("envelope_generation_ms", 0.0) or 0.0),
             "envelope_generation_ms": float(runtime.get("envelope_generation_ms", 0.0) or 0.0),
-            "timeline_hash": str(runtime.get("timeline_tracks_hash", self._compiled_hash) or self._compiled_hash),
-            "timeline_tracks_hash": str(runtime.get("timeline_tracks_hash", self._compiled_hash) or self._compiled_hash),
+            "timeline_hash": str(self._compiled_hash),
+            "timeline_tracks_hash": str(self._compiled_hash),
             "pitch_bridge_active": bool(self.pitch_bridge_active),
             "stress_bridge_active": bool(self.stress_bridge_active),
+            "bridge_active_flags": bridge_active_flags,
             "musical_grid_active": bool(self.musical_timing_settings.enabled),
             "playhead_ms": int(self.playhead_ms),
+            "selected_track_id": self.selected_track_id,
+            "selected_track_name": selected_track.name if selected_track is not None else None,
+            "selected_point_index": self.selected_point_index,
+            "selected_track_value": selected_value,
+            "dirty_generation": int(self.dirty_generation),
+            "last_change_reason": self.last_change_reason,
         }
 
     def evaluate_track(self, track_id: str, time_ms: float | None = None) -> float | None:
@@ -2372,7 +2497,8 @@ class PerformanceTimelineEngine:
         compiled = next((track for track in self.compile_tracks() if track.track_id == track_id), None)
         return evaluate_compiled_track(compiled, sample_ms) if compiled is not None else None
 
-    def selected_track_value(self, track: TimelineParameterTrack | None, time_ms: float | None = None) -> float | None:
+    def selected_track_value(self, time_ms: float | None = None) -> float | None:
+        track = self.selected_track()
         if track is None:
             return None
         return self.evaluate_track(track.track_id, self.playhead_ms if time_ms is None else time_ms)
@@ -8289,7 +8415,7 @@ class PerformanceTimelineCanvas(QWidget):
                 prev = current
             for point_index, point in enumerate(points):
                 center = QPointF(self._x_for_time(point.time_ms), self._y_for_value(track, point.value, lane))
-                selected = track.track_id == self.owner.selected_automation_track_id and point_index == self.owner.selected_timeline_point_index
+                selected = track.track_id == self.owner.performance_timeline_engine.selected_track_id and point_index == self.owner.performance_timeline_engine.selected_point_index
                 painter.setBrush(QColor("#ffffff") if selected else QColor(track.color))
                 painter.setPen(QPen(QColor("#ff006e") if selected else QColor("#0b132b"), 2))
                 painter.drawEllipse(center, 6.0, 6.0)
@@ -8592,7 +8718,12 @@ class WaveToyWindow(QMainWindow):
         self.character_voice_profile = DEFAULT_CHARACTER_VOICE_PROFILE
         self.musical_timing_settings = MusicalTimingSettings()
         self.performance_timeline_engine = PerformanceTimelineEngine(self.timeline_tracks, self.musical_timing_settings)
+        self.performance_timeline_engine.on_playhead_changed = self._performance_engine_playhead_changed
+        self.performance_timeline_engine.on_selection_changed = self._performance_engine_selection_changed
+        self.performance_timeline_engine.on_tracks_changed = self._performance_engine_tracks_changed
+        self.performance_timeline_engine.on_diagnostics_changed = self._performance_engine_diagnostics_changed
         self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
+        self._sync_performance_state_from_engine()
         self.live_preview_enabled = False
         self.live_preview_target = "selected_timeline_fragment"
         self.live_preview_timer = QTimer(self)
@@ -8875,7 +9006,8 @@ class WaveToyWindow(QMainWindow):
             self.performance_timeline_engine.set_tracks(self.timeline_tracks)
             self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
         self._sync_automation_tracks_from_timeline()
-        self.selected_automation_track_id = self.timeline_tracks[0].track_id if self.timeline_tracks else None
+        self.performance_timeline_engine.set_selected_track(self.timeline_tracks[0].track_id if self.timeline_tracks else None)
+        self._sync_performance_state_from_engine()
         profiles = data.get("profiles", {})
         if isinstance(profiles, dict):
             if isinstance(profiles.get("voice_source_profile"), dict):
@@ -9159,7 +9291,8 @@ class WaveToyWindow(QMainWindow):
             self.performance_timeline_engine.set_tracks(list(performance.timeline_tracks))
             self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
             self._sync_automation_tracks_from_timeline()
-            self.selected_automation_track_id = self.timeline_tracks[0].track_id if self.timeline_tracks else None
+            self.performance_timeline_engine.set_selected_track(self.timeline_tracks[0].track_id if self.timeline_tracks else None)
+            self._sync_performance_state_from_engine()
             self._refresh_performance_tables()
             return
         if record.asset_type == "automation_curve":
@@ -9173,8 +9306,10 @@ class WaveToyWindow(QMainWindow):
             track.lane_order = len(self.timeline_tracks)
             self.timeline_tracks.append(track)
             self.performance_asset.timeline_tracks = self.timeline_tracks
+            self.performance_timeline_engine.set_tracks(self.timeline_tracks, reason="automation curve imported")
+            self.performance_timeline_engine.set_selected_track(track.track_id)
             self._sync_automation_tracks_from_timeline()
-            self.selected_automation_track_id = track.track_id
+            self._sync_performance_state_from_engine()
             self._refresh_performance_tables()
             return
         if record.asset_type == "voice_source":
@@ -12946,6 +13081,7 @@ class WaveToyWindow(QMainWindow):
     def _sync_musical_timing_to_timeline(self) -> None:
         self.musical_timing_settings = self.musical_timing_settings.clamped()
         self.performance_timeline_engine.set_musical_timing_settings(self.musical_timing_settings)
+        self.performance_timeline_engine.mark_timing_dirty("musical timing changed")
         self.articulation_word_render_settings["musical_timing_settings"] = self.musical_timing_settings.to_json_dict()
         if self.articulation_timeline_canvas is not None:
             self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
@@ -15721,14 +15857,36 @@ class WaveToyWindow(QMainWindow):
     def _sync_automation_tracks_from_timeline(self) -> None:
         self.automation_tracks = [track.to_automation_track() for track in self.timeline_tracks if track.track_kind == "automation"]
 
+    def _sync_performance_state_from_engine(self) -> None:
+        self.selected_automation_track_id = self.performance_timeline_engine.selected_track_id
+        self.selected_timeline_point_index = self.performance_timeline_engine.selected_point_index
+        self.performance_playhead_ms = self.performance_timeline_engine.playhead_ms
+
+    def _performance_engine_playhead_changed(self, engine: PerformanceTimelineEngine) -> None:
+        self._sync_performance_state_from_engine()
+
+    def _performance_engine_selection_changed(self, engine: PerformanceTimelineEngine) -> None:
+        self._sync_performance_state_from_engine()
+
+    def _performance_engine_tracks_changed(self, engine: PerformanceTimelineEngine) -> None:
+        self.timeline_tracks = engine.timeline_tracks
+        self._sync_automation_tracks_from_timeline()
+        self._sync_performance_state_from_engine()
+
+    def _performance_engine_diagnostics_changed(self, engine: PerformanceTimelineEngine) -> None:
+        self._sync_performance_state_from_engine()
+
     def _selected_timeline_track(self) -> TimelineParameterTrack | None:
-        if self.selected_automation_track_id:
-            for track in self.timeline_tracks:
-                if track.track_id == self.selected_automation_track_id:
-                    return track
+        track = self.performance_timeline_engine.selected_track()
+        if track is not None:
+            self._sync_performance_state_from_engine()
+            return track
         if self.timeline_tracks:
-            self.selected_automation_track_id = self.timeline_tracks[0].track_id
-            return self.timeline_tracks[0]
+            self.performance_timeline_engine.set_selected_track(self.timeline_tracks[0].track_id)
+            self._sync_performance_state_from_engine()
+            return self.performance_timeline_engine.selected_track()
+        self.performance_timeline_engine.clear_selection()
+        self._sync_performance_state_from_engine()
         return None
 
     def _selected_automation_track(self) -> TimelineParameterTrack | None:
@@ -15739,13 +15897,15 @@ class WaveToyWindow(QMainWindow):
         self.timeline_tracks = self.performance_timeline_engine.sync_bridges(self.pitch_automation_points, self.syllable_stress_markers)
         self.performance_asset.timeline_tracks = self.timeline_tracks
         self._sync_automation_tracks_from_timeline()
+        self._sync_performance_state_from_engine()
 
     def _apply_bridge_track_edits(self, track: TimelineParameterTrack) -> None:
         self.performance_timeline_engine.apply_bridge_track_edits(track, self.pitch_automation_points, self.syllable_stress_markers)
         self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
+        self._sync_performance_state_from_engine()
 
     def _mark_performance_dirty(self, reason: str = "performance timeline changed") -> None:
-        self.performance_timeline_engine.invalidate_cache()
+        self.performance_timeline_engine.mark_tracks_dirty(reason)
         self._sync_automation_tracks_from_timeline()
         self._mark_project_dirty(reason)
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
@@ -15792,8 +15952,9 @@ class WaveToyWindow(QMainWindow):
         if target in {"accentuation_db", "pitch_bias_cents"}:
             track.points.append(TimelineParameterPoint(time_ms=0, value=0.0, curve="linear"))
         self.timeline_tracks.append(track)
-        self.selected_automation_track_id = track.track_id
-        self.selected_timeline_point_index = 0 if track.points else None
+        self.performance_timeline_engine.set_tracks(self.timeline_tracks, reason="timeline track added")
+        self.performance_timeline_engine.set_selected_point(track.track_id, 0 if track.points else None)
+        self._sync_performance_state_from_engine()
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline track added")
 
@@ -15807,11 +15968,11 @@ class WaveToyWindow(QMainWindow):
             QMessageBox.information(self, "Performance", "Bridge lanes are derived from existing stress or pitch data; delete the source data instead.")
             return
         self.timeline_tracks = [item for item in self.timeline_tracks if item.track_id != track.track_id]
-        self.performance_timeline_engine.set_tracks(self.timeline_tracks)
+        self.performance_timeline_engine.set_tracks(self.timeline_tracks, reason="timeline track deleted")
         self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
         self.performance_asset.timeline_tracks = self.timeline_tracks
-        self.selected_automation_track_id = self.timeline_tracks[0].track_id if self.timeline_tracks else None
-        self.selected_timeline_point_index = None
+        self.performance_timeline_engine.set_selected_point(self.timeline_tracks[0].track_id if self.timeline_tracks else None, None)
+        self._sync_performance_state_from_engine()
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline track deleted")
 
@@ -15826,7 +15987,8 @@ class WaveToyWindow(QMainWindow):
         self._clamp_timeline_point(track, point)
         track.points.append(point)
         track.points.sort(key=lambda item: item.time_ms)
-        self.selected_timeline_point_index = track.points.index(point)
+        self.performance_timeline_engine.set_selected_point(track.track_id, track.points.index(point))
+        self._sync_performance_state_from_engine()
         self._apply_bridge_track_edits(track)
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline point added")
@@ -15854,14 +16016,15 @@ class WaveToyWindow(QMainWindow):
             QMessageBox.information(self, "Performance", "Select a timeline point first.")
             return
         del track.points[row]
-        self.selected_timeline_point_index = min(row, len(track.points) - 1) if track.points else None
+        self.performance_timeline_engine.set_selected_point(track.track_id, min(row, len(track.points) - 1) if track.points else None)
+        self._sync_performance_state_from_engine()
         self._apply_bridge_track_edits(track)
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline point removed")
 
     def _select_timeline_point(self, track_id: str, point_index: int | None) -> None:
-        self.selected_automation_track_id = track_id
-        self.selected_timeline_point_index = point_index
+        self.performance_timeline_engine.set_selected_point(track_id, point_index)
+        self._sync_performance_state_from_engine()
         self._refresh_automation_points_table()
         if self.automation_track_table is not None:
             selected_row = next((idx for idx, track in enumerate(self.timeline_tracks) if track.track_id == track_id), -1)
@@ -15884,14 +16047,15 @@ class WaveToyWindow(QMainWindow):
         point.value = self.performance_timeline_canvas._value_for_y(track, y, lane)
         self._clamp_timeline_point(track, point)
         track.points.sort(key=lambda item: item.time_ms)
-        self.selected_timeline_point_index = track.points.index(point)
+        self.performance_timeline_engine.set_selected_point(track.track_id, track.points.index(point))
+        self._sync_performance_state_from_engine()
         self._apply_bridge_track_edits(track)
         self._refresh_performance_tables()
         self._mark_performance_dirty("timeline point dragged")
 
     def _set_performance_playhead_ms(self, time_ms: int, *, scrub: bool = False) -> None:
-        self.performance_timeline_engine.set_playhead_ms(time_ms)
-        self.performance_playhead_ms = self.performance_timeline_engine.playhead_ms
+        self.performance_timeline_engine.scrub_to_ms(time_ms) if scrub else self.performance_timeline_engine.set_playhead_ms(time_ms, reason="articulation playback")
+        self._sync_performance_state_from_engine()
         if scrub:
             self.articulation_playhead_ms = float(self.performance_playhead_ms)
             if hasattr(self, "articulation_motion_timeline") and self.articulation_motion_timeline is not None:
@@ -15904,7 +16068,7 @@ class WaveToyWindow(QMainWindow):
     def _automation_track_row_selected(self, row: int, column: int = 0) -> None:
         del column
         if 0 <= row < len(self.timeline_tracks):
-            self._select_timeline_point(self.timeline_tracks[row].track_id, self.selected_timeline_point_index)
+            self._select_timeline_point(self.timeline_tracks[row].track_id, self.performance_timeline_engine.selected_point_index)
 
     def _automation_track_table_changed(self, row: int, column: int) -> None:
         if not (0 <= row < len(self.timeline_tracks)):
@@ -15943,7 +16107,8 @@ class WaveToyWindow(QMainWindow):
             return
         self._clamp_timeline_point(track, point)
         track.points.sort(key=lambda item: item.time_ms)
-        self.selected_timeline_point_index = min(row, len(track.points) - 1)
+        self.performance_timeline_engine.set_selected_point(track.track_id, min(row, len(track.points) - 1))
+        self._sync_performance_state_from_engine()
         self._apply_bridge_track_edits(track)
         self._refresh_automation_points_table()
         self._mark_performance_dirty("timeline point edited")
@@ -16073,7 +16238,7 @@ class WaveToyWindow(QMainWindow):
         return self.performance_timeline_engine.automation_envelope_for_parameter(parameter, duration_ms, sample_rate)
 
     def _selected_track_value_at_playhead(self) -> float | None:
-        return self.performance_timeline_engine.selected_track_value(self._selected_timeline_track(), self.performance_playhead_ms)
+        return self.performance_timeline_engine.selected_track_value(self.performance_timeline_engine.playhead_ms)
 
     def _voiced_region_mask_for_pitch_bias(self, audio: np.ndarray) -> np.ndarray:
         if audio.size == 0:

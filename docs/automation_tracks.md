@@ -40,3 +40,9 @@ The cache is bounded by entry count and memory budget. Old entries are evicted l
 Automation rendering now routes through `PerformanceTimelineEngine.automation_envelope_for_parameter()`. The compatibility helpers remain in place, but Window render code asks the engine for `accentuation_db` and `pitch_bias_cents` envelopes so diagnostics, hashing, cache behavior, and compiled-track access all come from one runtime service.
 
 This keeps generated audio as a render copy only. Automation never mutates phoneme presets, articulation chain items, or stored raw audio arrays.
+
+## Task 080 cache ownership
+
+Automation envelope cache invalidation is centralized in `PerformanceTimelineEngine.invalidate_runtime_cache()` and the related dirty helpers. Track edits, point edits, mute toggles, bridge changes, and musical-timing changes should mark the engine dirty instead of clearing the envelope cache directly from `WaveToyWindow`.
+
+This does not change automation-track persistence. Legacy automation compatibility remains a load/library bridge into canonical `performance.timeline_tracks`.

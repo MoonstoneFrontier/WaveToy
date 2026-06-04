@@ -21,3 +21,9 @@ Generated waveform/audio arrays are not stored in project JSON. Projects may sto
 ## Asset library compatibility
 
 Performance assets are saved using the canonical performance schema. Legacy automation-curve assets can still be loaded and are appended as unified timeline parameter tracks.
+
+## Task 080 runtime state is not persisted
+
+Performance Timeline playhead position, selected track, selected point, dirty generation, cache diagnostics, and callback state are runtime-only engine state. They are intentionally excluded from project JSON so Task 076 through Task 079 project files continue to load without migration and new saves do not introduce a schema change.
+
+The future undo/redo path should build transactions around runtime mutations and engine dirty helpers, not by extending the project schema with transient UI state.
