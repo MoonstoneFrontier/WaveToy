@@ -33,9 +33,28 @@ def test_articulation_workspace_subtab_labels_are_documented():
 def test_articulation_timeline_internal_subtab_labels_are_documented():
     assert wave_toy.ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS == (
         "Chain",
-        "Timing",
+        "Timing / Performance",
         "Motion",
     )
+
+def test_performance_timing_controls_are_discoverable_after_split():
+    source = _source()
+    assert 'Tempo / Singing Preview moved to Timeline → Timing.' in source
+    assert 'Open Timing / Performance' in source
+    assert 'def _show_articulation_timing_page' in source
+    assert 'performance_shortcut.clicked.connect(self._show_articulation_timing_page)' in source
+    assert 'Performance Timing' in source
+    assert 'self.articulation_timeline_internal_subtabs.setCurrentIndex(1)' in source
+
+
+def test_render_and_performance_toggles_remain_accessible_without_old_crowded_tab():
+    source = _source()
+    assert 'self.articulation_smooth_transitions_checkbox = QCheckBox("Smooth Mouth Transitions")' in source
+    assert 'mode_label = QLabel("Word Render Mode")' in source
+    assert 'self.continuous_debug_bypass_formants_checkbox = QCheckBox("Bypass formants")' in source
+    assert 'self.singing_mode_checkbox = QCheckBox("Singing Preview")' in source
+    assert 'self.musical_timing_enabled_checkbox = QCheckBox("Musical Timing")' in source
+    assert 'self._toy_group("Performance")' not in source
 
 
 def test_articulation_inspector_is_only_added_to_inspector_workflow():

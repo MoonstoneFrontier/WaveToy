@@ -106,7 +106,7 @@ ARTICULATION_PICKER_MIN_WIDTH = 220
 ARTICULATION_PICKER_PREFERRED_WIDTH = 300
 ARTICULATION_PICKER_MAX_WIDTH = 380
 ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Timeline", "Render", "Inspector", "Profiles")
-ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing", "Motion")
+ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing / Performance", "Motion")
 MUSIC_THEORY_PICKER_MIN_WIDTH = 220
 MUSIC_THEORY_PICKER_PREFERRED_WIDTH = 300
 MUSIC_THEORY_PICKER_MAX_WIDTH = 380
@@ -3631,6 +3631,252 @@ def motion_summary_text(phoneme_count: int, total_ms: float, transition_count: i
         f"{int(round(total_ms))} ms total • {transition_count} transition{'s' if transition_count != 1 else ''} • "
         f"avg phoneme {average_phoneme_ms:.0f} ms"
     )
+
+MOTION_CURVE_DEFAULT_SAMPLE_STEP_MS = 25
+MOTION_CURVE_MIN_SAMPLE_STEP_MS = 10
+MOTION_CURVE_MAX_POINTS = 1200
+MOTION_CURVE_FIELDS = ("mouth_open", "lip_rounding", "tongue_height", "tongue_frontness", "nasal_open", "closure", "voiced_gain", "airflow")
+
+
+@dataclass
+class MotionCurvePoint:
+    """Read-only sampled articulator state for visual curve inspection."""
+
+    time_ms: float
+    mouth_open: float
+    lip_rounding: float
+    tongue_height: float
+    tongue_frontness: float
+    nasal_open: float
+    closure: float
+    voiced_gain: float
+    airflow: float
+    phoneme: str
+    segment_kind: str
+    transition_progress: float
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class MotionCurveSummary:
+    """Min/max ranges for sampled motion curves; debug-only and not persisted."""
+
+    frame_count: int = 0
+    duration_ms: float = 0.0
+    mouth_open_min: float = 0.0
+    mouth_open_max: float = 0.0
+    lip_rounding_min: float = 0.0
+    lip_rounding_max: float = 0.0
+    tongue_height_min: float = 0.0
+    tongue_height_max: float = 0.0
+    tongue_frontness_min: float = 0.0
+    tongue_frontness_max: float = 0.0
+    nasal_open_min: float = 0.0
+    nasal_open_max: float = 0.0
+    closure_min: float = 0.0
+    closure_max: float = 0.0
+    voiced_gain_min: float = 0.0
+    voiced_gain_max: float = 0.0
+    airflow_min: float = 0.0
+    airflow_max: float = 0.0
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class MotionTransitionAnalysisSummary:
+    """Compact transition diagnostics derived from motion segments and curve samples."""
+
+    transition_count: int = 0
+    average_transition_ms: float = 0.0
+    longest_transition_ms: float = 0.0
+    shortest_transition_ms: float = 0.0
+    fastest_curve_change: str = "none"
+    largest_mouth_change: float = 0.0
+    largest_lip_rounding_change: float = 0.0
+    largest_tongue_change: float = 0.0
+    largest_closure_change: float = 0.0
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+def _motion_curve_value(phoneme: ArticulationPhoneme, field_name: str) -> float:
+    if field_name == "voiced_gain":
+        return float(np.clip(_articulation_voiced_gain(phoneme), 0.0, 1.0))
+    if field_name == "airflow":
+        debug = articulation_synthesis_debug(phoneme)
+        return float(np.clip(float(debug.get("noise_gain", phoneme.air_pressure)), 0.0, 1.0))
+    return float(np.clip(float(getattr(phoneme, field_name, 0.0)), 0.0, 1.0))
+
+
+def _motion_curve_point(time_ms: float, phoneme: ArticulationPhoneme, segment_kind: str, transition_progress: float) -> MotionCurvePoint:
+    phoneme = phoneme.clamped()
+    return MotionCurvePoint(
+        time_ms=round(float(time_ms), 3),
+        mouth_open=_motion_curve_value(phoneme, "mouth_open"),
+        lip_rounding=_motion_curve_value(phoneme, "lip_rounding"),
+        tongue_height=_motion_curve_value(phoneme, "tongue_height"),
+        tongue_frontness=_motion_curve_value(phoneme, "tongue_frontness"),
+        nasal_open=_motion_curve_value(phoneme, "nasal_open"),
+        closure=_motion_curve_value(phoneme, "closure"),
+        voiced_gain=_motion_curve_value(phoneme, "voiced_gain"),
+        airflow=_motion_curve_value(phoneme, "airflow"),
+        phoneme=phoneme.name,
+        segment_kind=str(segment_kind),
+        transition_progress=float(np.clip(transition_progress, 0.0, 1.0)),
+    )
+
+
+def _chain_item_transition_curve(left: ArticulationChainItem, right: ArticulationChainItem) -> str:
+    if left.transition_curve in ARTICULATION_TRANSITION_CURVES and left.transition_curve != ARTICULATION_DEFAULT_TRANSITION_CURVE:
+        return left.transition_curve
+    return phoneme_pair_transition_model(left.phoneme_for_render(), right.phoneme_for_render()).curve
+
+
+def _chain_item_transition_duration_ms(left: ArticulationChainItem, right: ArticulationChainItem) -> int:
+    if left.transition_to_next_ms is not None:
+        return int(left.transition_to_next_ms)
+    return int(phoneme_pair_transition_model(left.phoneme_for_render(), right.phoneme_for_render()).default_transition_ms)
+
+
+def build_articulation_motion_segments_for_chain(chain_items: List[ArticulationChainItem]) -> Tuple[List[Dict[str, object]], int]:
+    """Build read-only hold/transition timing segments without rendering audio."""
+    segments: List[Dict[str, object]] = []
+    cursor = 0
+    render_phonemes = [item.phoneme_for_render().clamped() for item in chain_items]
+    for index, item in enumerate(chain_items):
+        phoneme = render_phonemes[index]
+        hold_ms = int(np.clip(int(item.duration_ms or phoneme.duration_ms), 80, 5000))
+        segments.append({"kind": "hold", "index": index, "start": cursor, "end": cursor + hold_ms, "from": phoneme, "to": phoneme})
+        cursor += hold_ms
+        if index < len(chain_items) - 1:
+            right_item = chain_items[index + 1]
+            right = render_phonemes[index + 1]
+            transition_ms = int(np.clip(_chain_item_transition_duration_ms(item, right_item), 0, 250))
+            if transition_ms > 0:
+                curve = _chain_item_transition_curve(item, right_item)
+                model = phoneme_pair_transition_model(phoneme, right)
+                segments.append({"kind": "transition", "index": index, "start": cursor, "end": cursor + transition_ms, "from": phoneme, "to": right, "curve": curve, "transition_model_object": model})
+                cursor += transition_ms
+    return segments, max(cursor, 0)
+
+
+def _motion_curve_sample_from_segment(time_ms: float, segment: Dict[str, object]) -> MotionCurvePoint:
+    start = float(segment.get("start", 0.0))
+    end = max(start + 1.0, float(segment.get("end", start)))
+    local = float(np.clip((float(time_ms) - start) / (end - start), 0.0, 1.0))
+    left = segment.get("from")
+    right = segment.get("to", left)
+    if not isinstance(left, ArticulationPhoneme):
+        left = ArticulationPhoneme.from_json_dict({})
+    if not isinstance(right, ArticulationPhoneme):
+        right = left
+    if segment.get("kind") == "transition":
+        curve = str(segment.get("curve", ARTICULATION_DEFAULT_TRANSITION_CURVE))
+        model = segment.get("transition_model_object")
+        phoneme = interpolate_articulation_phoneme(left, right, local, curve, model if isinstance(model, PhonemePairTransitionModel) else None)
+        progress = articulation_curve_progress(local, curve)
+        return _motion_curve_point(time_ms, phoneme, "transition", progress)
+    phoneme, diagnostics = apply_diphthong_transition_shape(left, local)
+    progress = float(diagnostics.get("diphthong_progress", 0.0)) if diagnostics else 0.0
+    return _motion_curve_point(time_ms, phoneme, "hold", progress)
+
+
+def build_motion_curve_points(chain_items: List[ArticulationChainItem], sample_step_ms: int = MOTION_CURVE_DEFAULT_SAMPLE_STEP_MS) -> List[MotionCurvePoint]:
+    """Sample chain-derived articulator motion for read-only UI/debug visualization."""
+    if not chain_items:
+        return []
+    step_ms = max(MOTION_CURVE_MIN_SAMPLE_STEP_MS, int(sample_step_ms or MOTION_CURVE_DEFAULT_SAMPLE_STEP_MS))
+    segments, total_ms = build_articulation_motion_segments_for_chain(chain_items)
+    if not segments or total_ms <= 0:
+        return []
+    points: List[MotionCurvePoint] = []
+    for segment in segments:
+        start = float(segment.get("start", 0.0))
+        end = max(start, float(segment.get("end", start)))
+        t = start
+        while t < end and len(points) < MOTION_CURVE_MAX_POINTS:
+            if points and abs(points[-1].time_ms - t) <= 1.0e-6:
+                t += step_ms
+                continue
+            points.append(_motion_curve_sample_from_segment(t, segment))
+            t += step_ms
+        if len(points) >= MOTION_CURVE_MAX_POINTS:
+            break
+    if len(points) < MOTION_CURVE_MAX_POINTS and (not points or points[-1].time_ms < total_ms):
+        points.append(_motion_curve_sample_from_segment(float(total_ms), segments[-1]))
+    return points
+
+
+def summarize_motion_curve_points(points: List[MotionCurvePoint]) -> MotionCurveSummary:
+    if not points:
+        return MotionCurveSummary()
+    values = {field_name: [float(getattr(point, field_name)) for point in points] for field_name in MOTION_CURVE_FIELDS}
+    return MotionCurveSummary(
+        frame_count=len(points),
+        duration_ms=max(float(point.time_ms) for point in points),
+        mouth_open_min=min(values["mouth_open"]), mouth_open_max=max(values["mouth_open"]),
+        lip_rounding_min=min(values["lip_rounding"]), lip_rounding_max=max(values["lip_rounding"]),
+        tongue_height_min=min(values["tongue_height"]), tongue_height_max=max(values["tongue_height"]),
+        tongue_frontness_min=min(values["tongue_frontness"]), tongue_frontness_max=max(values["tongue_frontness"]),
+        nasal_open_min=min(values["nasal_open"]), nasal_open_max=max(values["nasal_open"]),
+        closure_min=min(values["closure"]), closure_max=max(values["closure"]),
+        voiced_gain_min=min(values["voiced_gain"]), voiced_gain_max=max(values["voiced_gain"]),
+        airflow_min=min(values["airflow"]), airflow_max=max(values["airflow"]),
+    )
+
+
+def analyze_motion_transitions(motion_segments: List[MotionTimelineSegment], curve_points: List[MotionCurvePoint]) -> MotionTransitionAnalysisSummary:
+    transitions = [segment for segment in motion_segments if segment.kind == "transition" and segment.duration_ms > 0]
+    if not transitions:
+        return MotionTransitionAnalysisSummary()
+    durations = [float(segment.duration_ms) for segment in transitions]
+    fastest_label = "none"
+    fastest_rate = 0.0
+    largest_mouth = largest_lips = largest_tongue = largest_closure = 0.0
+    for segment in transitions:
+        inside = [point for point in curve_points if float(segment.start_ms) <= point.time_ms <= float(segment.end_ms)]
+        if len(inside) < 2:
+            continue
+        first, last = inside[0], inside[-1]
+        duration = max(float(segment.duration_ms), 1.0)
+        deltas = {field_name: abs(float(getattr(last, field_name)) - float(getattr(first, field_name))) for field_name in MOTION_CURVE_FIELDS}
+        largest_mouth = max(largest_mouth, deltas["mouth_open"])
+        largest_lips = max(largest_lips, deltas["lip_rounding"])
+        largest_tongue = max(largest_tongue, max(deltas["tongue_height"], deltas["tongue_frontness"]))
+        largest_closure = max(largest_closure, deltas["closure"])
+        field_name, delta = max(deltas.items(), key=lambda item: item[1])
+        rate = float(delta) / duration
+        if rate > fastest_rate:
+            fastest_rate = rate
+            fastest_label = f"{segment.label} {field_name} Δ{delta:.2f}/{duration:.0f}ms"
+    return MotionTransitionAnalysisSummary(
+        transition_count=len(transitions),
+        average_transition_ms=sum(durations) / len(durations),
+        longest_transition_ms=max(durations),
+        shortest_transition_ms=min(durations),
+        fastest_curve_change=fastest_label,
+        largest_mouth_change=largest_mouth,
+        largest_lip_rounding_change=largest_lips,
+        largest_tongue_change=largest_tongue,
+        largest_closure_change=largest_closure,
+    )
+
+
+def motion_transition_analysis_text(summary: MotionTransitionAnalysisSummary) -> str:
+    if summary.transition_count <= 0:
+        return "Transition Analysis: 0 transitions • no curve changes to compare"
+    return (
+        f"Transition Analysis: {summary.transition_count} transition{'s' if summary.transition_count != 1 else ''} • "
+        f"avg {summary.average_transition_ms:.0f} ms • longest {summary.longest_transition_ms:.0f} ms • shortest {summary.shortest_transition_ms:.0f} ms • "
+        f"fastest {summary.fastest_curve_change} • max Δ mouth {summary.largest_mouth_change:.2f}, lips {summary.largest_lip_rounding_change:.2f}, "
+        f"tongue {summary.largest_tongue_change:.2f}, closure {summary.largest_closure_change:.2f}"
+    )
+
 
 @dataclass
 class SyllableStressMarker:
@@ -9019,6 +9265,149 @@ class ArticulationMotionTimelineCanvas(QWidget):
         painter.setFont(QFont("Arial", 8, QFont.Bold))
         painter.drawText(QRectF(max(lane_rect.left(), x - 38), lane_rect.bottom() + 3, 76, 16), Qt.AlignCenter, f"{self.playhead_ms:.0f} ms")
 
+class ArticulationMotionCurveCanvas(QWidget):
+    """Read-only fit-to-view articulator curve preview synchronized to articulation playback."""
+
+    CURVE_STYLES: Dict[str, Tuple[str, str]] = {
+        "mouth_open": ("Mouth", "#e63946"),
+        "lip_rounding": ("Lips", "#f77f00"),
+        "tongue_height": ("Tongue H", "#2a9d8f"),
+        "tongue_frontness": ("Tongue F", "#006d77"),
+        "nasal_open": ("Nasal", "#6a4c93"),
+        "closure": ("Closure", "#1d3557"),
+        "voiced_gain": ("Voicing", "#38b000"),
+        "airflow": ("Airflow", "#00b4d8"),
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.curve_points: List[MotionCurvePoint] = []
+        self.motion_segments: List[MotionTimelineSegment] = []
+        self.total_ms = 1.0
+        self.playhead_ms = 0.0
+        self.visible_curves: Dict[str, bool] = {field_name: field_name in {"mouth_open", "lip_rounding", "tongue_height", "closure"} for field_name in MOTION_CURVE_FIELDS}
+        self.setMinimumSize(QSize(620, 168))
+        self.setSizePolicy(getattr(QSizePolicy, "Expanding", 1), getattr(QSizePolicy, "Fixed", 0))
+        self.setToolTip("Read-only fit-to-view motion curves sampled from the current articulation chain. Functional horizontal zoom is deferred to Task 098.")
+
+    def set_curve_points(
+        self,
+        curve_points: List[MotionCurvePoint],
+        motion_segments: List[MotionTimelineSegment],
+        total_ms: float,
+        playhead_ms: float,
+    ) -> None:
+        self.curve_points = list(curve_points)
+        self.motion_segments = list(motion_segments)
+        self.total_ms = max(1.0, float(total_ms))
+        self.playhead_ms = float(np.clip(float(playhead_ms), 0.0, self.total_ms))
+        self.update()
+
+    def set_playhead_ms(self, playhead_ms: float) -> None:
+        self.playhead_ms = float(np.clip(float(playhead_ms), 0.0, self.total_ms))
+        self.update()
+
+    def set_curve_visible(self, field_name: str, visible: bool) -> None:
+        if field_name in self.visible_curves:
+            self.visible_curves[field_name] = bool(visible)
+            self.update()
+
+    def _active_point(self) -> MotionCurvePoint | None:
+        if not self.curve_points:
+            return None
+        return min(self.curve_points, key=lambda point: abs(float(point.time_ms) - self.playhead_ms))
+
+    def _point_xy(self, plot_rect: QRectF, point: MotionCurvePoint, field_name: str) -> QPointF:
+        x = plot_rect.left() + plot_rect.width() * float(np.clip(float(point.time_ms) / self.total_ms, 0.0, 1.0))
+        value = float(np.clip(float(getattr(point, field_name, 0.0)), 0.0, 1.0))
+        y = plot_rect.bottom() - plot_rect.height() * value
+        return QPointF(x, y)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(10, 8, -10, -8)
+        painter.fillRect(rect, QColor("#f8f9fa"))
+        painter.setPen(QPen(QColor("#1d3557"), 1))
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        visible_count = sum(1 for visible in self.visible_curves.values() if visible)
+        painter.drawText(rect.left(), rect.top() + 16, f"Motion Curves • {len(self.curve_points)} samples • {visible_count} visible • fit view")
+        plot_rect = QRectF(rect.left() + 34, rect.top() + 30, rect.width() - 42, rect.height() - 52)
+        painter.setBrush(QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#adb5bd"), 1))
+        painter.drawRoundedRect(plot_rect, 8, 8)
+        if not self.curve_points:
+            painter.setPen(QPen(QColor("#6c757d"), 1))
+            painter.setFont(QFont("Arial", 9))
+            painter.drawText(plot_rect, Qt.AlignCenter, "Add phonemes to inspect sampled mouth/lip/tongue/closure motion curves")
+            return
+
+        for segment in self.motion_segments:
+            if segment.kind != "transition":
+                continue
+            x1 = plot_rect.left() + plot_rect.width() * float(np.clip(segment.start_ms / self.total_ms, 0.0, 1.0))
+            x2 = plot_rect.left() + plot_rect.width() * float(np.clip(segment.end_ms / self.total_ms, 0.0, 1.0))
+            band = QRectF(x1, plot_rect.top(), max(2.0, x2 - x1), plot_rect.height())
+            painter.fillRect(band, QColor(255, 209, 102, 58))
+            if band.width() > 18:
+                painter.setPen(QPen(QColor("#7f5539"), 1))
+                painter.setFont(QFont("Arial", 7, QFont.Bold))
+                painter.drawText(band.adjusted(1, 1, -1, -1), Qt.AlignTop | Qt.AlignHCenter, segment.label[:10])
+
+        painter.setPen(QPen(QColor("#e9ecef"), 1, Qt.DotLine))
+        for frac in (0.25, 0.50, 0.75):
+            y = plot_rect.bottom() - plot_rect.height() * frac
+            painter.drawLine(QPointF(plot_rect.left(), y), QPointF(plot_rect.right(), y))
+        painter.setPen(QPen(QColor("#6c757d"), 1))
+        painter.setFont(QFont("Arial", 7))
+        painter.drawText(QRectF(rect.left(), plot_rect.top() - 4, 30, 12), Qt.AlignRight, "1.0")
+        painter.drawText(QRectF(rect.left(), plot_rect.bottom() - 10, 30, 12), Qt.AlignRight, "0.0")
+
+        for field_name, visible in self.visible_curves.items():
+            if not visible:
+                continue
+            label, color = self.CURVE_STYLES[field_name]
+            del label
+            painter.setPen(QPen(QColor(color), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            previous: QPointF | None = None
+            for point in self.curve_points:
+                current = self._point_xy(plot_rect, point, field_name)
+                if previous is not None:
+                    painter.drawLine(previous, current)
+                previous = current
+
+        active = self._active_point()
+        if active is not None:
+            for field_name, visible in self.visible_curves.items():
+                if not visible:
+                    continue
+                _label, color = self.CURVE_STYLES[field_name]
+                painter.setPen(QPen(QColor("#ffffff"), 1))
+                painter.setBrush(QColor(color))
+                center = self._point_xy(plot_rect, active, field_name)
+                painter.drawEllipse(center, 3.5, 3.5)
+
+        x = plot_rect.left() + plot_rect.width() * float(np.clip(self.playhead_ms / self.total_ms, 0.0, 1.0))
+        painter.setPen(QPen(QColor("#e63946"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(x, plot_rect.top() - 4), QPointF(x, plot_rect.bottom() + 4))
+        painter.setFont(QFont("Arial", 8, QFont.Bold))
+        painter.drawText(QRectF(max(plot_rect.left(), x - 42), plot_rect.bottom() + 5, 84, 16), Qt.AlignCenter, f"{self.playhead_ms:.0f} ms")
+
+        legend_x = plot_rect.left()
+        legend_y = rect.bottom() - 11
+        painter.setFont(QFont("Arial", 8))
+        for field_name, visible in self.visible_curves.items():
+            if not visible:
+                continue
+            label, color = self.CURVE_STYLES[field_name]
+            painter.setPen(QPen(QColor(color), 3))
+            painter.drawLine(QPointF(legend_x, legend_y - 4), QPointF(legend_x + 12, legend_y - 4))
+            painter.setPen(QPen(QColor("#1d3557"), 1))
+            painter.drawText(QRectF(legend_x + 15, legend_y - 12, 74, 14), Qt.AlignLeft | Qt.AlignVCenter, label)
+            legend_x += 88
+
+
 class VocalTractCanvas(QWidget):
     """Cartoon vocal tract display driven by articulation values, not DSP knobs."""
 
@@ -10899,7 +11288,10 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_side_canvas: VocalTractCanvas | None = None
         self.articulation_motion_timeline_canvas: ArticulationMotionTimelineCanvas | None = None
         self.articulation_viseme_track_canvas: ArticulationMotionTimelineCanvas | None = None
+        self.articulation_motion_curve_canvas: ArticulationMotionCurveCanvas | None = None
+        self.articulation_motion_curve_checkboxes: Dict[str, QCheckBox] = {}
         self.articulation_motion_summary_label: QLabel | None = None
+        self.articulation_transition_analysis_label: QLabel | None = None
         self.articulation_motion_status_label: QLabel | None = None
         self.articulation_smooth_transitions_checkbox: QCheckBox | None = None
         self.continuous_debug_bypass_formants_checkbox: QCheckBox | None = None
@@ -13506,6 +13898,19 @@ class WaveToyWindow(QMainWindow):
         primary_label.setObjectName("symbolHint")
         primary_label.setWordWrap(True)
         chain_layout.addWidget(primary_label)
+        performance_note_row = QHBoxLayout()
+        performance_note_row.setSpacing(8)
+        performance_note = QLabel("Tempo / Singing Preview moved to Timeline → Timing.")
+        performance_note.setObjectName("symbolHint")
+        performance_note.setWordWrap(True)
+        performance_note_row.addWidget(performance_note, 1)
+        performance_shortcut = QPushButton("Open Timing / Performance")
+        performance_shortcut.setObjectName("phonemeCardSecondaryAction")
+        performance_shortcut.setCursor(Qt.PointingHandCursor)
+        performance_shortcut.setToolTip("Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
+        performance_shortcut.clicked.connect(self._show_articulation_timing_page)
+        performance_note_row.addWidget(performance_shortcut)
+        chain_layout.addLayout(performance_note_row)
 
         chain_sections = (
             (
@@ -13595,6 +14000,10 @@ class WaveToyWindow(QMainWindow):
         musical_layout = QVBoxLayout(musical_section)
         musical_layout.setContentsMargins(10, 16, 10, 10)
         musical_layout.setSpacing(6)
+        performance_timing_header = QLabel("Performance Timing")
+        performance_timing_header.setObjectName("timelineInspectorText")
+        performance_timing_header.setToolTip("Tempo, beat-grid, snap, count-in, and Singing Preview controls for performance-oriented timing experiments.")
+        musical_layout.addWidget(performance_timing_header)
         musical_row = QHBoxLayout()
         musical_row.setSpacing(6)
         self.musical_timing_enabled_checkbox = QCheckBox("Musical Timing")
@@ -13910,6 +14319,11 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_summary_label.setWordWrap(True)
         self.articulation_motion_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         motion_summary_layout.addWidget(self.articulation_motion_summary_label)
+        self.articulation_transition_analysis_label = QLabel("Transition Analysis: 0 transitions • no curve changes to compare")
+        self.articulation_transition_analysis_label.setObjectName("symbolHint")
+        self.articulation_transition_analysis_label.setWordWrap(True)
+        self.articulation_transition_analysis_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        motion_summary_layout.addWidget(self.articulation_transition_analysis_label)
 
         motion_timeline_card = self._toy_group("Motion Timeline")
         motion_timeline_layout = QVBoxLayout(motion_timeline_card)
@@ -13930,6 +14344,29 @@ class WaveToyWindow(QMainWindow):
         viseme_track_layout.addWidget(viseme_track_hint)
         self.articulation_viseme_track_canvas = ArticulationMotionTimelineCanvas("viseme")
         viseme_track_layout.addWidget(self.articulation_viseme_track_canvas)
+
+        motion_curve_card = self._toy_group("Motion Curves")
+        motion_curve_layout = QVBoxLayout(motion_curve_card)
+        motion_curve_layout.setContentsMargins(12, 18, 12, 12)
+        motion_curve_layout.setSpacing(8)
+        motion_curve_hint = QLabel("Fit-to-view sampled articulator curves for debugging holds and transitions. Toggles only repaint this read-only canvas; they do not render audio or change exports.")
+        motion_curve_hint.setObjectName("symbolHint")
+        motion_curve_hint.setWordWrap(True)
+        motion_curve_layout.addWidget(motion_curve_hint)
+        self.articulation_motion_curve_canvas = ArticulationMotionCurveCanvas()
+        curve_toggle_row = QHBoxLayout()
+        curve_toggle_row.setSpacing(6)
+        self.articulation_motion_curve_checkboxes = {}
+        for field_name, label in (("mouth_open", "Mouth"), ("lip_rounding", "Lips"), ("tongue_height", "Tongue Height"), ("tongue_frontness", "Tongue Frontness"), ("nasal_open", "Nasal"), ("closure", "Closure"), ("voiced_gain", "Voicing"), ("airflow", "Airflow")):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(bool(self.articulation_motion_curve_canvas.visible_curves.get(field_name, False)))
+            checkbox.setToolTip("Show or hide this sampled curve without rendering audio or changing chain data.")
+            checkbox.toggled.connect(lambda checked, name=field_name: self._set_motion_curve_visible(name, checked))
+            self.articulation_motion_curve_checkboxes[field_name] = checkbox
+            curve_toggle_row.addWidget(checkbox)
+        curve_toggle_row.addStretch(1)
+        motion_curve_layout.addLayout(curve_toggle_row)
+        motion_curve_layout.addWidget(self.articulation_motion_curve_canvas)
 
         motion_card = self._toy_group("Word Motion Preview")
         motion_card_layout = QVBoxLayout(motion_card)
@@ -13973,6 +14410,7 @@ class WaveToyWindow(QMainWindow):
         motion_layout.addWidget(motion_summary_card)
         motion_layout.addWidget(motion_timeline_card)
         motion_layout.addWidget(viseme_track_card)
+        motion_layout.addWidget(motion_curve_card)
         motion_layout.addWidget(motion_card, 1)
         self._refresh_articulation_chain_cards()
 
@@ -16025,10 +16463,19 @@ class WaveToyWindow(QMainWindow):
             return left.transition_curve
         return phoneme_pair_transition_model(left.phoneme_for_render(), right.phoneme_for_render()).curve
 
+    def _show_articulation_timing_page(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_timeline_internal_subtabs is not None:
+            self.articulation_timeline_internal_subtabs.setCurrentIndex(1)
+
     def _articulation_motion_timeline(self, include_word_gaps: bool = False) -> Tuple[List[Dict[str, object]], int]:
         del include_word_gaps
         segments, total_ms, _stop_events, _burst_events = self._build_articulation_envelope_timeline()
         return segments, total_ms
+
+    def _set_motion_curve_visible(self, field_name: str, visible: bool) -> None:
+        if self.articulation_motion_curve_canvas is not None:
+            self.articulation_motion_curve_canvas.set_curve_visible(field_name, visible)
 
     def _refresh_articulation_motion_timeline(self) -> None:
         segments, total_ms = self._articulation_motion_timeline()
@@ -16056,6 +16503,11 @@ class WaveToyWindow(QMainWindow):
             self.articulation_motion_timeline_canvas.set_timeline(motion_segments, viseme_segments, total_ms, self.articulation_playhead_ms, self.articulation_timeline_zoom)
         if self.articulation_viseme_track_canvas is not None:
             self.articulation_viseme_track_canvas.set_timeline(motion_segments, viseme_segments, total_ms, self.articulation_playhead_ms, self.articulation_timeline_zoom)
+        curve_points = build_motion_curve_points(self.articulation_chain_items)
+        if self.articulation_motion_curve_canvas is not None:
+            self.articulation_motion_curve_canvas.set_curve_points(curve_points, motion_segments, total_ms, self.articulation_playhead_ms)
+        if self.articulation_transition_analysis_label is not None:
+            self.articulation_transition_analysis_label.setText(motion_transition_analysis_text(analyze_motion_transitions(motion_segments, curve_points)))
         if self.articulation_motion_summary_label is not None:
             transition_count = sum(1 for segment in motion_segments if segment.kind == "transition")
             phoneme_count = len(self.articulation_chain_items)
