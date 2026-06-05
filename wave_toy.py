@@ -3537,6 +3537,101 @@ class PitchAutomationPoint:
         )
 
 
+
+@dataclass
+class MotionTimelineSegment:
+    """Read-only motion timing segment derived from an articulation chain."""
+
+    label: str
+    kind: str
+    start_ms: float
+    end_ms: float
+    color: str = "#ffffff"
+    index: int = 0
+
+    @property
+    def duration_ms(self) -> float:
+        return max(0.0, float(self.end_ms) - float(self.start_ms))
+
+    def contains_ms(self, time_ms: float) -> bool:
+        return float(self.start_ms) <= float(time_ms) < float(self.end_ms)
+
+
+@dataclass
+class VisemeTimelineSegment:
+    """Read-only viseme lane segment derived from motion timeline state."""
+
+    viseme: str
+    phoneme: str
+    start_ms: float
+    end_ms: float
+    color: str = "#ffffff"
+    index: int = 0
+
+    @property
+    def duration_ms(self) -> float:
+        return max(0.0, float(self.end_ms) - float(self.start_ms))
+
+    def contains_ms(self, time_ms: float) -> bool:
+        return float(self.start_ms) <= float(time_ms) < float(self.end_ms)
+
+
+def motion_timeline_segments_from_articulation_segments(segments: List[Dict[str, object]]) -> List[MotionTimelineSegment]:
+    """Build read-only UI timeline segments from existing articulation motion data."""
+    timeline: List[MotionTimelineSegment] = []
+    for segment in segments:
+        kind = str(segment.get("kind", "hold"))
+        start_ms = float(segment.get("start", 0.0))
+        end_ms = max(start_ms, float(segment.get("end", start_ms)))
+        index = int(segment.get("index", len(timeline)) or 0)
+        if kind == "transition":
+            left = segment.get("from")
+            right = segment.get("to")
+            left_name = getattr(left, "name", "?")
+            right_name = getattr(right, "name", "?")
+            label = f"{left_name}→{right_name}"
+            color = "#ffd166"
+        else:
+            phoneme = segment.get("from")
+            label = str(getattr(phoneme, "name", segment.get("label", "Hold")))
+            color = str(getattr(phoneme, "preview_color", "#b8f2e6"))
+        timeline.append(MotionTimelineSegment(label=label, kind=kind, start_ms=start_ms, end_ms=end_ms, color=color, index=index))
+    return timeline
+
+
+def viseme_timeline_segments_from_motion_segments(motion_segments: List[MotionTimelineSegment], viseme_labels: Dict[int, str] | None = None) -> List[VisemeTimelineSegment]:
+    """Build the read-only viseme lane from hold segments only; transition blocks remain in the motion lane."""
+    labels = viseme_labels or {}
+    visemes: List[VisemeTimelineSegment] = []
+    for segment in motion_segments:
+        if segment.kind != "hold":
+            continue
+        viseme = labels.get(segment.index, segment.label)
+        visemes.append(
+            VisemeTimelineSegment(
+                viseme=str(viseme),
+                phoneme=segment.label,
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                color=segment.color,
+                index=segment.index,
+            )
+        )
+    return visemes
+
+
+def motion_summary_text(phoneme_count: int, total_ms: float, transition_count: int, average_phoneme_ms: float, viseme_segments: List[VisemeTimelineSegment]) -> str:
+    """Return compact read-only motion statistics for the Motion tab."""
+    total_viseme_segments = len(viseme_segments)
+    unique_visemes = len({segment.viseme for segment in viseme_segments})
+    return (
+        f"Motion Summary: {phoneme_count} phoneme{'s' if phoneme_count != 1 else ''} • "
+        f"{unique_visemes} unique viseme{'s' if unique_visemes != 1 else ''} / "
+        f"{total_viseme_segments} viseme hold{'s' if total_viseme_segments != 1 else ''} • "
+        f"{int(round(total_ms))} ms total • {transition_count} transition{'s' if transition_count != 1 else ''} • "
+        f"avg phoneme {average_phoneme_ms:.0f} ms"
+    )
+
 @dataclass
 class SyllableStressMarker:
     """Manual expression marker for future lyric phrasing and animation emphasis."""
@@ -8827,6 +8922,103 @@ class NoteWheelDialog(QDialog):
         super().closeEvent(event)
 
 
+
+class ArticulationMotionTimelineCanvas(QWidget):
+    """Read-only motion/viseme timeline preview synchronized to articulation playback."""
+
+    def __init__(self, lane: str = "motion") -> None:
+        super().__init__()
+        self.lane = "viseme" if lane == "viseme" else "motion"
+        self.motion_segments: List[MotionTimelineSegment] = []
+        self.viseme_segments: List[VisemeTimelineSegment] = []
+        self.total_ms = 1.0
+        self.playhead_ms = 0.0
+        self.zoom = 1.0
+        self.setMinimumSize(QSize(620, 108 if self.lane == "motion" else 92))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setToolTip("Read-only fit-to-view articulation motion timing preview derived from the current chain. Functional horizontal zoom is deferred to Task 098.")
+
+    def set_timeline(
+        self,
+        motion_segments: List[MotionTimelineSegment],
+        viseme_segments: List[VisemeTimelineSegment],
+        total_ms: float,
+        playhead_ms: float,
+        zoom: float = 1.0,
+    ) -> None:
+        self.motion_segments = list(motion_segments)
+        self.viseme_segments = list(viseme_segments)
+        self.total_ms = max(1.0, float(total_ms))
+        self.playhead_ms = float(np.clip(float(playhead_ms), 0.0, self.total_ms))
+        self.zoom = float(np.clip(float(zoom or 1.0), 0.5, 8.0))
+        self.update()
+
+    def set_playhead_ms(self, playhead_ms: float) -> None:
+        self.playhead_ms = float(np.clip(float(playhead_ms), 0.0, self.total_ms))
+        self.update()
+
+    def _active_index(self, segments: List[object]) -> int | None:
+        for index, segment in enumerate(segments):
+            if hasattr(segment, "contains_ms") and segment.contains_ms(self.playhead_ms):
+                return index
+        if segments and abs(float(self.playhead_ms) - float(self.total_ms)) <= 1.0e-6:
+            return len(segments) - 1
+        return None
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(10, 8, -10, -8)
+        painter.fillRect(rect, QColor("#f8f9fa"))
+        title = "Motion Timeline" if self.lane == "motion" else "Viseme Track"
+        base_subtitle = f"{len(self.motion_segments)} motion segments" if self.lane == "motion" else f"{len(self.viseme_segments)} viseme holds"
+        # Task 096 keeps this preview fit-to-view/read-only; functional horizontal zoom is deferred to Task 098.
+        subtitle = f"{base_subtitle} • fit view"
+        painter.setPen(QPen(QColor("#1d3557"), 1))
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        painter.drawText(rect.left(), rect.top() + 16, f"{title} • {subtitle} • {self.total_ms:.0f} ms")
+        lane_rect = QRectF(rect.left(), rect.top() + 28, rect.width(), max(34.0, rect.height() - 44))
+        painter.setBrush(QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#adb5bd"), 1))
+        painter.drawRoundedRect(lane_rect, 8, 8)
+        segments = self.motion_segments if self.lane == "motion" else self.viseme_segments
+        active_index = self._active_index(segments)
+        if not segments:
+            painter.setPen(QPen(QColor("#6c757d"), 1))
+            painter.setFont(QFont("Arial", 9))
+            painter.drawText(lane_rect, Qt.AlignCenter, "No articulation chain yet")
+        for index, segment in enumerate(segments):
+            start = float(getattr(segment, "start_ms", 0.0)) / self.total_ms
+            end = float(getattr(segment, "end_ms", 0.0)) / self.total_ms
+            x1 = lane_rect.left() + lane_rect.width() * float(np.clip(start, 0.0, 1.0))
+            x2 = lane_rect.left() + lane_rect.width() * float(np.clip(end, 0.0, 1.0))
+            block = QRectF(x1, lane_rect.top() + 4, max(3.0, x2 - x1), lane_rect.height() - 8)
+            is_transition = getattr(segment, "kind", "hold") == "transition"
+            is_active = index == active_index
+            color = QColor(str(getattr(segment, "color", "#ffffff")))
+            if is_transition:
+                color = QColor("#ffd166")
+            if is_active:
+                color = QColor("#ffcad4") if not is_transition else QColor("#ffb703")
+            painter.setBrush(color)
+            painter.setPen(QPen(QColor("#e63946") if is_active else QColor("#6c757d"), 3 if is_active else 1, Qt.DashLine if is_transition else Qt.SolidLine))
+            painter.drawRoundedRect(block.adjusted(1, 1, -1, -1), 6, 6)
+            if block.width() > 24:
+                label = getattr(segment, "label", getattr(segment, "viseme", ""))
+                if self.lane == "viseme":
+                    label = getattr(segment, "viseme", label)
+                duration = float(getattr(segment, "duration_ms", 0.0))
+                text = str(label) if block.width() < 72 else f"{label}\n{duration:.0f} ms"
+                painter.setPen(QPen(QColor("#1d3557"), 1))
+                painter.setFont(QFont("Arial", 8, QFont.Bold if is_active else QFont.Normal))
+                painter.drawText(block.adjusted(2, 1, -2, -1), Qt.AlignCenter, text)
+        x = lane_rect.left() + lane_rect.width() * float(np.clip(self.playhead_ms / self.total_ms, 0.0, 1.0))
+        painter.setPen(QPen(QColor("#e63946"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(x, lane_rect.top() - 3), QPointF(x, lane_rect.bottom() + 3))
+        painter.setFont(QFont("Arial", 8, QFont.Bold))
+        painter.drawText(QRectF(max(lane_rect.left(), x - 38), lane_rect.bottom() + 3, 76, 16), Qt.AlignCenter, f"{self.playhead_ms:.0f} ms")
+
 class VocalTractCanvas(QWidget):
     """Cartoon vocal tract display driven by articulation values, not DSP knobs."""
 
@@ -10705,6 +10897,9 @@ class WaveToyWindow(QMainWindow):
         self.articulation_formant_canvas: ArticulationTrackCanvas | None = None
         self.articulation_motion_canvas: VocalTractCanvas | None = None
         self.articulation_motion_side_canvas: VocalTractCanvas | None = None
+        self.articulation_motion_timeline_canvas: ArticulationMotionTimelineCanvas | None = None
+        self.articulation_viseme_track_canvas: ArticulationMotionTimelineCanvas | None = None
+        self.articulation_motion_summary_label: QLabel | None = None
         self.articulation_motion_status_label: QLabel | None = None
         self.articulation_smooth_transitions_checkbox: QCheckBox | None = None
         self.continuous_debug_bypass_formants_checkbox: QCheckBox | None = None
@@ -13707,6 +13902,35 @@ class WaveToyWindow(QMainWindow):
         self.articulation_chain_widget = QWidget()
         build_primary.addWidget(CollapsibleSection("Chain cards / source actions", self.articulation_chain_widget, expanded=True))
 
+        motion_summary_card = self._toy_group("Motion Summary")
+        motion_summary_layout = QVBoxLayout(motion_summary_card)
+        motion_summary_layout.setContentsMargins(12, 18, 12, 12)
+        self.articulation_motion_summary_label = QLabel("Motion Summary: 0 phonemes • 0 unique visemes / 0 viseme holds • 0 ms total • 0 transitions • avg phoneme 0 ms")
+        self.articulation_motion_summary_label.setObjectName("symbolHint")
+        self.articulation_motion_summary_label.setWordWrap(True)
+        self.articulation_motion_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        motion_summary_layout.addWidget(self.articulation_motion_summary_label)
+
+        motion_timeline_card = self._toy_group("Motion Timeline")
+        motion_timeline_layout = QVBoxLayout(motion_timeline_card)
+        motion_timeline_layout.setContentsMargins(12, 18, 12, 12)
+        motion_timeline_hint = QLabel("Read-only segment view derived from chain phoneme durations and transition timing; the red playhead follows motion playback and scrubbing.")
+        motion_timeline_hint.setObjectName("symbolHint")
+        motion_timeline_hint.setWordWrap(True)
+        motion_timeline_layout.addWidget(motion_timeline_hint)
+        self.articulation_motion_timeline_canvas = ArticulationMotionTimelineCanvas("motion")
+        motion_timeline_layout.addWidget(self.articulation_motion_timeline_canvas)
+
+        viseme_track_card = self._toy_group("Viseme Track")
+        viseme_track_layout = QVBoxLayout(viseme_track_card)
+        viseme_track_layout.setContentsMargins(12, 18, 12, 12)
+        viseme_track_hint = QLabel("Derived viseme lane for mouth-animation timing verification only; editing stays in the articulation chain.")
+        viseme_track_hint.setObjectName("symbolHint")
+        viseme_track_hint.setWordWrap(True)
+        viseme_track_layout.addWidget(viseme_track_hint)
+        self.articulation_viseme_track_canvas = ArticulationMotionTimelineCanvas("viseme")
+        viseme_track_layout.addWidget(self.articulation_viseme_track_canvas)
+
         motion_card = self._toy_group("Word Motion Preview")
         motion_card_layout = QVBoxLayout(motion_card)
         motion_card_layout.setContentsMargins(12, 18, 12, 12)
@@ -13746,7 +13970,9 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_side_canvas.setMinimumSize(QSize(620, 320))
         self.articulation_motion_side_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         motion_card_layout.addWidget(CollapsibleSection("Vocal tract side-cutaway (SVG)", self.articulation_motion_side_canvas, expanded=False))
-        motion_layout.addWidget(self._make_articulation_chain_summary_card("Motion"))
+        motion_layout.addWidget(motion_summary_card)
+        motion_layout.addWidget(motion_timeline_card)
+        motion_layout.addWidget(viseme_track_card)
         motion_layout.addWidget(motion_card, 1)
         self._refresh_articulation_chain_cards()
 
@@ -15807,15 +16033,34 @@ class WaveToyWindow(QMainWindow):
     def _refresh_articulation_motion_timeline(self) -> None:
         segments, total_ms = self._articulation_motion_timeline()
         self.articulation_playhead_ms = float(np.clip(self.articulation_playhead_ms, 0.0, total_ms))
-        blocks: List[Tuple[str, float, float, str]] = []
+        motion_segments = motion_timeline_segments_from_articulation_segments(segments)
+        viseme_labels: Dict[int, str] = {}
         for segment in segments:
-            start = float(segment["start"]) / total_ms
-            end = float(segment["end"]) / total_ms
+            if segment.get("kind") != "hold":
+                continue
+            phoneme = segment.get("from")
+            if isinstance(phoneme, ArticulationPhoneme):
+                viseme_labels[int(segment.get("index", len(viseme_labels)) or 0)] = self._viseme_name_for_phoneme(phoneme)
+        viseme_segments = viseme_timeline_segments_from_motion_segments(motion_segments, viseme_labels)
+        blocks: List[Tuple[str, float, float, str]] = []
+        safe_total = max(1, total_ms)
+        for segment in segments:
+            start = float(segment["start"]) / safe_total
+            end = float(segment["end"]) / safe_total
             if segment["kind"] == "transition":
                 blocks.append(("→", start, end, "#ffffff"))
             elif segment["kind"] == "hold":
                 phoneme = segment["from"]
                 blocks.append((phoneme.name, start, end, phoneme.preview_color))
+        if self.articulation_motion_timeline_canvas is not None:
+            self.articulation_motion_timeline_canvas.set_timeline(motion_segments, viseme_segments, total_ms, self.articulation_playhead_ms, self.articulation_timeline_zoom)
+        if self.articulation_viseme_track_canvas is not None:
+            self.articulation_viseme_track_canvas.set_timeline(motion_segments, viseme_segments, total_ms, self.articulation_playhead_ms, self.articulation_timeline_zoom)
+        if self.articulation_motion_summary_label is not None:
+            transition_count = sum(1 for segment in motion_segments if segment.kind == "transition")
+            phoneme_count = len(self.articulation_chain_items)
+            avg_duration = (sum(float(item.duration_ms or item.phoneme.duration_ms) for item in self.articulation_chain_items) / phoneme_count) if phoneme_count else 0.0
+            self.articulation_motion_summary_label.setText(motion_summary_text(phoneme_count, total_ms, transition_count, avg_duration, viseme_segments))
         if self.articulation_motion_canvas is not None:
             self.articulation_motion_canvas.set_motion_timeline(blocks)
         if self.articulation_timeline_canvas is not None:

@@ -13,9 +13,9 @@ The **Timeline** page has its own focused internal subtabs:
 
 - **Chain** for Chain Builder actions, chain cards/source actions, compact Speech Assets, and the collapsible CV / VC Library.
 - **Timing** for Musical Timing + Singing Preview, Visual Speech Timeline controls, the `ArticulationTimelineCanvas` scroll area, selected-phoneme controls, scrub/playhead status, boundary curve controls, and envelope/formant canvases.
-- **Motion** for Word Motion Preview, motion transport controls, viseme/animation JSON export, the front/anatomical motion canvas, and the collapsible side-cutaway SVG canvas.
+- **Motion** for Motion Summary, fit-to-view Motion Timeline, fit-to-view Viseme Track, Word Motion Preview, motion transport controls, viseme/animation JSON export, the front/anatomical motion canvas, and the collapsible side-cutaway SVG canvas.
 
-Timing and Motion include a compact read-only current-chain summary so users can verify phoneme count, approximate duration, and current render mode without duplicating the full chain card list. This reduces scrolling by separating chain management, visual timing edits, and anatomical motion preview instead of stacking every workflow on one dense page.
+Timing and Motion include compact read-only summaries so users can verify phoneme count, approximate duration, and current render mode without duplicating the full chain card list. The Motion Summary also reports unique visemes separately from total viseme holds for animation pacing checks. Motion Timeline and Viseme Track active-segment detection uses half-open intervals (`start_ms <= playhead_ms < end_ms`) with an explicit final-endpoint highlight to avoid boundary ambiguity. These Motion lanes are fit-to-view in Task 096; functional horizontal zoom is deferred to Task 098 animation curve visualization. This reduces scrolling by separating chain management, visual timing edits, and anatomical motion preview instead of stacking every workflow on one dense page.
 
 Non-goals for this layout split: no synthesis feature additions, no render default changes, no project schema changes, no asset-format migration, and no duplicate Articulation Inspector panels.
 
