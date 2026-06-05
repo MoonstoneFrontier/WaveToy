@@ -48,14 +48,16 @@ The Timing page keeps selected-phoneme editing near the visual timeline and keep
 
 **Motion** is for anatomical preview and animation export. It contains:
 
-- A read-only current-chain summary.
+- **Motion Summary**, including phoneme count, unique viseme count, viseme holds, total duration, transition count, and average phoneme duration.
+- A fit-to-view, read-only **Motion Timeline**; segment active-state checks use half-open intervals (`start_ms <= playhead_ms < end_ms`) with the final segment handled explicitly at the total-duration endpoint.
+- A fit-to-view, read-only **Viseme Track** derived from the current chain.
 - **Word Motion Preview** controls.
 - **Play Word Motion**, **Loop Word Motion**, **Stop Motion**, and **Slow Motion Visual Only**.
 - **Export Viseme JSON** and **Export Animation JSON**.
 - The front/anatomical motion canvas.
 - The collapsible side-cutaway SVG canvas.
 
-Full chain-card editing is intentionally not duplicated here; users can confirm the current chain from the compact summary and return to Chain for edits.
+Full chain-card editing is intentionally not duplicated here; users can confirm the current chain from the compact summary and return to Chain for edits. Functional horizontal zoom for the Motion Timeline/Viseme Track is deferred to Task 098, so Task 096 wording should describe those lanes as fit-to-view rather than zoomable.
 
 ## Why this reduces scrolling
 
