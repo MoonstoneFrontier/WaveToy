@@ -76,3 +76,7 @@ Harmony JSON remains metadata-only and now includes optional `scale_descriptor` 
 ## Task 090 layout follow-up note
 
 Task 090 does not expand Harmony Workbench. Pitch, interval, scale, chord, and harmony analysis controls are becoming dense enough that a future layout task may split them into a dedicated **Music Theory / Harmony** tab or internal workflow pages. The Task 090 implementation focuses on Articulation Timeline clutter first.
+
+## Task 091 layout note
+
+Task 091 moves the Harmony Workbench controls into a **Music Theory** workflow area with subtabs for Notes, Intervals, Scales, Chords, Harmony Analysis, and Export. This is a presentation cleanup only: descriptor dataclasses, scale/chord helpers, roman numeral helpers, harmonic function labels, metadata export payloads, and import behavior are unchanged.
