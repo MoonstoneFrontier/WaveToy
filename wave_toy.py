@@ -106,7 +106,7 @@ ARTICULATION_PICKER_MIN_WIDTH = 220
 ARTICULATION_PICKER_PREFERRED_WIDTH = 300
 ARTICULATION_PICKER_MAX_WIDTH = 380
 ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Timeline", "Render", "Inspector", "Profiles")
-ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing / Performance", "Motion")
+ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing", "Motion")
 MUSIC_THEORY_PICKER_MIN_WIDTH = 220
 MUSIC_THEORY_PICKER_PREFERRED_WIDTH = 300
 MUSIC_THEORY_PICKER_MAX_WIDTH = 380
@@ -13907,10 +13907,10 @@ class WaveToyWindow(QMainWindow):
         performance_note.setObjectName("symbolHint")
         performance_note.setWordWrap(True)
         performance_note_row.addWidget(performance_note, 1)
-        performance_shortcut = QPushButton("Open Timing / Performance")
+        performance_shortcut = QPushButton("Open Timing")
         performance_shortcut.setObjectName("phonemeCardSecondaryAction")
         performance_shortcut.setCursor(Qt.PointingHandCursor)
-        performance_shortcut.setToolTip("Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
+        performance_shortcut.setToolTip("Jump to the Timeline → Timing page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
         performance_shortcut.clicked.connect(self._show_articulation_timing_page)
         performance_note_row.addWidget(performance_shortcut)
         chain_layout.addLayout(performance_note_row)
@@ -22500,6 +22500,41 @@ class WaveToyWindow(QMainWindow):
                 background: #f59e0b;
                 color: #111827;
                 border-color: #b45309;
+            }
+            QTabWidget#articulationTimelineSubtabs::pane, QTabWidget#articulationTimelineInternalSubtabs::pane {
+                background: rgba(248, 250, 252, 0.10);
+                border: 2px solid #1f2937;
+                border-radius: 0 14px 14px 14px;
+                top: -1px;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab {
+                background: #d9e2ec;
+                border: 1px solid #94a3b8;
+                border-bottom: 2px solid #1f2937;
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
+                color: #243b53;
+                font-size: 12px;
+                font-weight: 900;
+                margin-right: 4px;
+                min-height: 32px;
+                padding: 6px 16px;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab:hover, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab:hover {
+                background: #cbd5e1;
+                color: #102a43;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab:selected, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab:selected {
+                background: #1f2937;
+                border: 2px solid #38bdf8;
+                border-bottom: 2px solid #1f2937;
+                color: #ffffff;
+                margin-bottom: -1px;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab:disabled, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab:disabled {
+                background: #e5e7eb;
+                border-color: #cbd5e1;
+                color: #64748b;
             }
             QWidget#articulationLabTab {
                 background: #0d1724;
