@@ -102,6 +102,29 @@ from PySide6.QtWidgets import (
 
 SAMPLE_RATE = 44_100
 
+ARTICULATION_PICKER_MIN_WIDTH = 220
+ARTICULATION_PICKER_PREFERRED_WIDTH = 300
+ARTICULATION_PICKER_MAX_WIDTH = 380
+ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Build", "Visual Timeline", "Render / Export", "Performance", "Advanced")
+
+
+def articulation_picker_width_policy() -> Dict[str, int]:
+    """Return compact sidebar widths for Articulation Timeline list/picker panels."""
+    return {
+        "minimum": ARTICULATION_PICKER_MIN_WIDTH,
+        "preferred": ARTICULATION_PICKER_PREFERRED_WIDTH,
+        "maximum": ARTICULATION_PICKER_MAX_WIDTH,
+    }
+
+
+def apply_articulation_picker_sidebar_width_policy(widget: QWidget) -> None:
+    """Keep Articulation Timeline picker/list panels from spanning full workflow pages."""
+    widths = articulation_picker_width_policy()
+    widget.setMinimumWidth(widths["minimum"])
+    widget.setMaximumWidth(widths["maximum"])
+    widget.resize(widths["preferred"], widget.height())
+    widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
 
 def _utc_now_iso() -> str:
     """Return a stable UTC timestamp for project and asset metadata."""
@@ -9721,6 +9744,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_chain_items: List[ArticulationChainItem] = []
         self.articulation_selected_chain_index: int | None = None
         self.articulation_chain_widget: QWidget | None = None
+        self.articulation_timeline_subtabs: QTabWidget | None = None
         self.articulation_timeline_canvas: ArticulationTimelineCanvas | None = None
         self.articulation_timeline_scroll: QScrollArea | None = None
         self.pitch_lane_preview_label: QLabel | None = None
@@ -11912,12 +11936,9 @@ class WaveToyWindow(QMainWindow):
     def _build_articulation_timeline_tab(self) -> None:
         if self.tabs is None:
             return
-        tab = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
+        tab = QWidget()
         tab.setObjectName("articulationTimelineTab")
-        tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        page = QWidget()
-        page.setObjectName("articulationTimelinePage")
-        outer = QVBoxLayout(page)
+        outer = QVBoxLayout(tab)
         outer.setContentsMargins(14, 10, 14, 18)
         outer.setSpacing(8)
 
@@ -11935,14 +11956,45 @@ class WaveToyWindow(QMainWindow):
         header_layout.addWidget(info, 1)
         outer.addWidget(header)
 
-        main = QHBoxLayout()
-        main.setSpacing(12)
-        outer.addLayout(main, 1)
-        left = QVBoxLayout()
-        left.setSpacing(10)
-        main.addLayout(left, 6)
+        self.articulation_timeline_subtabs = QTabWidget()
+        self.articulation_timeline_subtabs.setObjectName("articulationTimelineSubtabs")
+        outer.addWidget(self.articulation_timeline_subtabs, 1)
 
-        chain_card = self._toy_group("Chain and Word Timeline")
+        def make_subtab_page(object_name: str) -> tuple[WaveToyScrollArea, QVBoxLayout]:
+            scroll = WaveToyScrollArea(scroll_speed=0.92, content_drag_scroll=False)
+            scroll.setObjectName(f"{object_name}Scroll")
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            page = QWidget()
+            page.setObjectName(object_name)
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(12, 10, 12, 14)
+            layout.setSpacing(10)
+            scroll.setWidget(page)
+            return scroll, layout
+
+        build_page, build_layout = make_subtab_page("articulationTimelineBuildPage")
+        visual_page, visual_layout = make_subtab_page("articulationTimelineVisualPage")
+        render_page, render_layout = make_subtab_page("articulationTimelineRenderPage")
+        performance_page, performance_layout = make_subtab_page("articulationTimelinePerformancePage")
+        advanced_page, advanced_layout = make_subtab_page("articulationTimelineAdvancedPage")
+        for subtab_page, label in zip(
+            (build_page, visual_page, render_page, performance_page, advanced_page),
+            ARTICULATION_TIMELINE_SUBTAB_LABELS,
+        ):
+            self.articulation_timeline_subtabs.addTab(subtab_page, label)
+
+        build_split = QHBoxLayout()
+        build_split.setSpacing(12)
+        build_layout.addLayout(build_split, 1)
+        build_primary = QVBoxLayout()
+        build_primary.setSpacing(10)
+        build_split.addLayout(build_primary, 3)
+        build_sidebar = QVBoxLayout()
+        build_sidebar.setSpacing(10)
+        build_split.addLayout(build_sidebar, 1)
+
+        chain_card = self._toy_group("Chain Builder")
+        build_primary.addWidget(chain_card)
         chain_layout = QVBoxLayout(chain_card)
         chain_layout.setContentsMargins(12, 18, 12, 12)
         chain_layout.setSpacing(8)
@@ -11995,7 +12047,6 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_status_label = QLabel("Create Word saves a named asset to Speech Assets without changing the editable chain.")
         self.articulation_word_status_label.setObjectName("symbolHint")
         self.articulation_word_status_label.setWordWrap(True)
-        chain_layout.addWidget(self.articulation_word_status_label)
 
         live_preview_row = QHBoxLayout()
         live_preview_row.setSpacing(8)
@@ -12008,6 +12059,35 @@ class WaveToyWindow(QMainWindow):
         live_preview_note.setObjectName("symbolHint")
         live_preview_row.addWidget(live_preview_note, 1)
         chain_layout.addLayout(live_preview_row)
+
+        render_primary_card = self._toy_group("Word Render / Export")
+        render_primary_layout = QVBoxLayout(render_primary_card)
+        render_primary_layout.setContentsMargins(12, 18, 12, 12)
+        render_primary_layout.setSpacing(8)
+        render_primary_hint = QLabel("Primary word render actions stay together here so playback, asset creation, and export are available without scrolling through timeline editing controls.")
+        render_primary_hint.setObjectName("symbolHint")
+        render_primary_hint.setWordWrap(True)
+        render_primary_layout.addWidget(render_primary_hint)
+        render_primary_buttons = QHBoxLayout()
+        render_primary_buttons.setSpacing(8)
+        for icon, label_text, color, callback in (
+            ("▶", "Play Word", "#b8f2e6", self._play_articulation_word),
+            ("🧩", "Create Word", "#ffd166", self._create_articulation_word),
+            ("💾", "Export Word", "#fdffb6", self._export_articulation_word),
+            ("▶", "Play Chain", "#caffbf", self._play_articulation_chain),
+        ):
+            button = self._make_story_button(icon, label_text, color, callback)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            render_primary_buttons.addWidget(button)
+        render_primary_layout.addLayout(render_primary_buttons)
+        render_primary_layout.addWidget(self.articulation_word_status_label)
+        render_layout.addWidget(render_primary_card)
+
+        render_settings_card = self._toy_group("Render Mode Settings")
+        render_settings_layout = QVBoxLayout(render_settings_card)
+        render_settings_layout.setContentsMargins(12, 18, 12, 12)
+        render_settings_layout.setSpacing(8)
+        render_layout.addWidget(render_settings_card)
 
         musical_section = self._toy_group("Musical Timing + Singing Preview")
         musical_layout = QVBoxLayout(musical_section)
@@ -12053,13 +12133,13 @@ class WaveToyWindow(QMainWindow):
         musical_hint.setObjectName("symbolHint")
         musical_hint.setWordWrap(True)
         musical_layout.addWidget(musical_hint)
-        chain_layout.addWidget(CollapsibleSection("Musical timing", musical_section, expanded=False))
+        performance_layout.addWidget(musical_section)
 
         self.articulation_smooth_transitions_checkbox = QCheckBox("Smooth Mouth Transitions")
         self.articulation_smooth_transitions_checkbox.setChecked(bool(self.articulation_word_render_settings.get("smooth_mouth_transitions", True)))
         self.articulation_smooth_transitions_checkbox.setToolTip("Create Word uses smoothstep slider motion between phoneme shapes when enabled.")
         self.articulation_smooth_transitions_checkbox.toggled.connect(self._toggle_articulation_smooth_transitions)
-        chain_layout.addWidget(self.articulation_smooth_transitions_checkbox)
+        render_settings_layout.addWidget(self.articulation_smooth_transitions_checkbox)
 
         mode_row = QHBoxLayout()
         mode_row.setSpacing(8)
@@ -12093,7 +12173,7 @@ class WaveToyWindow(QMainWindow):
         mode_row.addWidget(validate_button)
         mode_row.addWidget(stop_test_button)
         mode_row.addWidget(self.continuous_debug_bypass_formants_checkbox)
-        chain_layout.addLayout(mode_row)
+        render_settings_layout.addLayout(mode_row)
 
         continuous_tuning_row = QHBoxLayout()
         continuous_tuning_row.setSpacing(8)
@@ -12124,7 +12204,7 @@ class WaveToyWindow(QMainWindow):
         reset_tuning_button.clicked.connect(self._reset_continuous_tuning)
         continuous_tuning_row.addWidget(reset_tuning_button)
         continuous_tuning_row.addStretch(1)
-        chain_layout.addLayout(continuous_tuning_row)
+        render_settings_layout.addLayout(continuous_tuning_row)
 
         diagnostics_card = self._toy_group("Continuous Mouth Motion Diagnostics")
         diagnostics_layout = QVBoxLayout(diagnostics_card)
@@ -12149,13 +12229,13 @@ class WaveToyWindow(QMainWindow):
         self.continuous_validation_results_label.setObjectName("symbolHint")
         self.continuous_validation_results_label.setWordWrap(True)
         diagnostics_layout.addWidget(self.continuous_validation_results_label)
-        chain_layout.addWidget(CollapsibleSection("Continuous diagnostics + waveform editor", diagnostics_card, expanded=False))
+        advanced_layout.addWidget(diagnostics_card)
 
         continuous_tests = ", ".join(" ".join(chain) for chain in CONTINUOUS_RENDER_TEST_CHAINS)
         continuous_test_label = QLabel(f"Continuous validation chains: {continuous_tests}")
         continuous_test_label.setObjectName("symbolHint")
         continuous_test_label.setWordWrap(True)
-        chain_layout.addWidget(continuous_test_label)
+        advanced_layout.addWidget(continuous_test_label)
 
         profile_row = QHBoxLayout()
         profile_label = QLabel("Voice Profile")
@@ -12166,7 +12246,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_voice_profile_combo.currentTextChanged.connect(self._apply_voice_profile_to_chain)
         profile_row.addWidget(profile_label)
         profile_row.addWidget(self.articulation_voice_profile_combo, 1)
-        chain_layout.addLayout(profile_row)
+        performance_layout.addLayout(profile_row)
 
         cv_vc_card = self._toy_group("CV / VC Library")
         cv_vc_layout = QVBoxLayout(cv_vc_card)
@@ -12225,7 +12305,7 @@ class WaveToyWindow(QMainWindow):
             action_row.addWidget(button)
         cv_vc_layout.addLayout(action_row)
         self._update_cv_vc_filter_status()
-        chain_layout.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=False))
+        build_layout.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=False))
 
         timeline_header = QHBoxLayout()
         timeline_title = QLabel("🎞 Visual Speech Timeline")
@@ -12237,7 +12317,7 @@ class WaveToyWindow(QMainWindow):
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(callback)
             timeline_header.addWidget(button)
-        chain_layout.addLayout(timeline_header)
+        visual_layout.addLayout(timeline_header)
 
         self.articulation_timeline_canvas = ArticulationTimelineCanvas()
         self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
@@ -12265,25 +12345,25 @@ class WaveToyWindow(QMainWindow):
         self.pitch_lane_preview_label.setWordWrap(True)
         track_layout.addWidget(self.pitch_lane_preview_label)
         track_layout.addWidget(self.articulation_timeline_scroll)
-        chain_layout.addWidget(track_shell)
+        visual_layout.addWidget(track_shell)
 
         self.articulation_scrub_label = QLabel("Playhead idle • drag the red marker to inspect phoneme, transition progress, articulator values, and formants.")
         self.articulation_scrub_label.setObjectName("symbolHint")
         self.articulation_scrub_label.setWordWrap(True)
-        chain_layout.addWidget(self.articulation_scrub_label)
+        visual_layout.addWidget(self.articulation_scrub_label)
 
         self.articulation_boundary_curve_combo = QComboBox()
         self.articulation_boundary_curve_combo.addItems(list(ARTICULATION_TRANSITION_CURVES))
         self.articulation_boundary_curve_combo.currentTextChanged.connect(self._set_selected_boundary_curve)
-        chain_layout.addWidget(self._build_selected_component_controls())
+        visual_layout.addWidget(self._build_selected_component_controls())
 
         self.articulation_envelope_canvas = ArticulationTrackCanvas("envelopes")
-        chain_layout.addWidget(self.articulation_envelope_canvas)
+        performance_layout.addWidget(self.articulation_envelope_canvas)
         self.articulation_formant_canvas = ArticulationTrackCanvas("formants")
-        chain_layout.addWidget(self.articulation_formant_canvas)
+        performance_layout.addWidget(self.articulation_formant_canvas)
 
         self.articulation_chain_widget = QWidget()
-        chain_layout.addWidget(CollapsibleSection("Advanced chain cards / source actions", self.articulation_chain_widget, expanded=False))
+        build_primary.addWidget(CollapsibleSection("Chain cards / source actions", self.articulation_chain_widget, expanded=True))
 
         motion_card = self._toy_group("Word Motion Preview")
         motion_layout = QVBoxLayout(motion_card)
@@ -12324,12 +12404,16 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_side_canvas.setMinimumSize(QSize(620, 320))
         self.articulation_motion_side_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         motion_layout.addWidget(CollapsibleSection("Vocal tract side-cutaway (SVG)", self.articulation_motion_side_canvas, expanded=False))
-        chain_layout.addWidget(motion_card)
-        left.addWidget(chain_card)
+        visual_layout.addWidget(motion_card)
         self._refresh_articulation_chain_cards()
 
-        main.addWidget(self._build_speech_assets_panel("articulation_timeline"), 2)
-        tab.setWidget(page)
+        speech_assets = self._build_speech_assets_panel("articulation_timeline")
+        apply_articulation_picker_sidebar_width_policy(speech_assets)
+        build_sidebar.addWidget(speech_assets)
+        build_sidebar.addStretch(1)
+        render_layout.addStretch(1)
+        performance_layout.addStretch(1)
+        advanced_layout.addStretch(1)
         self.tabs.insertTab(min(3, self.tabs.count()), tab, "Articulation Timeline")
 
 
@@ -16895,9 +16979,12 @@ class WaveToyWindow(QMainWindow):
         """Create a visible Speech Assets panel backed by the existing Speech Bin data model."""
         panel = QWidget()
         panel.setObjectName("speechAssetsPanel")
-        panel.setMinimumWidth(300)
-        if context in {"timeline", "library"}:
-            panel.setMaximumWidth(380)
+        if context == "articulation_timeline":
+            apply_articulation_picker_sidebar_width_policy(panel)
+        else:
+            panel.setMinimumWidth(300)
+            if context in {"timeline", "library"}:
+                panel.setMaximumWidth(380)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
