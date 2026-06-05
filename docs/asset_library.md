@@ -58,3 +58,9 @@ These foundations do not yet add Asset Library CRUD integration or a project-sch
 ## Task 088 reserved harmony asset cleanup
 
 Reserved harmony asset dataclasses now share common JSON-safe fields through `HarmonyAssetBase` while preserving the public `ScalePatternAsset`, `ChordPatternAsset`, and `ChordProgressionAsset` class names. This reduces duplication for future scale, chord, and progression assets without implementing Asset Library CRUD, MIDI export, piano roll editing, or a project schema migration.
+
+## WaveformAnalyses metadata assets
+
+Waveform analysis assets use the standardized `Waveform Analysis - <Source>` name and store compact inspection metadata for generated speech, selected speech assets, imported WAV/audio assets, or timeline mixes. They intentionally do **not** embed raw audio arrays. A saved analysis payload includes source kind/path when available, sample rate, duration, channel count, peak/RMS/DC/zero-crossing statistics, a basic pitch estimate, bounded short-time energy preview data, bounded uint8-normalized spectrogram preview data, selection range, notes, and timestamps.
+
+If the source audio is later missing, the WaveformAnalyses entry remains useful as metadata-only provenance and summary information.

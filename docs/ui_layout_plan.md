@@ -40,3 +40,7 @@ The note-wheel Harmony Workbench now uses a **Music Theory** workflow area with 
 - **Export** for Harmony JSON import/export and future progression export actions.
 
 Music Theory picker/list/library panels use the same compact sidebar policy: minimum `220` px, preferred `300` px, maximum `380` px. Keep primary editing actions near the top of each subtab and move educational detail below core controls. Future progression, cadence, songwriting, composition, harmonic movement, and ear-training features should prefer adding to these workflow pages instead of returning to a single giant vertical page.
+
+## Task 092 Articulation Inspector placement
+
+The Articulation Inspector belongs inside Articulation Timeline → Render / Export, near Word Render / Export. It should remain compact and workflow-oriented: waveform, selection statistics, pitch, energy, spectrogram, and save/load areas use internal collapsible sections instead of another giant Build-page stack. This preserves the Task 090 cleanup that keeps Build focused on chain construction and timeline editing.

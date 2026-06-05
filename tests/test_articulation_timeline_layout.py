@@ -25,3 +25,10 @@ def test_articulation_timeline_internal_subtab_labels_are_documented():
         "Performance",
         "Advanced",
     )
+
+
+def test_articulation_inspector_is_only_added_to_render_export_workflow():
+    source = wave_toy.Path(wave_toy.__file__).read_text(encoding="utf-8")
+    assert source.count('render_layout.addWidget(self._build_articulation_inspector_panel())') == 1
+    assert 'build_layout.addWidget(self._build_articulation_inspector_panel())' not in source
+    assert 'advanced_layout.addWidget(self._build_articulation_inspector_panel())' not in source
