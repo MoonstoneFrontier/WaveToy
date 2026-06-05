@@ -72,3 +72,7 @@ Descriptor scores are floats from 0.0 to 1.0 for visual/UX use only. They are no
 The Harmony Workbench summary now adds compact analysis lines for scale mood/stability/tension, chord quality/function/roman numeral, and the selected note's scale/chord degree context. The workbench also separates key root from chord root so examples such as E Dominant 7 in A Major can show `V7` and `dominant`.
 
 Harmony JSON remains metadata-only and now includes optional `scale_descriptor` and `chord_descriptor` fields, plus `chord_root_note`/`chord_root_display` when the chord root differs from the key root. Import can ignore descriptor payloads and recompute state from root/scale/chord fields. No audio arrays or preview audio are exported.
+
+## Task 090 layout follow-up note
+
+Task 090 does not expand Harmony Workbench. Pitch, interval, scale, chord, and harmony analysis controls are becoming dense enough that a future layout task may split them into a dedicated **Music Theory / Harmony** tab or internal workflow pages. The Task 090 implementation focuses on Articulation Timeline clutter first.
