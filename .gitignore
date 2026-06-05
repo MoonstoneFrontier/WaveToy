@@ -49,3 +49,20 @@ articulation_chain.json
 # WaveToy local speech render cache
 .wavetoy_speech_cache/
 task_071.patch
+
+# WaveToy generated user data kept outside the source checkout
+/audio_files/
+/animations/
+/visemes/
+/phonemes/
+/Chords/
+/*.wav
+/*.ogg
+/*.flac
+/*.mp3
+/*.wave-toy*.json
+/articulation_chain.json
+/.wavetoy_speech_cache/
+/wave_toy.bak
+/wave_toy_single_module.py
+/task_*.patch

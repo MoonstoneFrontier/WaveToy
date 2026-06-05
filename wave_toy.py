@@ -245,9 +245,15 @@ def suggested_speech_asset_name(context: Dict[str, object] | object | None = Non
     return filesystem_safe_name("_".join(parts), fallback="wavetoy_asset")
 
 
-def wavetoy_data_root() -> Path:
-    """Return the cross-platform WaveToyData root, with a local override for tests/portable runs."""
-    override = os.environ.get("WAVETOY_DATA_DIR")
+WAVETOY_CONFIG_VERSION = 1
+WAVETOY_CONFIG_FILENAME = "settings.json"
+WAVETOY_DATA_DIR_ENV = "WAVETOY_DATA_DIR"
+WAVETOY_CONFIG_DIR_ENV = "WAVETOY_CONFIG_DIR"
+
+
+def wavetoy_config_dir() -> Path:
+    """Return the per-user WaveToy config directory, outside the source checkout."""
+    override = os.environ.get(WAVETOY_CONFIG_DIR_ENV)
     if override:
         return Path(override).expanduser()
     if sys.platform == "win32":
@@ -255,8 +261,75 @@ def wavetoy_data_root() -> Path:
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support"
     else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "WaveToy"
+
+
+def wavetoy_settings_path() -> Path:
+    return wavetoy_config_dir() / WAVETOY_CONFIG_FILENAME
+
+
+def read_wavetoy_settings() -> Dict[str, object]:
+    try:
+        return json.loads(wavetoy_settings_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def write_wavetoy_settings(settings: Dict[str, object]) -> None:
+    path = wavetoy_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(settings)
+    payload["version"] = WAVETOY_CONFIG_VERSION
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def platform_default_wavetoy_data_root() -> Path:
+    """Return the legacy cross-platform WaveToyData location."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
     return base / "WaveToyData"
+
+
+def recommended_wavetoy_project_root() -> Path:
+    """Return the first-run suggested durable project/data directory."""
+    moonstone_path = Path("/home/moonstone/Wave_Toy_Projects")
+    if Path.home() == Path("/home/moonstone") or moonstone_path.exists():
+        return moonstone_path
+    return Path.home() / "Wave_Toy_Projects"
+
+
+def is_headless_wavetoy_session() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("CI") or os.environ.get("WAVETOY_HEADLESS") or os.environ.get("QT_QPA_PLATFORM") == "offscreen")
+
+
+def resolve_wavetoy_data_root(*, require_existing_config: bool = True) -> Tuple[Path, str]:
+    """Resolve the data root in priority order without showing GUI prompts."""
+    override = os.environ.get(WAVETOY_DATA_DIR_ENV)
+    if override:
+        return Path(override).expanduser(), "environment override"
+    settings = read_wavetoy_settings()
+    saved = str(settings.get("data_root") or "").strip()
+    if saved:
+        saved_path = Path(saved).expanduser()
+        if saved_path.exists() or not require_existing_config:
+            return saved_path, "saved config"
+    return platform_default_wavetoy_data_root(), "platform default"
+
+
+def persist_wavetoy_data_root(path: Path) -> None:
+    write_wavetoy_settings({"data_root": str(path.expanduser()), "selected_at": _utc_now_iso()})
+
+
+def wavetoy_data_root() -> Path:
+    """Return the WaveToy data root without opening interactive dialogs."""
+    return resolve_wavetoy_data_root()[0]
 
 
 WAVETOY_ASSET_CATEGORIES: Dict[str, str] = {
@@ -1137,18 +1210,41 @@ class AssetLibraryRecord:
 class WaveToyStorage:
     """Small JSON storage foundation for persistent projects, assets, and recovery."""
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = root or wavetoy_data_root()
+    def __init__(self, root: Path | None = None, *, source: str | None = None) -> None:
+        resolved_root, resolved_source = (root, "explicit") if root is not None else resolve_wavetoy_data_root()
+        self.root = Path(resolved_root).expanduser()
+        self.source = source or resolved_source
         self.projects_dir = self.root / "Projects"
         self.assets_dir = self.root / "Assets"
         self.exports_dir = self.root / "Exports"
         self.cache_dir = self.root / "Cache"
         self.recovery_dir = self.root / "Recovery"
+        self.legacy_imports_dir = self.root / "LegacyImports"
+        self.audio_dir = self.root / "Audio"
+        self.voices_dir = self.root / "Voices"
+        self.words_dir = self.root / "Words"
+        self.phonemes_dir = self.root / "Phonemes"
+        self.animations_dir = self.root / "Animations"
+        self.visemes_dir = self.root / "Visemes"
         self.metadata_path = self.root / "wavetoy_storage.json"
         self.ensure_layout()
 
     def ensure_layout(self) -> None:
-        for path in [self.projects_dir, self.assets_dir, self.exports_dir, self.cache_dir, self.recovery_dir]:
+        top_level_dirs = [
+            self.projects_dir,
+            self.assets_dir,
+            self.exports_dir,
+            self.cache_dir,
+            self.recovery_dir,
+            self.legacy_imports_dir,
+            self.audio_dir,
+            self.voices_dir,
+            self.words_dir,
+            self.phonemes_dir,
+            self.animations_dir,
+            self.visemes_dir,
+        ]
+        for path in top_level_dirs:
             path.mkdir(parents=True, exist_ok=True)
         for folder in WAVETOY_ASSET_CATEGORIES.values():
             (self.assets_dir / folder).mkdir(parents=True, exist_ok=True)
@@ -11292,7 +11388,9 @@ class WaveToyWindow(QMainWindow):
         self._generate_timer.setSingleShot(True)
         self._generate_timer.timeout.connect(self._run_scheduled_generate)
 
-        self.storage = WaveToyStorage()
+        self.storage = self._resolve_initial_storage()
+        print(f"[WaveToy Storage] Active data root ({self.storage.source}): {self.storage.root}")
+        self._warn_about_repo_local_data()
         self.current_project_path: Path | None = None
         self.current_project_name = "Untitled WaveToy Project"
         self.project_dirty = False
@@ -11410,7 +11508,7 @@ class WaveToyWindow(QMainWindow):
         self.timeline_speech_bin_widget: QWidget | None = None
         self.speech_asset_list_widgets: List[Tuple[QWidget, str]] = []
         self.timeline_speech_count_label: QLabel | None = None
-        self.timeline_speech_cache_dir = Path(".wavetoy_speech_cache")
+        self.timeline_speech_cache_dir = self.storage.cache_dir / "Speech"
         self.timeline_playhead_seconds = 0.0
         self.timeline_duration_seconds = 0.0
         self.timeline_last_mix = np.zeros((0, 2), dtype=np.float32)
@@ -11437,7 +11535,7 @@ class WaveToyWindow(QMainWindow):
         self.timeline_stretch_quality = "Balanced"
         self.timeline_stretch_quality_combo: QComboBox | None = None
 
-        self.phonemes_dir = Path("phonemes")
+        self.phonemes_dir = self.storage.phonemes_dir
         self.current_phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
         self.saved_phonemes: List[ArticulationPhoneme] = []
         self.articulation_canvas: VocalTractCanvas | None = None
@@ -11555,7 +11653,7 @@ class WaveToyWindow(QMainWindow):
         self.word_motion_timeline_total_ms = 1
         self.word_motion_play_audio = False
         self.articulation_word_status_label: QLabel | None = None
-        self.articulation_chain_path = Path("articulation_chain.json")
+        self.articulation_chain_path = self.storage.assets_dir / "Chains" / "articulation_chain.json"
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
         self.articulation_word_render_signature: str | None = None
         self.articulation_last_word_render_path: Path | None = None
@@ -11644,6 +11742,103 @@ class WaveToyWindow(QMainWindow):
         self._refresh_asset_library_view()
         self._restore_startup_project_if_enabled()
         self._generate_now(reason="startup", update_message=True, force=True)
+
+    def _resolve_initial_storage(self) -> WaveToyStorage:
+        settings = read_wavetoy_settings()
+        saved = str(settings.get("data_root") or "").strip()
+        env_override = os.environ.get(WAVETOY_DATA_DIR_ENV)
+        missing_saved = bool(saved and not Path(saved).expanduser().exists())
+        first_run = not env_override and not saved
+        if env_override:
+            root, source = resolve_wavetoy_data_root()
+            return WaveToyStorage(root=root, source=source)
+        if (first_run or missing_saved) and not is_headless_wavetoy_session():
+            selected = self._choose_data_directory(initial=Path(saved).expanduser() if saved else None)
+            if selected is not None:
+                return WaveToyStorage(root=selected, source="selected config")
+        root, source = resolve_wavetoy_data_root()
+        if missing_saved:
+            print(f"[WaveToy Storage] Saved data root is missing: {saved}; using {source}: {root}")
+        return WaveToyStorage(root=root, source=source)
+
+    def _choose_data_directory(self, *, initial: Path | None = None) -> Path | None:
+        suggested = initial if initial is not None and initial.exists() else recommended_wavetoy_project_root()
+        try:
+            suggested.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            print(f"[WaveToy Storage] Could not create suggested data directory {suggested}: {exc}")
+            suggested = platform_default_wavetoy_data_root()
+        title = "Choose WaveToy Data Directory"
+        message = (
+            "WaveToy stores your projects, audio exports, phonemes, voices, generated "
+            "words, analyses, and recovery files outside the application folder. "
+            "Choose a durable WaveToy data directory."
+        )
+        QMessageBox.information(self, title, message)
+        selected = QFileDialog.getExistingDirectory(self, title, str(suggested))
+        if not selected:
+            return None
+        path = Path(selected).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        persist_wavetoy_data_root(path)
+        return path
+
+    def _set_storage_root(self, root: Path, *, source: str) -> None:
+        self.storage = WaveToyStorage(root=root, source=source)
+        self.timeline_speech_cache_dir = self.storage.cache_dir / "Speech"
+        self.phonemes_dir = self.storage.phonemes_dir
+        self.articulation_chain_path = self.storage.assets_dir / "Chains" / "articulation_chain.json"
+        self._load_saved_phonemes()
+        self._refresh_phoneme_cards()
+        self._refresh_asset_library_view()
+        self._refresh_recent_project_menu()
+        self._update_project_path_label()
+        print(f"[WaveToy Storage] Active data root ({self.storage.source}): {self.storage.root}")
+
+    def _legacy_repo_data_paths(self) -> List[Path]:
+        names = ["phonemes", "audio_files", "animations", "visemes", "Chords", "articulation_chain.json", ".wavetoy_speech_cache"]
+        paths = [Path(__file__).resolve().parent / name for name in names]
+        paths.extend(sorted(Path(__file__).resolve().parent.glob("*.wav")))
+        paths.extend(sorted(Path(__file__).resolve().parent.glob("*.ogg")))
+        return [path for path in paths if path.exists()]
+
+    def _warn_about_repo_local_data(self) -> None:
+        legacy_paths = self._legacy_repo_data_paths()
+        if not legacy_paths:
+            return
+        target = self.storage.legacy_imports_dir
+        names = ", ".join(path.name for path in legacy_paths[:6])
+        if len(legacy_paths) > 6:
+            names += ", …"
+        print(f"[WaveToy Storage] Legacy repo-local generated data detected ({names}). Suggested manual move target: {target}")
+
+    def _open_path_in_file_manager(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            QMessageBox.information(self, "Open Folder", f"Folder: {path}\n\nCould not open file manager automatically: {exc}")
+
+    def _open_data_directory(self, checked: bool = False) -> None:
+        del checked
+        self._open_path_in_file_manager(self.storage.root)
+
+    def _reveal_recovery_folder(self, checked: bool = False) -> None:
+        del checked
+        self._open_path_in_file_manager(self.storage.recovery_dir)
+
+    def _change_data_directory(self, checked: bool = False) -> None:
+        del checked
+        selected = self._choose_data_directory(initial=self.storage.root)
+        if selected is None:
+            return
+        self._set_storage_root(selected, source="selected config")
+        QMessageBox.information(self, "WaveToy Data Directory", f"WaveToy will use:\n{selected}\n\nExisting repo-local generated data was not moved automatically.")
 
     def _build_speech_diagnostics_dock(self) -> None:
         """Create the optional speech diagnostics and compact voice-box dock."""
@@ -11739,10 +11934,11 @@ class WaveToyWindow(QMainWindow):
         self._update_speech_diagnostics_panel(self.current_phoneme)
 
     def _project_status_text(self) -> str:
+        env_note = " — env override" if self.storage.source == "environment override" else ""
         if self.current_project_path is None:
-            return "Project: Unsaved — no project file yet"
+            return f"Data Root: {self.storage.root}{env_note} • Project: Unsaved — no project file yet"
         marker = " *" if self.project_dirty else ""
-        return f"Project: {self.current_project_path}{marker}"
+        return f"Data Root: {self.storage.root}{env_note} • Project: {self.current_project_path}{marker}"
 
     def _mark_project_dirty(self, reason: str = "project change") -> None:
         if not self.project_dirty:
@@ -12341,6 +12537,16 @@ class WaveToyWindow(QMainWindow):
             file_menu.addAction(action)
         self.recent_projects_menu = file_menu.addMenu("Recent Projects")
         self._refresh_recent_project_menu()
+        file_menu.addSeparator()
+        open_data_action = QAction("Open Data Directory", self)
+        open_data_action.triggered.connect(self._open_data_directory)
+        file_menu.addAction(open_data_action)
+        change_data_action = QAction("Change Data Directory", self)
+        change_data_action.triggered.connect(self._change_data_directory)
+        file_menu.addAction(change_data_action)
+        reveal_recovery_action = QAction("Reveal Recovery Folder", self)
+        reveal_recovery_action.triggered.connect(self._reveal_recovery_folder)
+        file_menu.addAction(reveal_recovery_action)
         file_menu.addSeparator()
         export_entry_action = QAction("Export Library Entry", self)
         export_entry_action.triggered.connect(self._export_library_entry)
@@ -14121,7 +14327,8 @@ class WaveToyWindow(QMainWindow):
         performance_note.setObjectName("symbolHint")
         performance_note.setWordWrap(True)
         performance_note_row.addWidget(performance_note, 1)
-        performance_shortcut = make_secondary_action_button("Open Timing / Performance", self._show_articulation_timing_page, "Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
+        performance_shortcut = make_secondary_action_button("Open Timing / Performance", tooltip="Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
+        performance_shortcut.clicked.connect(self._show_articulation_timing_page)
         performance_note_row.addWidget(performance_shortcut)
         chain_layout.addLayout(performance_note_row)
 
@@ -14136,8 +14343,8 @@ class WaveToyWindow(QMainWindow):
             (
                 "Wave Source",
                 (
-                    make_secondary_action_button("Apply Current Source to Selected", self._apply_current_wave_to_selected_chain_item, "Apply the current waveform source to the selected chain card"),
-                    make_secondary_action_button("Apply Current Source to Chain", self._apply_current_wave_to_whole_chain, "Apply the current waveform source to every chain card"),
+                    make_secondary_action_button("Apply Current Wave to Selected", self._apply_current_wave_to_selected_chain_item, "Apply the current waveform source to the selected chain card"),
+                    make_secondary_action_button("Apply Current Wave to Chain", self._apply_current_wave_to_whole_chain, "Apply the current waveform source to every chain card"),
                     make_secondary_action_button("Reset Selected Source", self._reset_selected_chain_item_source, "Restore default voice source for the selected card"),
                 ),
             ),
@@ -16602,7 +16809,7 @@ class WaveToyWindow(QMainWindow):
         if not self.articulation_chain_items:
             QMessageBox.warning(self, "Export Viseme JSON", "Add at least one phoneme to the chain before exporting a viseme timeline.")
             return
-        filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Viseme JSON", "wave_toy_viseme_timeline.json", "JSON Files (*.json);;All Files (*)")
+        filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Viseme JSON", str(self.storage.visemes_dir / "wave_toy_viseme_timeline.json"), "JSON Files (*.json);;All Files (*)")
         if not filename:
             return
         frames = self._build_viseme_frames()
@@ -16628,7 +16835,7 @@ class WaveToyWindow(QMainWindow):
         if not self.articulation_chain_items:
             QMessageBox.warning(self, "Export Animation JSON", "Add at least one phoneme to the chain before exporting animation JSON.")
             return
-        filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Animation JSON", "wave_toy_animation_export.json", "JSON Files (*.json);;All Files (*)")
+        filename, _selected_filter = QFileDialog.getSaveFileName(self, "Export Animation JSON", str(self.storage.animations_dir / "wave_toy_animation_export.json"), "JSON Files (*.json);;All Files (*)")
         if not filename:
             return
         frames = self._build_viseme_frames()
@@ -18589,7 +18796,7 @@ class WaveToyWindow(QMainWindow):
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export Created Word",
-            f"{safe_name}_{timestamp}.wav",
+            str(self.storage.audio_dir / f"{safe_name}_{timestamp}.wav"),
             "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
         )
         if not filename:
@@ -21721,7 +21928,7 @@ class WaveToyWindow(QMainWindow):
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export Timeline Mix",
-            "wave_toy_timeline_mix.wav",
+            str(self.storage.exports_dir / "wave_toy_timeline_mix.wav"),
             "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
         )
         if not filename:
@@ -24355,7 +24562,7 @@ class WaveToyWindow(QMainWindow):
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save My Sound",
-            f"{suggested_speech_asset_name({'source_name': 'currentwave'})}.wav",
+            str(self.storage.exports_dir / f"{suggested_speech_asset_name({'source_name': 'currentwave'})}.wav"),
             "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
         )
 
