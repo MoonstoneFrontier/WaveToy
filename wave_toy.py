@@ -105,7 +105,7 @@ SAMPLE_RATE = 44_100
 ARTICULATION_PICKER_MIN_WIDTH = 220
 ARTICULATION_PICKER_PREFERRED_WIDTH = 300
 ARTICULATION_PICKER_MAX_WIDTH = 380
-ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Build", "Visual Timeline", "Render / Export", "Performance", "Advanced")
+ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Timeline", "Render", "Inspector", "Profiles")
 MUSIC_THEORY_PICKER_MIN_WIDTH = 220
 MUSIC_THEORY_PICKER_PREFERRED_WIDTH = 300
 MUSIC_THEORY_PICKER_MAX_WIDTH = 380
@@ -128,6 +128,14 @@ def apply_articulation_picker_sidebar_width_policy(widget: QWidget) -> None:
     widget.setMaximumWidth(widths["maximum"])
     widget.resize(widths["preferred"], widget.height())
     widget.setSizePolicy(getattr(QSizePolicy, "Preferred", 0), getattr(QSizePolicy, "Expanding", 1))
+
+
+def apply_compact_combo_policy(combo: QComboBox, *, minimum: int = 96, maximum: int = 220) -> None:
+    """Size selector widgets to their content instead of letting them dominate rows."""
+    combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+    combo.setMinimumWidth(minimum)
+    combo.setMaximumWidth(maximum)
+    combo.setSizePolicy(getattr(QSizePolicy, "Maximum", 4), getattr(QSizePolicy, "Fixed", 0))
 
 
 def music_theory_picker_width_policy() -> Dict[str, int]:
@@ -13241,26 +13249,25 @@ class WaveToyWindow(QMainWindow):
             scroll.setWidget(page)
             return scroll, layout
 
-        build_page, build_layout = make_subtab_page("articulationTimelineBuildPage")
-        visual_page, visual_layout = make_subtab_page("articulationTimelineVisualPage")
-        render_page, render_layout = make_subtab_page("articulationTimelineRenderPage")
-        performance_page, performance_layout = make_subtab_page("articulationTimelinePerformancePage")
-        advanced_page, advanced_layout = make_subtab_page("articulationTimelineAdvancedPage")
+        timeline_page, timeline_layout = make_subtab_page("articulationWorkspaceTimelinePage")
+        render_page, render_layout = make_subtab_page("articulationWorkspaceRenderPage")
+        inspector_page, inspector_layout = make_subtab_page("articulationWorkspaceInspectorPage")
+        profiles_page, profiles_layout = make_subtab_page("articulationWorkspaceProfilesPage")
         for subtab_page, label in zip(
-            (build_page, visual_page, render_page, performance_page, advanced_page),
+            (timeline_page, render_page, inspector_page, profiles_page),
             ARTICULATION_TIMELINE_SUBTAB_LABELS,
         ):
             self.articulation_timeline_subtabs.addTab(subtab_page, label)
 
-        build_split = QHBoxLayout()
-        build_split.setSpacing(12)
-        build_layout.addLayout(build_split, 1)
+        timeline_split = QHBoxLayout()
+        timeline_split.setSpacing(12)
+        timeline_layout.addLayout(timeline_split, 1)
         build_primary = QVBoxLayout()
         build_primary.setSpacing(10)
-        build_split.addLayout(build_primary, 3)
+        timeline_split.addLayout(build_primary, 3)
         build_sidebar = QVBoxLayout()
         build_sidebar.setSpacing(10)
-        build_split.addLayout(build_sidebar, 1)
+        timeline_split.addLayout(build_sidebar, 1)
 
         chain_card = self._toy_group("Chain Builder")
         build_primary.addWidget(chain_card)
@@ -13280,18 +13287,6 @@ class WaveToyWindow(QMainWindow):
             (
                 "Chain Editing",
                 (("➕", "Add Current", "#5cdb95", self._add_current_phoneme_to_chain, 76), ("🔡", "Create Syllable", "#caffbf", self._create_articulation_syllable, 58), ("🧹", "Clear Chain", "#ffadad", self._clear_articulation_chain, 58)),
-            ),
-            (
-                "Render Speech",
-                (("🧩", "Create Word", "#ffd166", self._create_articulation_word, 76), ("▶", "Play Word (smoothed render)", "#b8f2e6", self._play_articulation_word, 58), ("▶", "Play Chain (raw sequence)", "#caffbf", self._play_articulation_chain, 58), ("💾", "Export Word", "#fdffb6", self._export_articulation_word, 58)),
-            ),
-            (
-                "Send to Timeline",
-                (("➕", "Send Word to Timeline", "#ffc6ff", self._send_articulation_word_to_timeline, 76), ("➕", "Send Phoneme", "#e7c6ff", self._send_current_phoneme_to_timeline, 54), ("➕", "Send Chain", "#e7c6ff", self._send_articulation_chain_to_timeline, 54)),
-            ),
-            (
-                "Save/Load",
-                (("💾", "Save Chain", "#ffd166", self._save_articulation_chain, 54), ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain, 54)),
             ),
             (
                 "Wave Source",
@@ -13349,9 +13344,22 @@ class WaveToyWindow(QMainWindow):
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             render_primary_buttons.addWidget(button)
         render_primary_layout.addLayout(render_primary_buttons)
+        send_row = QHBoxLayout()
+        send_row.setSpacing(8)
+        for icon, label_text, color, callback in (
+            ("➕", "Send Word to Timeline", "#ffc6ff", self._send_articulation_word_to_timeline),
+            ("➕", "Send Phoneme", "#e7c6ff", self._send_current_phoneme_to_timeline),
+            ("➕", "Send Chain", "#e7c6ff", self._send_articulation_chain_to_timeline),
+            ("💾", "Save Chain", "#ffd166", self._save_articulation_chain),
+            ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain),
+        ):
+            button = self._make_story_button(icon, label_text, color, callback)
+            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+            send_row.addWidget(button)
+        render_primary_layout.addLayout(send_row)
         render_primary_layout.addWidget(self.articulation_word_status_label)
         render_layout.addWidget(render_primary_card)
-        render_layout.addWidget(self._build_articulation_inspector_panel())
+        inspector_layout.addWidget(self._build_articulation_inspector_panel())
 
         render_settings_card = self._toy_group("Render Mode Settings")
         render_settings_layout = QVBoxLayout(render_settings_card)
@@ -13378,10 +13386,12 @@ class WaveToyWindow(QMainWindow):
         self.musical_bpm_spin.valueChanged.connect(self._set_musical_bpm)
         self.musical_time_signature_combo = QComboBox()
         self.musical_time_signature_combo.addItems(["2/4", "3/4", "4/4", "5/4", "6/8", "7/8", "12/8"])
+        apply_compact_combo_policy(self.musical_time_signature_combo, minimum=72, maximum=96)
         self.musical_time_signature_combo.setCurrentText(f"{self.musical_timing_settings.time_signature_numerator}/{self.musical_timing_settings.time_signature_denominator}")
         self.musical_time_signature_combo.currentTextChanged.connect(self._set_musical_time_signature)
         self.musical_snap_combo = QComboBox()
         self.musical_snap_combo.addItems(list(MUSICAL_SNAP_SUBDIVISIONS.keys()))
+        apply_compact_combo_policy(self.musical_snap_combo, minimum=92, maximum=140)
         self.musical_snap_combo.setCurrentText(self.musical_timing_settings.snap_subdivision if self.musical_timing_settings.snap_enabled else "Off")
         self.musical_snap_combo.setToolTip("When not Off, phoneme duration drags snap to this beat grid. Transition timing stays in milliseconds for articulation safety.")
         self.musical_snap_combo.currentTextChanged.connect(self._set_musical_snap_subdivision)
@@ -13403,7 +13413,7 @@ class WaveToyWindow(QMainWindow):
         musical_hint.setObjectName("symbolHint")
         musical_hint.setWordWrap(True)
         musical_layout.addWidget(musical_hint)
-        performance_layout.addWidget(musical_section)
+        timeline_layout.addWidget(musical_section)
 
         self.articulation_smooth_transitions_checkbox = QCheckBox("Smooth Mouth Transitions")
         self.articulation_smooth_transitions_checkbox.setChecked(bool(self.articulation_word_render_settings.get("smooth_mouth_transitions", True)))
@@ -13417,6 +13427,7 @@ class WaveToyWindow(QMainWindow):
         mode_label.setObjectName("timelineInspectorText")
         self.articulation_word_render_mode_combo = QComboBox()
         self.articulation_word_render_mode_combo.addItems(list(ARTICULATION_WORD_RENDER_MODES))
+        apply_compact_combo_policy(self.articulation_word_render_mode_combo, minimum=170, maximum=240)
         current_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
         if current_mode not in ARTICULATION_WORD_RENDER_MODES:
             current_mode = ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
@@ -13499,24 +13510,49 @@ class WaveToyWindow(QMainWindow):
         self.continuous_validation_results_label.setObjectName("symbolHint")
         self.continuous_validation_results_label.setWordWrap(True)
         diagnostics_layout.addWidget(self.continuous_validation_results_label)
-        advanced_layout.addWidget(diagnostics_card)
+        render_layout.addWidget(diagnostics_card)
 
         continuous_tests = ", ".join(" ".join(chain) for chain in CONTINUOUS_RENDER_TEST_CHAINS)
         continuous_test_label = QLabel(f"Continuous validation chains: {continuous_tests}")
         continuous_test_label.setObjectName("symbolHint")
         continuous_test_label.setWordWrap(True)
-        advanced_layout.addWidget(continuous_test_label)
+        render_layout.addWidget(continuous_test_label)
 
         profile_row = QHBoxLayout()
         profile_label = QLabel("Voice Profile")
         profile_label.setObjectName("timelineInspectorText")
         self.articulation_voice_profile_combo = QComboBox()
         self.articulation_voice_profile_combo.addItems(["Neutral", "Child", "Female", "Male", "Robot", "Monster", "Whisper"])
+        apply_compact_combo_policy(self.articulation_voice_profile_combo, minimum=110, maximum=150)
         self.articulation_voice_profile_combo.setToolTip("Non-destructively nudge pitch, formants, voicing, and noise style for every chain phoneme; edit sliders afterward.")
         self.articulation_voice_profile_combo.currentTextChanged.connect(self._apply_voice_profile_to_chain)
         profile_row.addWidget(profile_label)
         profile_row.addWidget(self.articulation_voice_profile_combo, 1)
-        performance_layout.addLayout(profile_row)
+        profiles_layout.addLayout(profile_row)
+
+        profile_management_card = self._toy_group("Voice Modeling Profiles")
+        profile_management_layout = QVBoxLayout(profile_management_card)
+        profile_management_layout.setContentsMargins(12, 18, 12, 12)
+        profile_management_layout.setSpacing(8)
+        profile_summary = QLabel(
+            f"Voice Source: {self.voice_source_profile.name} • Character: {self.character_voice_profile.name} • "
+            "Voice Box and Resonance controls remain direct, non-ML profile controls."
+        )
+        profile_summary.setObjectName("symbolHint")
+        profile_summary.setWordWrap(True)
+        profile_management_layout.addWidget(profile_summary)
+        profile_actions = QHBoxLayout()
+        profile_actions.setSpacing(8)
+        save_profiles_button = self._make_story_button("💾", "Save Profile Set", "#ffd166", self._save_profile_assets)
+        save_profiles_button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+        profile_actions.addWidget(save_profiles_button)
+        open_dock_button = self._make_story_button("🧬", "Open Voice Box / Resonance Controls", "#d7b9ff", lambda checked=False: self.speech_diagnostics_dock.show() if self.speech_diagnostics_dock is not None else None)
+        open_dock_button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
+        open_dock_button.setToolTip("Shows the existing Voice Box, Resonance, and speech diagnostics dock without changing synthesis settings.")
+        profile_actions.addWidget(open_dock_button)
+        profile_actions.addStretch(1)
+        profile_management_layout.addLayout(profile_actions)
+        profiles_layout.addWidget(profile_management_card)
 
         cv_vc_card = self._toy_group("CV / VC Library")
         cv_vc_layout = QVBoxLayout(cv_vc_card)
@@ -13532,9 +13568,11 @@ class WaveToyWindow(QMainWindow):
         self.cv_vc_search_edit.textChanged.connect(self._update_cv_vc_filter_status)
         self.cv_vc_starts_with_combo = QComboBox()
         self.cv_vc_starts_with_combo.addItems(["Any start"] + list(CV_VC_CONSONANTS) + list(CV_VC_VOWELS))
+        apply_compact_combo_policy(self.cv_vc_starts_with_combo, minimum=110, maximum=150)
         self.cv_vc_starts_with_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
         self.cv_vc_contains_combo = QComboBox()
         self.cv_vc_contains_combo.addItems(["Any contains"] + list(CV_VC_CONSONANTS) + list(CV_VC_VOWELS))
+        apply_compact_combo_policy(self.cv_vc_contains_combo, minimum=120, maximum=160)
         self.cv_vc_contains_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
         filter_row.addWidget(self.cv_vc_search_edit, 2)
         filter_row.addWidget(self.cv_vc_starts_with_combo, 1)
@@ -13547,12 +13585,15 @@ class WaveToyWindow(QMainWindow):
         picker_row = QHBoxLayout()
         self.cv_vc_consonant_combo = QComboBox()
         self.cv_vc_consonant_combo.addItems(list(CV_VC_CONSONANTS))
+        apply_compact_combo_policy(self.cv_vc_consonant_combo, minimum=80, maximum=110)
         self.cv_vc_consonant_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
         self.cv_vc_vowel_combo = QComboBox()
         self.cv_vc_vowel_combo.addItems(list(CV_VC_VOWELS))
+        apply_compact_combo_policy(self.cv_vc_vowel_combo, minimum=80, maximum=110)
         self.cv_vc_vowel_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
         self.cv_vc_pattern_combo = QComboBox()
         self.cv_vc_pattern_combo.addItems(["CV", "VC", "All: CV + VC"])
+        apply_compact_combo_policy(self.cv_vc_pattern_combo, minimum=112, maximum=150)
         self.cv_vc_pattern_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
         self.cv_vc_pattern_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
         for label_text, combo in (("Consonant", self.cv_vc_consonant_combo), ("Vowel", self.cv_vc_vowel_combo), ("Pattern", self.cv_vc_pattern_combo)):
@@ -13575,7 +13616,7 @@ class WaveToyWindow(QMainWindow):
             action_row.addWidget(button)
         cv_vc_layout.addLayout(action_row)
         self._update_cv_vc_filter_status()
-        build_layout.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=False))
+        timeline_layout.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=False))
 
         timeline_header = QHBoxLayout()
         timeline_title = QLabel("🎞 Visual Speech Timeline")
@@ -13587,7 +13628,7 @@ class WaveToyWindow(QMainWindow):
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(callback)
             timeline_header.addWidget(button)
-        visual_layout.addLayout(timeline_header)
+        timeline_layout.addLayout(timeline_header)
 
         self.articulation_timeline_canvas = ArticulationTimelineCanvas()
         self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
@@ -13615,22 +13656,23 @@ class WaveToyWindow(QMainWindow):
         self.pitch_lane_preview_label.setWordWrap(True)
         track_layout.addWidget(self.pitch_lane_preview_label)
         track_layout.addWidget(self.articulation_timeline_scroll)
-        visual_layout.addWidget(track_shell)
+        timeline_layout.addWidget(track_shell)
 
         self.articulation_scrub_label = QLabel("Playhead idle • drag the red marker to inspect phoneme, transition progress, articulator values, and formants.")
         self.articulation_scrub_label.setObjectName("symbolHint")
         self.articulation_scrub_label.setWordWrap(True)
-        visual_layout.addWidget(self.articulation_scrub_label)
+        timeline_layout.addWidget(self.articulation_scrub_label)
 
         self.articulation_boundary_curve_combo = QComboBox()
         self.articulation_boundary_curve_combo.addItems(list(ARTICULATION_TRANSITION_CURVES))
+        apply_compact_combo_policy(self.articulation_boundary_curve_combo, minimum=110, maximum=150)
         self.articulation_boundary_curve_combo.currentTextChanged.connect(self._set_selected_boundary_curve)
-        visual_layout.addWidget(self._build_selected_component_controls())
+        timeline_layout.addWidget(self._build_selected_component_controls())
 
         self.articulation_envelope_canvas = ArticulationTrackCanvas("envelopes")
-        performance_layout.addWidget(self.articulation_envelope_canvas)
+        timeline_layout.addWidget(self.articulation_envelope_canvas)
         self.articulation_formant_canvas = ArticulationTrackCanvas("formants")
-        performance_layout.addWidget(self.articulation_formant_canvas)
+        timeline_layout.addWidget(self.articulation_formant_canvas)
 
         self.articulation_chain_widget = QWidget()
         build_primary.addWidget(CollapsibleSection("Chain cards / source actions", self.articulation_chain_widget, expanded=True))
@@ -13674,7 +13716,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_motion_side_canvas.setMinimumSize(QSize(620, 320))
         self.articulation_motion_side_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         motion_layout.addWidget(CollapsibleSection("Vocal tract side-cutaway (SVG)", self.articulation_motion_side_canvas, expanded=False))
-        visual_layout.addWidget(motion_card)
+        timeline_layout.addWidget(motion_card)
         self._refresh_articulation_chain_cards()
 
         speech_assets = self._build_speech_assets_panel("articulation_timeline")
@@ -13682,8 +13724,8 @@ class WaveToyWindow(QMainWindow):
         build_sidebar.addWidget(speech_assets)
         build_sidebar.addStretch(1)
         render_layout.addStretch(1)
-        performance_layout.addStretch(1)
-        advanced_layout.addStretch(1)
+        inspector_layout.addStretch(1)
+        profiles_layout.addStretch(1)
         self.tabs.insertTab(min(3, self.tabs.count()), tab, "Articulation Timeline")
 
 
