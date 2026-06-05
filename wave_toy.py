@@ -106,7 +106,17 @@ ARTICULATION_PICKER_MIN_WIDTH = 220
 ARTICULATION_PICKER_PREFERRED_WIDTH = 300
 ARTICULATION_PICKER_MAX_WIDTH = 380
 ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Timeline", "Render", "Inspector", "Profiles")
-ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing", "Motion")
+ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing / Performance", "Motion")
+UI_BUTTON_HEIGHT_COMPACT = 28
+UI_BUTTON_HEIGHT_PRIMARY = 34
+UI_CARD_PADDING_COMPACT = 8
+UI_SECTION_SPACING_COMPACT = 6
+UI_TAB_HEIGHT_COMPACT = 30
+UI_PRIMARY_ACTION_COLOR = "#2563eb"
+UI_SECONDARY_ACTION_COLOR = "#334155"
+UI_DESTRUCTIVE_ACTION_COLOR = "#b91c1c"
+UI_TRANSPORT_ACTION_COLOR = "#047857"
+UI_DIAGNOSTIC_COLOR = "#7c3aed"
 MUSIC_THEORY_PICKER_MIN_WIDTH = 220
 MUSIC_THEORY_PICKER_PREFERRED_WIDTH = 300
 MUSIC_THEORY_PICKER_MAX_WIDTH = 380
@@ -180,6 +190,59 @@ def formant_analysis_asset_name(source_name: str) -> str:
     cleaned = str(source_name or "Speech").strip() or "Speech"
     prefix = "Formant Analysis - "
     return cleaned if cleaned.startswith(prefix) else f"{prefix}{cleaned}"
+
+
+def filesystem_safe_name(value: str, fallback: str = "wavetoy_asset") -> str:
+    """Return a compact, cross-platform safe filename/asset stem."""
+    safe = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or ""))
+    safe = "_".join(part for part in safe.strip("._-").split("_") if part)
+    return safe or fallback
+
+
+def suggested_speech_asset_name(context: Dict[str, object] | object | None = None) -> str:
+    """Build useful, filesystem-safe speech/sound asset names from source + phoneme context."""
+    if context is None:
+        data: Dict[str, object] = {}
+    elif isinstance(context, dict):
+        data = dict(context)
+    else:
+        data = {"source_name": str(context)}
+
+    source = str(data.get("source_name") or data.get("source") or data.get("voice_wave_source") or "").strip()
+    if not source:
+        mode = str(data.get("source_mode") or "")
+        wave_id = str(data.get("source_wave_id") or "")
+        if wave_id:
+            source = wave_id
+        elif mode == ARTICULATION_SOURCE_CURRENT:
+            source = "currentwave"
+        elif mode == ARTICULATION_SOURCE_DEFAULT:
+            source = "defaultvoice"
+        else:
+            source = "currentwave"
+
+    phonemes: List[str] = []
+    for item in data.get("phonemes", data.get("chain", [])) or []:
+        if isinstance(item, str):
+            name = item
+        elif hasattr(item, "phoneme") and hasattr(item.phoneme, "name"):
+            name = str(item.phoneme.name)
+        elif hasattr(item, "name"):
+            name = str(item.name)
+        elif isinstance(item, dict):
+            name = str(item.get("name") or item.get("phoneme") or "")
+        else:
+            name = ""
+        if name.strip():
+            phonemes.append(name.strip())
+    if not phonemes and data.get("phoneme"):
+        phonemes.append(str(data.get("phoneme")))
+
+    parts = [source] + phonemes
+    render_mode = str(data.get("render_mode") or "").strip()
+    if bool(data.get("include_render_mode", False)) and render_mode:
+        parts.append(render_mode)
+    return filesystem_safe_name("_".join(parts), fallback="wavetoy_asset")
 
 
 def wavetoy_data_root() -> Path:
@@ -6471,7 +6534,7 @@ class WaveToySizing:
     NORMAL_SPACING = 10
     SECTION_SPACING = 16
     MIN_TOUCH_TARGET = 32
-    BUTTON_HEIGHT = 34
+    BUTTON_HEIGHT = UI_BUTTON_HEIGHT_PRIMARY
     LARGE_BUTTON_HEIGHT = 38
     ICON_STANDARD = 24
     ICON_LARGE = 28
@@ -7739,10 +7802,45 @@ class NoWheelSlider(QSlider):
 
 
 class NoWheelComboBox(QComboBox):
-    """Combo box that cannot be accidentally changed by page scrolling."""
+    """Combo box that cannot be accidentally changed by passive page scrolling."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.ClickFocus)
 
     def wheelEvent(self, event) -> None:
-        event.ignore()
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class PassiveWheelTextEdit(QTextEdit):
+    """Read-only text panes pass wheel events to page scroll until clicked/focused."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.ClickFocus)
+
+    def wheelEvent(self, event) -> None:
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class PassiveWheelTableWidget(QTableWidget):
+    """Picker/list tables do not steal page scrolling until focused by the user."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.ClickFocus)
+
+    def wheelEvent(self, event) -> None:
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
 
 
 class NoWheelSpinBox(QSpinBox):
@@ -11406,6 +11504,7 @@ class WaveToyWindow(QMainWindow):
             "pitch_envelopes": [],
             "note_events": [],
             "singing_mode_enabled": False,
+            "auto_apply_current_wave_to_new_chain_items": True,
         }
         self.note_events: List[NoteEvent] = []
         self.pitch_automation_points: List[PitchAutomationPoint] = []
@@ -11467,7 +11566,7 @@ class WaveToyWindow(QMainWindow):
         voice_box_layout.setSpacing(6)
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Character preset"))
-        self.voice_box_character_combo = QComboBox()
+        self.voice_box_character_combo = NoWheelComboBox()
         self.voice_box_character_combo.addItems(list(VOICE_BOX_CHARACTER_PRESETS.keys()))
         self.voice_box_character_combo.setToolTip("Updates VoiceBoxState defaults only; direct phoneme articulation remains editable.")
         self.voice_box_character_combo.currentTextChanged.connect(self._apply_voice_box_character_preset)
@@ -13276,7 +13375,7 @@ class WaveToyWindow(QMainWindow):
         source_layout.setSpacing(8)
         source_title = QLabel("🌊 Source")
         source_title.setObjectName("articulationToyLabel")
-        self.articulation_source_combo = QComboBox()
+        self.articulation_source_combo = NoWheelComboBox()
         self.articulation_source_combo.setObjectName("articulationSourceSelector")
         for mode, label in (
             (ARTICULATION_SOURCE_DEFAULT, "Default Voice"),
@@ -13307,7 +13406,7 @@ class WaveToyWindow(QMainWindow):
         anatomy_controls_layout.setContentsMargins(10, 6, 10, 6)
         anatomy_controls_layout.setSpacing(8)
         anatomy_controls_layout.addWidget(QLabel("👄 Display"))
-        self.articulation_display_mode_combo = QComboBox()
+        self.articulation_display_mode_combo = NoWheelComboBox()
         self.articulation_display_mode_combo.addItems(["Simple", "Anatomical"])
         self.articulation_display_mode_combo.currentTextChanged.connect(self._set_articulation_display_mode)
         self.articulation_airflow_overlay_checkbox = QCheckBox("Airflow overlay")
@@ -13497,7 +13596,7 @@ class WaveToyWindow(QMainWindow):
         source_row = QHBoxLayout()
         source_row.setSpacing(8)
         source_row.addWidget(QLabel("Source"))
-        self.articulation_inspector_source_combo = QComboBox()
+        self.articulation_inspector_source_combo = NoWheelComboBox()
         for label, key in (
             ("Current Rendered Word", "current_rendered_word"),
             ("Current Phoneme Preview", "current_phoneme_preview"),
@@ -13767,7 +13866,8 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_inspector_analysis is None:
             QMessageBox.information(self, "Waveform Analysis", "No waveform analysis is available to save yet.")
             return
-        record = replace(self.articulation_inspector_analysis, modified_at=_utc_now_iso())
+        analysis_name = self._suggested_chain_asset_name() if self.articulation_inspector_source_kind == "current_rendered_word" else suggested_speech_asset_name({"source_name": self.articulation_inspector_source_name})
+        record = replace(self.articulation_inspector_analysis, name=waveform_analysis_asset_name(analysis_name), modified_at=_utc_now_iso())
         payload = record.to_json_dict()
         self._save_library_asset("waveform_analysis", record.name, payload, description="Compact waveform analysis metadata; raw audio is not embedded.", tags=["analysis", record.source_kind], source_path=record.source_path)
         self._refresh_asset_library_view()
@@ -13781,7 +13881,8 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_inspector_formant_analysis is None:
             QMessageBox.information(self, "Formant Analysis", "No formant analysis metadata is available to save yet.")
             return
-        record = replace(self.articulation_inspector_formant_analysis, modified_at=_utc_now_iso())
+        analysis_name = self._suggested_chain_asset_name() if self.articulation_inspector_source_kind == "current_rendered_word" else suggested_speech_asset_name({"source_name": self.articulation_inspector_source_name})
+        record = replace(self.articulation_inspector_formant_analysis, name=formant_analysis_asset_name(analysis_name), modified_at=_utc_now_iso())
         payload = record.to_json_dict()
         raw_keys = [key for key in json.dumps(payload).split('"') if key in {"audio_data", "raw_audio"}]
         if raw_keys:
@@ -13903,14 +14004,14 @@ class WaveToyWindow(QMainWindow):
         chain_layout.addWidget(primary_label)
         performance_note_row = QHBoxLayout()
         performance_note_row.setSpacing(8)
-        performance_note = QLabel("Tempo / Singing Preview moved to Timeline → Timing.")
+        performance_note = QLabel("Tempo / Singing Preview moved to Timeline → Timing / Performance.")
         performance_note.setObjectName("symbolHint")
         performance_note.setWordWrap(True)
         performance_note_row.addWidget(performance_note, 1)
-        performance_shortcut = QPushButton("Open Timing")
+        performance_shortcut = QPushButton("Open Timing / Performance")
         performance_shortcut.setObjectName("phonemeCardSecondaryAction")
         performance_shortcut.setCursor(Qt.PointingHandCursor)
-        performance_shortcut.setToolTip("Jump to the Timeline → Timing page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
+        performance_shortcut.setToolTip("Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
         performance_shortcut.clicked.connect(self._show_articulation_timing_page)
         performance_note_row.addWidget(performance_shortcut)
         chain_layout.addLayout(performance_note_row)
@@ -13922,7 +14023,7 @@ class WaveToyWindow(QMainWindow):
             ),
             (
                 "Wave Source",
-                (("🌊", "Apply Wave to Selected", "#b8f2e6", self._apply_current_wave_to_selected_chain_item, 54), ("🌊", "Apply Wave to Whole Chain", "#caffbf", self._apply_current_wave_to_whole_chain, 54), ("♻", "Reset Selected", "#ffd166", self._reset_selected_chain_item_source, 54), ("♻", "Reset Whole Chain", "#ffadad", self._reset_whole_chain_source, 54)),
+                (("🌊", "Apply Current Wave to Selected", "#b8f2e6", self._apply_current_wave_to_selected_chain_item, 44), ("🌊", "Apply Current Wave to Chain", "#caffbf", self._apply_current_wave_to_whole_chain, 44), ("♻", "Reset Selected Source", "#ffd166", self._reset_selected_chain_item_source, 44), ("♻", "Reset Chain Sources", "#ffadad", self._reset_whole_chain_source, 44)),
             ),
         )
         for section_title, actions in chain_sections:
@@ -14020,12 +14121,12 @@ class WaveToyWindow(QMainWindow):
         self.musical_bpm_spin.setValue(self.musical_timing_settings.bpm)
         self.musical_bpm_spin.setToolTip("Tempo for beat conversion, quantize, labels, and animation export.")
         self.musical_bpm_spin.valueChanged.connect(self._set_musical_bpm)
-        self.musical_time_signature_combo = QComboBox()
+        self.musical_time_signature_combo = NoWheelComboBox()
         self.musical_time_signature_combo.addItems(["2/4", "3/4", "4/4", "5/4", "6/8", "7/8", "12/8"])
         apply_compact_combo_policy(self.musical_time_signature_combo, minimum=72, maximum=96)
         self.musical_time_signature_combo.setCurrentText(f"{self.musical_timing_settings.time_signature_numerator}/{self.musical_timing_settings.time_signature_denominator}")
         self.musical_time_signature_combo.currentTextChanged.connect(self._set_musical_time_signature)
-        self.musical_snap_combo = QComboBox()
+        self.musical_snap_combo = NoWheelComboBox()
         self.musical_snap_combo.addItems(list(MUSICAL_SNAP_SUBDIVISIONS.keys()))
         apply_compact_combo_policy(self.musical_snap_combo, minimum=92, maximum=140)
         self.musical_snap_combo.setCurrentText(self.musical_timing_settings.snap_subdivision if self.musical_timing_settings.snap_enabled else "Off")
@@ -14062,7 +14163,7 @@ class WaveToyWindow(QMainWindow):
         mode_row.setSpacing(8)
         mode_label = QLabel("Word Render Mode")
         mode_label.setObjectName("timelineInspectorText")
-        self.articulation_word_render_mode_combo = QComboBox()
+        self.articulation_word_render_mode_combo = NoWheelComboBox()
         self.articulation_word_render_mode_combo.addItems(list(ARTICULATION_WORD_RENDER_MODES))
         apply_compact_combo_policy(self.articulation_word_render_mode_combo, minimum=170, maximum=240)
         current_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
@@ -14158,7 +14259,7 @@ class WaveToyWindow(QMainWindow):
         profile_row = QHBoxLayout()
         profile_label = QLabel("Voice Profile")
         profile_label.setObjectName("timelineInspectorText")
-        self.articulation_voice_profile_combo = QComboBox()
+        self.articulation_voice_profile_combo = NoWheelComboBox()
         self.articulation_voice_profile_combo.addItems(["Neutral", "Child", "Female", "Male", "Robot", "Monster", "Whisper"])
         apply_compact_combo_policy(self.articulation_voice_profile_combo, minimum=110, maximum=150)
         self.articulation_voice_profile_combo.setToolTip("Non-destructively nudge pitch, formants, voicing, and noise style for every chain phoneme; edit sliders afterward.")
@@ -14203,11 +14304,11 @@ class WaveToyWindow(QMainWindow):
         self.cv_vc_search_edit = QLineEdit()
         self.cv_vc_search_edit.setPlaceholderText("Search CV/VC (example: D AH, SH, stop)")
         self.cv_vc_search_edit.textChanged.connect(self._update_cv_vc_filter_status)
-        self.cv_vc_starts_with_combo = QComboBox()
+        self.cv_vc_starts_with_combo = NoWheelComboBox()
         self.cv_vc_starts_with_combo.addItems(["Any start"] + list(CV_VC_CONSONANTS) + list(CV_VC_VOWELS))
         apply_compact_combo_policy(self.cv_vc_starts_with_combo, minimum=110, maximum=150)
         self.cv_vc_starts_with_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
-        self.cv_vc_contains_combo = QComboBox()
+        self.cv_vc_contains_combo = NoWheelComboBox()
         self.cv_vc_contains_combo.addItems(["Any contains"] + list(CV_VC_CONSONANTS) + list(CV_VC_VOWELS))
         apply_compact_combo_policy(self.cv_vc_contains_combo, minimum=120, maximum=160)
         self.cv_vc_contains_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
@@ -14220,15 +14321,15 @@ class WaveToyWindow(QMainWindow):
         self.cv_vc_filter_status_label.setWordWrap(True)
         cv_vc_layout.addWidget(self.cv_vc_filter_status_label)
         picker_row = QHBoxLayout()
-        self.cv_vc_consonant_combo = QComboBox()
+        self.cv_vc_consonant_combo = NoWheelComboBox()
         self.cv_vc_consonant_combo.addItems(list(CV_VC_CONSONANTS))
         apply_compact_combo_policy(self.cv_vc_consonant_combo, minimum=80, maximum=110)
         self.cv_vc_consonant_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
-        self.cv_vc_vowel_combo = QComboBox()
+        self.cv_vc_vowel_combo = NoWheelComboBox()
         self.cv_vc_vowel_combo.addItems(list(CV_VC_VOWELS))
         apply_compact_combo_policy(self.cv_vc_vowel_combo, minimum=80, maximum=110)
         self.cv_vc_vowel_combo.currentTextChanged.connect(lambda _text: self._schedule_live_preview("selected_cv_vc_combination"))
-        self.cv_vc_pattern_combo = QComboBox()
+        self.cv_vc_pattern_combo = NoWheelComboBox()
         self.cv_vc_pattern_combo.addItems(["CV", "VC", "All: CV + VC"])
         apply_compact_combo_policy(self.cv_vc_pattern_combo, minimum=112, maximum=150)
         self.cv_vc_pattern_combo.currentTextChanged.connect(self._update_cv_vc_filter_status)
@@ -14300,7 +14401,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_scrub_label.setWordWrap(True)
         timing_layout.addWidget(self.articulation_scrub_label)
 
-        self.articulation_boundary_curve_combo = QComboBox()
+        self.articulation_boundary_curve_combo = NoWheelComboBox()
         self.articulation_boundary_curve_combo.addItems(list(ARTICULATION_TRANSITION_CURVES))
         apply_compact_combo_policy(self.articulation_boundary_curve_combo, minimum=110, maximum=150)
         self.articulation_boundary_curve_combo.currentTextChanged.connect(self._set_selected_boundary_curve)
@@ -14772,7 +14873,7 @@ class WaveToyWindow(QMainWindow):
             source_gain=self.current_phoneme.source_gain,
         ).clamped()
 
-    def _set_articulation_ui_from_phoneme(self, phoneme: ArticulationPhoneme) -> None:
+    def _set_articulation_ui_from_phoneme(self, phoneme: ArticulationPhoneme, *, regenerate: bool = True) -> None:
         phoneme = phoneme.clamped()
         self.current_phoneme = phoneme
         values = {
@@ -14798,7 +14899,7 @@ class WaveToyWindow(QMainWindow):
             self.articulation_voiced_checkbox.blockSignals(True)
             self.articulation_voiced_checkbox.setChecked(phoneme.voiced)
             self.articulation_voiced_checkbox.blockSignals(False)
-        self._update_articulation_preview(regenerate=True)
+        self._update_articulation_preview(regenerate=regenerate)
 
     def _articulation_slider_changed(self, key: str) -> None:
         del key
@@ -15335,6 +15436,13 @@ class WaveToyWindow(QMainWindow):
         self.current_phoneme = self.current_phoneme.clamped()
         self._update_articulation_preview(regenerate=True)
 
+    def _phoneme_with_current_classic_wave_source(self, phoneme: ArticulationPhoneme) -> ArticulationPhoneme:
+        """Return a preset phoneme routed to the current Classic Controls wave without rendering."""
+        phoneme = phoneme.clamped()
+        for key, value in self._source_metadata_for_mode(ARTICULATION_SOURCE_CURRENT).items():
+            setattr(phoneme, key, value)
+        return phoneme.clamped()
+
     def _reset_current_phoneme_source(self, checked: bool = False) -> None:
         del checked
         self.current_phoneme = self._phoneme_from_articulation_ui()
@@ -15353,11 +15461,14 @@ class WaveToyWindow(QMainWindow):
     def _refresh_articulation_chain_cards(self) -> None:
         if self.articulation_chain_widget is None:
             return
+        if isinstance(self.articulation_selected_chain_index, int):
+            if not (0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items)):
+                self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1 if self.articulation_chain_items else None
         layout = self.articulation_chain_widget.layout()
         if layout is None:
             layout = QVBoxLayout(self.articulation_chain_widget)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
+            layout.setSpacing(UI_SECTION_SPACING_COMPACT)
         else:
             while layout.count():
                 item = layout.takeAt(0)
@@ -15381,26 +15492,133 @@ class WaveToyWindow(QMainWindow):
         self._refresh_articulation_motion_timeline()
         self._refresh_selected_component_controls()
 
+    def _chain_item_variation_id(self, phoneme: ArticulationPhoneme) -> str:
+        phoneme = phoneme.clamped()
+        if phoneme.source_mode == ARTICULATION_SOURCE_MIX_WAVE and phoneme.source_wave_id:
+            return f"{ARTICULATION_SOURCE_MIX_WAVE}:{phoneme.source_wave_id}"
+        if phoneme.source_mode == ARTICULATION_SOURCE_IMPORTED and phoneme.source_audio_path:
+            return f"{ARTICULATION_SOURCE_IMPORTED}:{phoneme.source_audio_path}"
+        return phoneme.source_mode if phoneme.source_mode in ARTICULATION_SOURCE_MODES else ARTICULATION_SOURCE_DEFAULT
+
+    def _chain_source_name_for_suggestions(self, items: List[ArticulationChainItem] | None = None) -> str:
+        items = list(items if items is not None else self.articulation_chain_items)
+        names = []
+        for item in items:
+            phoneme = item.phoneme_for_render().clamped()
+            if phoneme.source_mode == ARTICULATION_SOURCE_MIX_WAVE and phoneme.source_wave_id:
+                names.append(str(phoneme.source_wave_id))
+            elif phoneme.source_mode == ARTICULATION_SOURCE_CURRENT:
+                names.append("currentwave")
+            elif phoneme.source_mode == ARTICULATION_SOURCE_IMPORTED and phoneme.source_audio_path:
+                names.append(Path(str(phoneme.source_audio_path)).stem)
+            elif phoneme.source_mode == ARTICULATION_SOURCE_DEFAULT:
+                names.append("defaultvoice")
+        unique = list(dict.fromkeys(name for name in names if name))
+        if len(unique) == 1:
+            return unique[0]
+        if "currentwave" in unique:
+            return "currentwave"
+        return unique[0] if unique else "currentwave"
+
+    def _suggested_chain_asset_name(self, *, include_render_mode: bool = False) -> str:
+        return suggested_speech_asset_name({
+            "source_name": self._chain_source_name_for_suggestions(),
+            "phonemes": self.articulation_chain_items,
+            "render_mode": self._articulation_word_render_mode(),
+            "include_render_mode": include_render_mode,
+        })
+
+    def available_chain_voice_wave_variations(self) -> List[Dict[str, str]]:
+        """Return compact per-card source choices without triggering render or export work."""
+        variations: List[Dict[str, str]] = [
+            {"id": ARTICULATION_SOURCE_DEFAULT, "label": "Default Voice", "category": "voice"},
+            {"id": ARTICULATION_SOURCE_CURRENT, "label": "Current Classic Wave", "category": "classic_controls"},
+        ]
+        for wave_id in getattr(self, "wave_row_order", DEFAULT_WAVE_ORDER):
+            variations.append({"id": f"{ARTICULATION_SOURCE_MIX_WAVE}:{wave_id}", "label": f"Mix Wave: {wave_id}", "category": "wave"})
+        selected_asset = None
+        try:
+            selected_asset = self._timeline_palette_item_by_id(getattr(self, "timeline_selected_palette_item_id", None))
+        except Exception:
+            selected_asset = None
+        if selected_asset is not None and getattr(selected_asset, "source_path", None):
+            name = str(getattr(selected_asset, "name", "Imported Audio"))
+            variations.append({"id": f"{ARTICULATION_SOURCE_IMPORTED}:{selected_asset.source_path}", "label": f"Imported: {name}", "category": "library_asset"})
+        return variations
+
+    def _source_metadata_for_variation_id(self, variation_id: str) -> Dict[str, object]:
+        variation_id = str(variation_id or ARTICULATION_SOURCE_DEFAULT)
+        if variation_id == ARTICULATION_SOURCE_DEFAULT:
+            return {
+                "source_mode": ARTICULATION_SOURCE_DEFAULT,
+                "source_wave_id": None,
+                "source_recipe_snapshot": {},
+                "source_audio_path": None,
+                "source_start_seconds": 0.0,
+                "source_duration_seconds": 0.0,
+                "source_pitch_follow": True,
+                "source_loop_to_fit": True,
+                "source_gain": 1.0,
+            }
+        if variation_id == ARTICULATION_SOURCE_CURRENT:
+            metadata = self._source_metadata_for_mode(ARTICULATION_SOURCE_CURRENT)
+            metadata["source_wave_id"] = None
+            metadata["source_audio_path"] = None
+            return metadata
+        prefix = f"{ARTICULATION_SOURCE_MIX_WAVE}:"
+        if variation_id.startswith(prefix):
+            wave_id = variation_id[len(prefix):] or self._selected_mix_wave_id()
+            metadata = self._source_metadata_for_mode(ARTICULATION_SOURCE_MIX_WAVE)
+            metadata["source_wave_id"] = wave_id
+            metadata["source_audio_path"] = None
+            return metadata
+        prefix = f"{ARTICULATION_SOURCE_IMPORTED}:"
+        if variation_id.startswith(prefix):
+            path = variation_id[len(prefix):]
+            metadata = self._source_metadata_for_mode(ARTICULATION_SOURCE_IMPORTED)
+            metadata["source_audio_path"] = path or metadata.get("source_audio_path")
+            return metadata
+        return self._source_metadata_for_variation_id(ARTICULATION_SOURCE_DEFAULT)
+
+    def apply_voice_wave_variation_to_chain_item(self, index: int, variation_id: str) -> None:
+        """Assign one chain card's Voice / Wave Variation without rendering audio."""
+        if index < 0 or index >= len(self.articulation_chain_items):
+            return
+        phoneme = self.articulation_chain_items[index].phoneme
+        for key, value in self._source_metadata_for_variation_id(variation_id).items():
+            setattr(phoneme, key, value)
+        self.articulation_chain_items[index].phoneme = phoneme.clamped()
+        self.articulation_selected_chain_index = index
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
     def _make_articulation_chain_card(self, index: int, item: ArticulationChainItem) -> QWidget:
         phoneme = item.phoneme_for_render().clamped()
         card = QWidget()
-        card.setObjectName("phonemeCard")
-        card.setMinimumHeight(118)
+        card.setObjectName("phonemeCardSelected" if index == self.articulation_selected_chain_index else "phonemeCard")
+        card.setProperty("selected", index == self.articulation_selected_chain_index)
+        card.setMinimumHeight(104)
+        card.setCursor(Qt.PointingHandCursor)
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        selected_border = "#1d3557" if index == self.articulation_selected_chain_index else "rgba(0, 0, 0, 0.16)"
+        selected = index == self.articulation_selected_chain_index
+        selected_border = UI_PRIMARY_ACTION_COLOR if selected else "rgba(15, 23, 42, 0.18)"
+        selected_width = 2 if selected else 1
+        selected_fill = "rgba(255, 255, 255, 0.30)" if selected else "rgba(255, 255, 255, 0.12)"
         card.setStyleSheet(
-            f"QWidget#phonemeCard {{ background: {phoneme.preview_color}; border: 1px solid {selected_border}; border-radius: 10px; }}"
+            f"QWidget#{card.objectName()} {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {phoneme.preview_color}, stop:1 {selected_fill}); "
+            f"border: {selected_width}px solid {selected_border}; border-radius: 8px; }}"
         )
+        card.mousePressEvent = lambda event, i=index: self._select_articulation_chain_item(i)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(UI_CARD_PADDING_COMPACT, UI_CARD_PADDING_COMPACT, UI_CARD_PADDING_COMPACT, UI_CARD_PADDING_COMPACT)
+        layout.setSpacing(UI_SECTION_SPACING_COMPACT)
 
         header = QHBoxLayout()
-        header.setSpacing(10)
+        header.setSpacing(8)
         number = QLabel(f"{index + 1}")
         number.setObjectName("articulationIpaBadge")
         number.setAlignment(Qt.AlignCenter)
-        number.setMinimumWidth(40)
+        number.setMinimumWidth(32)
         title = QLabel(f"{phoneme.name} /{phoneme.ipa}/")
         title.setObjectName("phonemeCardTitle")
         title.setWordWrap(True)
@@ -15412,7 +15630,7 @@ class WaveToyWindow(QMainWindow):
         )
         details.setObjectName("phonemeCardSummary")
         details.setWordWrap(True)
-        source_badge = QLabel(articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path))
+        source_badge = QLabel(f"Source: {articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)}")
         source_badge.setObjectName("articulationIpaBadge")
         source_badge.setAlignment(Qt.AlignCenter)
         title_stack = QVBoxLayout()
@@ -15424,19 +15642,51 @@ class WaveToyWindow(QMainWindow):
         header.addLayout(title_stack, 1)
         layout.addLayout(header)
 
+        variation_row = QHBoxLayout()
+        variation_row.setSpacing(6)
+        variation_label = QLabel("Voice / Wave Variation")
+        variation_label.setObjectName("phonemeCardSummary")
+        variation_combo = NoWheelComboBox()
+        variation_combo.setObjectName("chainCardVoiceWaveVariationSelector")
+        apply_compact_combo_policy(variation_combo, minimum=150, maximum=230)
+        current_variation_id = self._chain_item_variation_id(phoneme)
+        selected_option = -1
+        for option_index, variation in enumerate(self.available_chain_voice_wave_variations()):
+            variation_combo.addItem(variation["label"], variation["id"])
+            if variation["id"] == current_variation_id:
+                selected_option = option_index
+        if selected_option < 0:
+            missing_label = f"Missing: {articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)}"
+            variation_combo.addItem(missing_label, current_variation_id)
+            selected_option = variation_combo.count() - 1
+        variation_combo.blockSignals(True)
+        variation_combo.setCurrentIndex(selected_option)
+        variation_combo.blockSignals(False)
+        variation_combo.currentIndexChanged.connect(lambda _row, combo=variation_combo, i=index: self.apply_voice_wave_variation_to_chain_item(i, str(combo.currentData())))
+        reset_button = QPushButton("Reset")
+        reset_button.setObjectName("phonemeCardSecondaryAction")
+        reset_button.setMinimumHeight(UI_BUTTON_HEIGHT_COMPACT)
+        reset_button.setCursor(Qt.PointingHandCursor)
+        reset_button.clicked.connect(lambda checked=False, i=index: self.apply_voice_wave_variation_to_chain_item(i, ARTICULATION_SOURCE_DEFAULT))
+        variation_row.addWidget(variation_label)
+        variation_row.addWidget(variation_combo)
+        variation_row.addWidget(reset_button)
+        variation_row.addStretch(1)
+        layout.addLayout(variation_row)
+
         actions = QHBoxLayout()
-        actions.setSpacing(8)
+        actions.setSpacing(6)
         for text, callback, danger in (
             ("▶ Play", lambda checked=False, i=index: self._play_chain_item(i), False),
-            ("📂 Load/Edit", lambda checked=False, i=index: self._select_articulation_chain_item(i), False),
-            ("⧉ Duplicate Block", lambda checked=False, i=index: self._duplicate_articulation_chain_item(i), False),
-            ("⬅ Move Left", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
-            ("➡ Move Right", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
-            ("Remove Block", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
+            ("Edit", lambda checked=False, i=index: self._select_articulation_chain_item(i), False),
+            ("⧉ Duplicate", lambda checked=False, i=index: self._duplicate_articulation_chain_item(i), False),
+            ("⬅ Move", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
+            ("➡ Move", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
+            ("Remove", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
         ):
             button = QPushButton(text)
             button.setObjectName("phonemeCardDangerAction" if danger else "phonemeCardSecondaryAction")
-            button.setMinimumHeight(WaveToySizing.MIN_TOUCH_TARGET)
+            button.setMinimumHeight(UI_BUTTON_HEIGHT_COMPACT)
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(callback)
             actions.addWidget(button)
@@ -15508,7 +15758,7 @@ class WaveToyWindow(QMainWindow):
         curve_row = QHBoxLayout()
         curve_label = QLabel("Curve")
         curve_label.setObjectName("phonemeCardSummary")
-        curve_combo = QComboBox()
+        curve_combo = NoWheelComboBox()
         curve_combo.addItems(list(ARTICULATION_TRANSITION_CURVES))
         curve_combo.setCurrentText(left.transition_curve if left.transition_curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE)
         curve_combo.currentTextChanged.connect(lambda curve, i=index: self._set_chain_transition_curve(i, curve))
@@ -15655,7 +15905,7 @@ class WaveToyWindow(QMainWindow):
                 widget.setEnabled(item is not None)
         if item is None:
             if self.selected_component_label is not None:
-                self.selected_component_label.setText("Select a phoneme block in the Visual Articulation Timeline to edit it here.")
+                self.selected_component_label.setText("Select a phoneme card in Chain or a block in Timing / Performance to edit it here.")
             return
         phoneme = item.phoneme_for_render().clamped()
         if self.selected_component_label is not None:
@@ -15746,7 +15996,12 @@ class WaveToyWindow(QMainWindow):
     def _add_current_phoneme_to_chain(self, checked: bool = False) -> None:
         del checked
         self.current_phoneme = self._phoneme_from_articulation_ui()
-        self.articulation_chain_items.append(ArticulationChainItem(ArticulationPhoneme.from_json_dict(self.current_phoneme.to_json_dict())))
+        new_phoneme = ArticulationPhoneme.from_json_dict(self.current_phoneme.to_json_dict())
+        if bool(self.articulation_word_render_settings.get("auto_apply_current_wave_to_new_chain_items", True)):
+            for key, value in self._source_metadata_for_mode(ARTICULATION_SOURCE_CURRENT).items():
+                setattr(new_phoneme, key, value)
+            new_phoneme = new_phoneme.clamped()
+        self.articulation_chain_items.append(ArticulationChainItem(new_phoneme))
         self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
@@ -18179,7 +18434,7 @@ class WaveToyWindow(QMainWindow):
         audio = self._render_word_audio_for_current_chain()
         if audio.size == 0:
             return audio
-        default_name = (self._speech_display_sequence_for_chain().replace(" + ", "").lower() or "word")
+        default_name = self._suggested_chain_asset_name() or "word"
         name, ok = QInputDialog.getText(self, "Create Word", "Name this Speech Assets word:", text=default_name)
         if not ok:
             name = default_name
@@ -18214,12 +18469,11 @@ class WaveToyWindow(QMainWindow):
             if audio.size == 0:
                 return
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        chain_name = "_".join(item.phoneme.name.lower() for item in self.articulation_chain_items[:6]) or "word"
-        safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in chain_name)
+        safe_name = self._suggested_chain_asset_name(include_render_mode=True)
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export Created Word",
-            f"wave_toy_word_{safe_name}_{timestamp}.wav",
+            f"{safe_name}_{timestamp}.wav",
             "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
         )
         if not filename:
@@ -18283,7 +18537,7 @@ class WaveToyWindow(QMainWindow):
             phrase_markers=list(self.articulation_phrase_markers),
         ).to_json_dict()
         self.articulation_chain_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        chain_name = self._speech_display_sequence_for_chain() or "Articulation Chain"
+        chain_name = self._suggested_chain_asset_name() or self._speech_display_sequence_for_chain() or "Articulation Chain"
         self._save_library_asset("articulation_chain", chain_name, data, description="Saved articulation chain", tags=["favorite:false"], notes="created_date and modified_date are stored as created_at/modified_at metadata fields.", source_path=str(self.articulation_chain_path))
         QMessageBox.information(self, "Articulation Chain", f"Saved {len(self.articulation_chain_items)} chain phoneme(s) to {self.articulation_chain_path} and Speech Asset Library.")
 
@@ -18330,7 +18584,8 @@ class WaveToyWindow(QMainWindow):
         data = VOWEL_PRESETS[preset_name]
         pitch = self._settings_from_ui().pitch_start_hz if hasattr(self, "pitch_start") else 220.0
         phoneme = ArticulationPhoneme.from_json_dict({**data, "name": preset_name, "phoneme_family": "vowel", "voiced": True, "voice_pitch": pitch, "voice_strength": 0.65, "duration_ms": 500})
-        self._set_articulation_ui_from_phoneme(phoneme)
+        phoneme = self._phoneme_with_current_classic_wave_source(phoneme)
+        self._set_articulation_ui_from_phoneme(phoneme, regenerate=False)
         if play:
             self._play_phoneme_preview()
 
@@ -18338,7 +18593,8 @@ class WaveToyWindow(QMainWindow):
         pitch = self._settings_from_ui().pitch_start_hz if hasattr(self, "pitch_start") else 220.0
         data = {**preset_data, "name": preset_name, "voice_pitch": pitch, "voice_strength": 0.62}
         phoneme = ArticulationPhoneme.from_json_dict(data)
-        self._set_articulation_ui_from_phoneme(phoneme)
+        phoneme = self._phoneme_with_current_classic_wave_source(phoneme)
+        self._set_articulation_ui_from_phoneme(phoneme, regenerate=False)
         if play:
             self._play_phoneme_preview()
 
@@ -18397,7 +18653,12 @@ class WaveToyWindow(QMainWindow):
     def _save_current_phoneme(self, checked: bool = False) -> None:
         del checked
         phoneme = self._phoneme_from_articulation_ui()
-        name, ok = QInputDialog.getText(self, "Save Phoneme", "Friendly phoneme name:", text=phoneme.name.lower())
+        default_name = suggested_speech_asset_name({
+            "source_mode": phoneme.source_mode,
+            "source_wave_id": phoneme.source_wave_id,
+            "phoneme": phoneme.name,
+        })
+        name, ok = QInputDialog.getText(self, "Save Phoneme", "Friendly phoneme name:", text=default_name)
         if not ok or not name.strip():
             return
         phoneme.name = name.strip()
@@ -19943,11 +20204,11 @@ class WaveToyWindow(QMainWindow):
         self.asset_library_sort_combo.addItem("Sort: Name", "name")
         self.asset_library_sort_combo.addItem("Sort: Type", "type")
         self.asset_library_sort_combo.currentIndexChanged.connect(lambda _index: self._refresh_asset_library_view())
-        self.asset_library_summary = QTextEdit()
+        self.asset_library_summary = PassiveWheelTextEdit()
         self.asset_library_summary.setReadOnly(True)
         self.asset_library_summary.setMaximumHeight(76)
         self.asset_library_summary.setObjectName("speechDiagnosticsText")
-        self.asset_library_table = QTableWidget(0, 6)
+        self.asset_library_table = PassiveWheelTableWidget(0, 6)
         self.asset_library_table.setHorizontalHeaderLabels(["★", "Name", "Type", "Modified", "Tags", "Source"])
         self.asset_library_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.asset_library_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -20059,7 +20320,7 @@ class WaveToyWindow(QMainWindow):
         quality_label = QLabel("Stretch Quality")
         quality_label.setObjectName("timelineInspectorText")
         edit_layout.addWidget(quality_label)
-        self.timeline_stretch_quality_combo = QComboBox()
+        self.timeline_stretch_quality_combo = NoWheelComboBox()
         self.timeline_stretch_quality_combo.addItems(["Fast", "Balanced", "Best available"])
         self.timeline_stretch_quality_combo.setCurrentText(self.timeline_stretch_quality)
         self.timeline_stretch_quality_combo.currentTextChanged.connect(self._timeline_stretch_quality_changed)
@@ -23987,7 +24248,7 @@ class WaveToyWindow(QMainWindow):
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save My Sound",
-            "wave_toy_sound.wav",
+            f"{suggested_speech_asset_name({'source_name': 'currentwave'})}.wav",
             "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
         )
 
