@@ -163,3 +163,49 @@ def test_note_picker_harmony_highlight_layers_preserve_selection(qapp):
     picker.set_harmony_highlights([], [], None)
     assert picker.highlighted_notes() == set()
     assert picker.highlight_root() is None
+
+
+def test_interval_descriptor_single_source_for_enharmonic_roles():
+    major = wave_toy.interval_descriptor("C#", "A")
+    minor = wave_toy.interval_descriptor("C#", "Bb")
+    assert major["theory_name"] == "Major Third"
+    assert major["semitones"] == 4
+    assert minor["theory_name"] == "Minor Third"
+    assert minor["semitones"] == 3
+    assert wave_toy.interval_color("C#", "A") != wave_toy.interval_color("C#", "Bb")
+    assert wave_toy.interval_mood_label("C#", "A") != wave_toy.interval_mood_label("C#", "Bb")
+
+
+def test_key_spelling_orientation_aliases_and_overrides():
+    assert wave_toy.key_spelling_orientation("Bb", "Auto") == "Flats"
+    assert wave_toy.key_spelling_orientation("A#", "Auto") == "Flats"
+    assert wave_toy.display_note_name("A#", "Bb", "Auto") == "Bb"
+    assert wave_toy.display_note_name("A#", "A#", "Auto") == "Bb"
+    assert wave_toy.key_spelling_orientation("Bb", "Sharps") == "Sharps"
+    assert wave_toy.display_note_name("A#", "Bb", "Sharps") == "A#"
+    assert wave_toy.key_spelling_orientation("A", "Flats") == "Flats"
+    assert wave_toy.display_note_name("C#", "A", "Flats") == "Db"
+
+
+def test_voice_register_labels_do_not_use_size_wording():
+    labels = [
+        wave_toy.voice_register_label_for_frequency(70.0),
+        wave_toy.voice_register_label_for_frequency(1200.0),
+        wave_toy.voice_register_label_for_octave_value(200),
+        wave_toy.voice_register_label_for_octave_value(600),
+    ]
+    forbidden = ("Voice " + "Size", "Big " + "Low", "Tiny " + "High")
+    assert not any(old in label for label in labels for old in forbidden)
+
+
+def test_picker_interval_status_is_compact(qapp):
+    picker = wave_toy.CircleOfFifthsNotePicker()
+    picker.set_main_note("A")
+    picker.set_note("C#")
+    status = picker.interval_status()
+    assert status["selected_pitch_class"] == "C#"
+    assert status["displayed_note"] == "C#"
+    assert status["home_root"] == "A"
+    assert status["interval_theory_name"] == "Major Third"
+    assert status["semitone_distance"] == 4
+    assert status["color"] == wave_toy.interval_color("C#", "A")

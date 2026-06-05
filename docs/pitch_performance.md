@@ -60,3 +60,11 @@ The pitch tools now include foundational scale and chord helpers. Internal pitch
 ## Task 087 harmony preview lifecycle
 
 Harmony Workbench previews are pitch-class previews rather than spelling-dependent audio. Play Scale, Play Chord, and Play Arpeggio stop any active note-wheel preview before starting the next in-memory preview, use the current octave/range, cents, tuning method, tuning root, and A4 reference when available, and do not save preview audio to disk. Chord preview keeps conservative summed gain and clipping protection.
+
+## Task 088 interval engine and Harmony JSON hardening
+
+WaveToy now treats interval-derived mood, emoji, relationship, theory name, and color as descriptor-driven values. Pitch classes remain stored as normalized sharp names, while spelling mode only affects presentation. Auto spelling keeps the compatibility behavior where flat-oriented aliases such as A#/D#/G# can display as Bb/Eb/Ab; this is documented as UI orientation rather than a harmonic-function claim.
+
+Harmony JSON export/import remains metadata-only. Export appends `.json` when needed, uses readable JSON formatting, warns on write failures, and reports a success summary. Import validates the `wavetoy.harmony_metadata.v1` schema and applies root, scale, chord, and spelling mode without importing audio or changing project schema.
+
+Voice Range wording was re-audited: labels remain musical register descriptors, are frequency-derived where possible, and do not imply loudness, body size, gender, or biological identity.

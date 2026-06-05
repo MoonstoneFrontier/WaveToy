@@ -76,3 +76,7 @@ No audio and no MIDI data are exported.
 - No piano roll yet.
 - No project storage migration for harmony assets yet.
 - Harmony spelling is compact enharmonic display, not context-aware classical notation.
+
+## Task 088 follow-up
+
+Task 088 keeps the Task 087 Harmony Workbench state-sync behavior but hardens the metadata path. Export now appends `.json` when needed, writes with `ensure_ascii=False` and `indent=2`, reports success with a root/scale/chord summary, and warns on write failures. Import Harmony JSON provides low-risk symmetry for `wavetoy.harmony_metadata.v1` metadata without importing audio or changing the project schema.

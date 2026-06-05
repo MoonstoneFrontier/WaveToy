@@ -1228,16 +1228,50 @@ def interval_role(note: str, main_note: str) -> str:
     return NOTE_INTERVAL_ROLES[interval_semitones(note, main_note)]
 
 
+def interval_descriptor(note: str, root_note: str, spelling_mode: str = "Auto") -> Dict[str, object]:
+    """Return the single source of interval-relative display/theory metadata."""
+    pitch_class = normalize_note_name(note)
+    root = normalize_note_name(root_note)
+    semitones = interval_semitones(pitch_class, root)
+    role = NOTE_INTERVAL_ROLES[semitones]
+    emotion = NOTE_INTERVAL_EMOTIONS.get(role, NOTE_INTERVAL_EMOTIONS["root"])
+    theory_name = NOTE_INTERVAL_THEORY.get(role, "Interval")
+    relationship = NOTE_INTERVAL_RELATIONSHIPS.get(role, "Partner")
+    display = display_note_name(pitch_class, root_note, spelling_mode)
+    root_display = display_note_name(root, root_note, spelling_mode)
+    return {
+        "pitch_class": pitch_class,
+        "display_note": display,
+        "root_note": root,
+        "root_display": root_display,
+        "spelling_mode": spelling_mode,
+        "active_spelling": key_spelling_orientation(root_note, spelling_mode),
+        "role": role,
+        "theory_name": theory_name,
+        "semitones": semitones,
+        "emoji": str(emotion["emoji"]),
+        "mood_label": str(emotion["label"]),
+        "relationship_label": relationship,
+        "color": str(emotion["color"]),
+    }
+
+
 def interval_theory_name(note: str, main_note: str) -> str:
-    return NOTE_INTERVAL_THEORY.get(interval_role(note, main_note), "Interval")
+    return str(interval_descriptor(note, main_note)["theory_name"])
 
 
-def note_spelling_mode_for_key(main_note: str, spelling_mode: str = "Auto") -> str:
+def key_spelling_orientation(home_note: str, spelling_mode: str = "Auto") -> str:
+    """Resolve UI spelling orientation without changing stored pitch classes.
+
+    Auto mode keeps compatibility with user-facing A#/D#/G# aliases by treating
+    them as flat-oriented UI keys (Bb/Eb/Ab). This is presentation orientation,
+    not a claim about harmonic function.
+    """
     if spelling_mode == "Sharps":
         return "Sharps"
     if spelling_mode == "Flats":
         return "Flats"
-    note = str(main_note or "A")
+    note = str(home_note or "A")
     if note in NOTE_FLAT_KEYS or "b" in note:
         return "Flats"
     if note in NOTE_SHARP_KEYS:
@@ -1245,27 +1279,52 @@ def note_spelling_mode_for_key(main_note: str, spelling_mode: str = "Auto") -> s
     return "Sharps"
 
 
+def note_spelling_mode_for_key(main_note: str, spelling_mode: str = "Auto") -> str:
+    return key_spelling_orientation(main_note, spelling_mode)
+
+
 def display_note_name(note: str, main_note: str = "A", spelling_mode: str = "Auto") -> str:
     index = NOTE_TO_INDEX.get(str(note or "A"), NOTE_TO_INDEX["A"])
-    names = NOTE_FLAT_NAMES if note_spelling_mode_for_key(main_note, spelling_mode) == "Flats" else NOTE_NAMES
+    names = NOTE_FLAT_NAMES if key_spelling_orientation(main_note, spelling_mode) == "Flats" else NOTE_NAMES
     return names[index]
 
 
+def note_display_descriptor(note: str, root_note: str, spelling_mode: str = "Auto") -> Dict[str, object]:
+    return interval_descriptor(note, root_note, spelling_mode)
+
+
+def interval_color(note: str, root_note: str) -> str:
+    return str(interval_descriptor(note, root_note)["color"])
+
+
+def interval_emoji(note: str, root_note: str) -> str:
+    return str(interval_descriptor(note, root_note)["emoji"])
+
+
+def interval_mood_label(note: str, root_note: str) -> str:
+    return str(interval_descriptor(note, root_note)["mood_label"])
+
+
+def interval_relationship_label(note: str, root_note: str) -> str:
+    return str(interval_descriptor(note, root_note)["relationship_label"])
+
+
 def note_emotion(note: str, main_note: str = "A") -> Dict[str, str]:
-    return NOTE_INTERVAL_EMOTIONS.get(interval_role(note, main_note), NOTE_INTERVAL_EMOTIONS["root"])
+    descriptor = interval_descriptor(note, main_note)
+    return {"emoji": str(descriptor["emoji"]), "label": str(descriptor["mood_label"]), "color": str(descriptor["color"])}
 
 
 def note_relationship(note: str, main_note: str) -> str:
-    role = interval_role(note, main_note)
-    return NOTE_INTERVAL_RELATIONSHIPS.get(role, "Partner")
+    return interval_relationship_label(note, main_note)
 
 
 def note_interval_summary(note: str, main_note: str, spelling_mode: str = "Auto") -> str:
-    semitones = interval_semitones(note, main_note)
-    emotion = note_emotion(note, main_note)
+    descriptor = interval_descriptor(note, main_note, spelling_mode)
+    semitones = int(descriptor["semitones"])
     return (
-        f"{display_note_name(note, main_note, spelling_mode)} • {interval_theory_name(note, main_note)} • "
-        f"{semitones} semitone{'s' if semitones != 1 else ''} • {emotion['label']} • {note_relationship(note, main_note)}"
+        f"{descriptor['display_note']} • {descriptor['theory_name']} • "
+        f"{semitones} semitone{'s' if semitones != 1 else ''} • "
+        f"{descriptor['mood_label']} • {descriptor['relationship_label']}"
     )
 
 
@@ -1310,63 +1369,38 @@ HARMONY_ASSET_CATEGORY_CHORD_PROGRESSION = "chord_progression"  # TODO: future p
 
 
 @dataclass
-class ScalePatternAsset:
+class HarmonyAssetBase:
+    """Shared JSON-safe reserved harmony asset fields for future asset CRUD."""
+
+    uuid: str
+    name: str
+    root_note: str = "A"
+    spelling_mode: str = "Auto"
+    scale_type: str = "major"
+    chord_type: str = "major_triad"
+    chord_steps: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    notes: str = ""
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class ScalePatternAsset(HarmonyAssetBase):
     """JSON-safe reserved asset shape for future reusable scale patterns."""
 
-    uuid: str
-    name: str
-    root_note: str = "A"
-    spelling_mode: str = "Auto"
-    scale_type: str = "major"
-    chord_type: str = "major_triad"
-    chord_steps: List[str] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    notes: str = ""
-    created_at: str = field(default_factory=_utc_now_iso)
-    modified_at: str = field(default_factory=_utc_now_iso)
-
-    def to_json_dict(self) -> Dict[str, object]:
-        return asdict(self)
-
 
 @dataclass
-class ChordPatternAsset:
+class ChordPatternAsset(HarmonyAssetBase):
     """JSON-safe reserved asset shape for future reusable chord patterns."""
 
-    uuid: str
-    name: str
-    root_note: str = "A"
-    spelling_mode: str = "Auto"
-    scale_type: str = "major"
-    chord_type: str = "major_triad"
-    chord_steps: List[str] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    notes: str = ""
-    created_at: str = field(default_factory=_utc_now_iso)
-    modified_at: str = field(default_factory=_utc_now_iso)
-
-    def to_json_dict(self) -> Dict[str, object]:
-        return asdict(self)
-
 
 @dataclass
-class ChordProgressionAsset:
+class ChordProgressionAsset(HarmonyAssetBase):
     """JSON-safe reserved asset shape for future chord progression assets."""
-
-    uuid: str
-    name: str
-    root_note: str = "A"
-    spelling_mode: str = "Auto"
-    scale_type: str = "major"
-    chord_type: str = "major_triad"
-    chord_steps: List[str] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    notes: str = ""
-    created_at: str = field(default_factory=_utc_now_iso)
-    modified_at: str = field(default_factory=_utc_now_iso)
-
-    def to_json_dict(self) -> Dict[str, object]:
-        return asdict(self)
 
 
 def _pitch_classes_from_offsets(root_note: str, offsets: List[int]) -> List[str]:
@@ -1420,6 +1454,38 @@ def harmony_metadata_payload(
             HARMONY_ASSET_CATEGORY_CHORD_PATTERN,
             HARMONY_ASSET_CATEGORY_CHORD_PROGRESSION,
         ],
+    }
+
+
+def harmony_json_export_path(filename: str | Path) -> Path:
+    """Return an export path with a .json suffix when the user omits one."""
+    path = Path(filename).expanduser()
+    if path.suffix.lower() != ".json":
+        path = path.with_suffix(".json")
+    return path
+
+
+def harmony_metadata_state_from_payload(payload: object) -> Dict[str, str]:
+    """Validate metadata-only Harmony JSON and return an applyable state."""
+    if not isinstance(payload, dict):
+        raise ValueError("Harmony JSON must be an object.")
+    if payload.get("schema") != "wavetoy.harmony_metadata.v1":
+        raise ValueError("Unsupported Harmony JSON schema.")
+    root_note = normalize_note_name(str(payload.get("root_note") or payload.get("root_display") or "A"))
+    scale_type = str(payload.get("scale_type") or "major")
+    chord_type = str(payload.get("chord_type") or "major_triad")
+    spelling_mode = str(payload.get("spelling_mode") or "Auto")
+    if scale_type not in SCALE_TYPES:
+        raise ValueError(f"Unsupported scale type: {scale_type}")
+    if chord_type not in CHORD_TYPES:
+        raise ValueError(f"Unsupported chord type: {chord_type}")
+    if spelling_mode not in {"Auto", "Sharps", "Flats"}:
+        raise ValueError(f"Unsupported spelling mode: {spelling_mode}")
+    return {
+        "root_note": root_note,
+        "scale_type": scale_type,
+        "chord_type": chord_type,
+        "spelling_mode": spelling_mode,
     }
 
 
@@ -7288,13 +7354,28 @@ class CircleOfFifthsNotePicker(QWidget):
     def highlight_root(self) -> str | None:
         return self._highlight_root
 
+    def interval_status(self, note: str | None = None) -> Dict[str, object]:
+        """Return a compact debug/status summary for the selected pitch class."""
+        descriptor = note_display_descriptor(note or self._selected_note, self._main_note, self._spelling_mode)
+        return {
+            "selected_pitch_class": descriptor["pitch_class"],
+            "displayed_note": descriptor["display_note"],
+            "home_root": descriptor["root_display"],
+            "interval_role": descriptor["role"],
+            "interval_theory_name": descriptor["theory_name"],
+            "semitone_distance": descriptor["semitones"],
+            "mood_label": descriptor["mood_label"],
+            "relationship_label": descriptor["relationship_label"],
+            "color": descriptor["color"],
+        }
+
     def _bubble_tooltip(self, note: str) -> str:
+        status = self.interval_status(note)
         return (
-            f"{display_note_name(note, self._main_note, self._spelling_mode)} • "
-            f"{interval_theory_name(note, self._main_note)} • "
-            f"{interval_semitones(note, self._main_note)} semitones • "
-            f"{note_emotion(note, self._main_note)['label']} • "
-            f"Spelling: {note_spelling_mode_for_key(self._main_note, self._spelling_mode)} • "
+            f"{status['displayed_note']} • {status['interval_theory_name']} • "
+            f"{status['semitone_distance']} semitones • {status['mood_label']} • "
+            f"{status['relationship_label']} • Color {status['color']} • "
+            f"Spelling: {key_spelling_orientation(self._main_note, self._spelling_mode)} • "
             f"Layout: {self._layout_mode}"
         )
 
@@ -7346,8 +7427,8 @@ class CircleOfFifthsNotePicker(QWidget):
         for index, note in enumerate(notes):
             bubble = self._note_bubbles[note]
             selected = note == self._selected_note
-            emotion = note_emotion(note, self._main_note)
-            fill = QColor(emotion["color"])
+            descriptor = interval_descriptor(note, self._main_note, self._spelling_mode)
+            fill = QColor(str(descriptor["color"]))
             highlighted = note in self._highlight_notes
             scale_highlight = note in self._highlight_scale_notes
             chord_highlight = note in self._highlight_chord_notes
@@ -7373,26 +7454,26 @@ class CircleOfFifthsNotePicker(QWidget):
             if selected:
                 fill = fill.lighter(118)
                 glow = QColor(fill)
-                glow.setAlpha(115)
-                painter.setPen(QPen(glow, 9))
+                glow.setAlpha(150)
+                painter.setPen(QPen(glow, 11))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawEllipse(bubble.adjusted(-4, -4, 4, 4))
-            outline = QColor("#263238") if selected else QColor("#fff176") if highlight_root else QColor(255, 255, 255, 235)
-            pen_width = 5 if selected else 4 if highlight_root else 3 if highlighted else 2
+            outline = QColor("#111827") if selected else QColor("#fff176") if highlight_root else QColor(255, 255, 255, 235)
+            pen_width = 6 if selected else 4 if highlight_root else 3 if highlighted else 2
 
             painter.setPen(QPen(outline, pen_width))
             painter.setBrush(fill)
             painter.drawEllipse(bubble)
 
             painter.setPen(QColor("#263238"))
-            painter.setFont(QFont("Arial", 16 if selected else 14, QFont.Bold))
-            painter.drawText(bubble.adjusted(0, 0, 0, -16), Qt.AlignCenter, emotion["emoji"])
+            painter.setFont(QFont("Arial", 18 if selected else 15, QFont.Bold))
+            painter.drawText(bubble.adjusted(0, -1, 0, -15), Qt.AlignCenter, str(descriptor["emoji"]))
             painter.setFont(QFont("Arial", 12 if selected else 10, QFont.Bold))
-            painter.drawText(bubble.adjusted(0, 22, 0, -2), Qt.AlignCenter, display_note_name(note, self._main_note, self._spelling_mode))
+            painter.drawText(bubble.adjusted(0, 22, 0, -2), Qt.AlignCenter, str(descriptor["display_note"]))
 
         center_text = (
             f"Home: {display_note_name(self._main_note, self._main_note, self._spelling_mode)}\n"
-            f"Spelling: {note_spelling_mode_for_key(self._main_note, self._spelling_mode)}\n"
+            f"Spelling: {key_spelling_orientation(self._main_note, self._spelling_mode)}\n"
             f"Layout: {self._layout_mode}"
         )
         painter.setFont(QFont("Arial", 12, QFont.Bold))
@@ -7540,16 +7621,19 @@ class NoteWheelDialog(QDialog):
         play_scale_button = QPushButton("Play Scale")
         play_chord_button = QPushButton("Play Chord")
         play_arpeggio_button = QPushButton("Play Arpeggio")
+        import_harmony_button = QPushButton("Import Harmony JSON")
         export_harmony_button = QPushButton("Export Harmony JSON")
         play_scale_button.clicked.connect(lambda: self._request_preview("scale"))
         play_chord_button.clicked.connect(lambda: self._request_preview("chord"))
         play_arpeggio_button.clicked.connect(lambda: self._request_preview("arpeggio"))
+        import_harmony_button.clicked.connect(self._import_harmony_json)
         export_harmony_button.clicked.connect(self._export_harmony_json)
         wb_toggle_row.addWidget(self.highlight_scale_check)
         wb_toggle_row.addWidget(self.highlight_chord_check)
         wb_toggle_row.addWidget(play_scale_button)
         wb_toggle_row.addWidget(play_chord_button)
         wb_toggle_row.addWidget(play_arpeggio_button)
+        wb_toggle_row.addWidget(import_harmony_button)
         wb_toggle_row.addWidget(export_harmony_button)
         wb_layout.addLayout(wb_toggle_row)
 
@@ -7589,7 +7673,7 @@ class NoteWheelDialog(QDialog):
         self.picker.set_layout_mode(layout_mode)
         note = self.picker.selected_note()
         home = self.picker.main_note()
-        active_spelling = note_spelling_mode_for_key(home, spelling_mode)
+        active_spelling = key_spelling_orientation(home, spelling_mode)
         self.center_label.setText(
             f"Home: {display_note_name(home, home, spelling_mode)} • Spelling: {active_spelling} • Layout: {layout_mode}"
         )
@@ -7664,6 +7748,21 @@ class NoteWheelDialog(QDialog):
             f"{degree_text}"
         )
 
+    def _set_combo_data(self, combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def _apply_harmony_metadata_state(self, state: Dict[str, str]) -> None:
+        selected = self.picker.selected_note()
+        root = normalize_note_name(state.get("root_note", "A"))
+        self.spelling_mode_combo.setCurrentText(state.get("spelling_mode", "Auto"))
+        self.harmony_root_combo.setCurrentText(root)
+        self._set_combo_data(self.harmony_scale_combo, state.get("scale_type", "major"))
+        self._set_combo_data(self.harmony_chord_combo, state.get("chord_type", "major_triad"))
+        self.picker.set_note(selected)
+        self.refresh_labels(selected, root)
+
     def _export_harmony_json(self) -> None:
         state = self._current_harmony_state()
         filename, _selected_filter = QFileDialog.getSaveFileName(
@@ -7674,13 +7773,49 @@ class NoteWheelDialog(QDialog):
         )
         if not filename:
             return
+        path = harmony_json_export_path(filename)
         payload = harmony_metadata_payload(
             str(state["root_text"]),
             str(state["scale_type"]),
             str(state["chord_type"]),
             str(state["spelling_mode"]),
         )
-        Path(filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Harmony JSON", f"Could not export Harmony JSON metadata:\n{exc}")
+            return
+        QMessageBox.information(
+            self,
+            "Export Harmony JSON",
+            f"Exported metadata to:\n{path}\n\n"
+            f"Root: {payload['root_display']} • Scale: {payload['scale_label']} • Chord: {payload['chord_label']}",
+        )
+
+    def _import_harmony_json(self) -> None:
+        filename, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Harmony JSON",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+        try:
+            payload = json.loads(Path(filename).read_text(encoding="utf-8"))
+            state = harmony_metadata_state_from_payload(payload)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import Harmony JSON", f"Could not import Harmony JSON metadata:\n{exc}")
+            return
+        self._apply_harmony_metadata_state(state)
+        QMessageBox.information(
+            self,
+            "Import Harmony JSON",
+            f"Imported metadata from:\n{filename}\n\n"
+            f"Root: {display_note_name(state['root_note'], state['root_note'], state['spelling_mode'])} • "
+            f"Scale: {SCALE_TYPES[state['scale_type']]['label']} • Chord: {CHORD_TYPES[state['chord_type']]['label']}",
+        )
+
 
     def _request_preview(self, target: str) -> None:
         if self.preview_callback is None:

@@ -43,7 +43,7 @@ Changing the toggle updates the wheel labels immediately while preserving the se
 
 ## Voice Range rename
 
-The former Voice Size wording was misleading because the control changes octave/register and therefore pitch range, not loudness or physical size. Task 083 renames the control to **Voice Range**, updates compact pitch-panel wording to **Range**, and adds tooltip text explaining that the slider affects musical pitch/register rather than volume.
+The former size-oriented voice wording was misleading because the control changes octave/register and therefore pitch range, not loudness or physical size. Task 083 renames the control to **Voice Range**, updates compact pitch-panel wording to **Range**, and adds tooltip text explaining that the slider affects musical pitch/register rather than volume.
 
 ## Register label mapping
 

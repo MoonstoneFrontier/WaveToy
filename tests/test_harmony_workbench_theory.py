@@ -124,3 +124,27 @@ def test_harmony_asset_dataclasses_are_json_safe():
         data = asset.to_json_dict()
         assert set(data) == {"uuid", "name", "root_note", "spelling_mode", "scale_type", "chord_type", "chord_steps", "tags", "notes", "created_at", "modified_at"}
         json.dumps(data)
+
+
+def test_harmony_json_export_path_appends_json_suffix():
+    assert str(wave_toy.harmony_json_export_path("/tmp/wave_toy_harmony")) == "/tmp/wave_toy_harmony.json"
+    assert str(wave_toy.harmony_json_export_path("/tmp/wave_toy_harmony.json")) == "/tmp/wave_toy_harmony.json"
+
+
+def test_harmony_json_import_rejects_wrong_schema():
+    import pytest
+
+    with pytest.raises(ValueError):
+        wave_toy.harmony_metadata_state_from_payload({"schema": "wrong"})
+
+
+def test_harmony_json_import_accepts_exported_payload_state():
+    payload = wave_toy.harmony_metadata_payload("Bb", "major", "dominant_7", "Auto", created_at="2026-06-04T00:00:00+00:00")
+    state = wave_toy.harmony_metadata_state_from_payload(payload)
+    assert state == {
+        "root_note": "A#",
+        "scale_type": "major",
+        "chord_type": "dominant_7",
+        "spelling_mode": "Auto",
+    }
+    assert wave_toy.display_note_name(state["root_note"], state["root_note"], state["spelling_mode"]) == "Bb"
