@@ -64,3 +64,11 @@ Reserved harmony asset dataclasses now share common JSON-safe fields through `Ha
 Waveform analysis assets use the standardized `Waveform Analysis - <Source>` name and store compact inspection metadata for generated speech, selected speech assets, imported WAV/audio assets, or timeline mixes. They intentionally do **not** embed raw audio arrays. A saved analysis payload includes source kind/path when available, sample rate, duration, channel count, peak/RMS/DC/zero-crossing statistics, a basic pitch estimate, bounded short-time energy preview data, bounded uint8-normalized spectrogram preview data, selection range, notes, and timestamps.
 
 If the source audio is later missing, the WaveformAnalyses entry remains useful as metadata-only provenance and summary information.
+
+## FormantAnalyses metadata assets
+
+Formant analysis assets store compact, model-derived speech inspection metadata under `WaveToyData/Assets/FormantAnalyses/`. The payload is intended for the Articulation Inspector's speech-aware sections and may include source kind/path, sample rate, duration, active phoneme sequence, F1/F2/F3 min-mean-max summaries, bounded F1/F2 vowel-space points, model-derived resonance summaries, and a capped speech-frame preview.
+
+These values come from WaveToy's generated articulation/resonance model frames. Imported WAV/audio assets do not receive fake measured formants; the inspector reports that no generated formant frames are available for imported audio. Future measured-formant extraction, such as LPC analysis, remains out of scope for this metadata category.
+
+FormantAnalyses JSON must not embed raw audio arrays or unbounded frame matrices. The speech-frame preview is deliberately capped so saved metadata remains small and reviewable.

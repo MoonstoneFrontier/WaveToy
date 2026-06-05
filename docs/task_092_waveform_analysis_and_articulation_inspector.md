@@ -54,3 +54,7 @@ The spectrogram preview uses a modest FFT summary capped to small time and frequ
 - No render default changes.
 - No project schema change.
 - No preview audio file saving as part of analysis metadata.
+
+## Task 093 follow-up note
+
+Task 093 extends the same Articulation Inspector with speech-aware formant, vowel-space, resonance, and bounded speech-frame metadata. The waveform inspector remains primary. The new formant data is model-derived from generated articulation/resonance frames, not measured from imported audio, and any saved FormantAnalyses metadata remains bounded and raw-audio-free.

@@ -37,3 +37,9 @@ WaveToy now has a persistent storage foundation rooted at `WaveToyData/` (or `WA
 ## Task 092 WaveformAnalyses storage audit
 
 WaveformAnalyses assets are JSON metadata envelopes in the existing Speech Asset Library category. The analysis payload stores bounded summaries only, including reduced-footprint uint8 spectrogram previews, and must not include `audio_data`, `raw_audio`, full waveform sample arrays, or full spectrogram matrices. Source audio remains in memory or in its original referenced asset/path; analysis JSON can remain valid even when the source audio is unavailable.
+
+## Task 093 FormantAnalyses storage audit
+
+FormantAnalyses assets are JSON metadata envelopes for model-derived formant and resonance inspection. They store bounded generated-speech metadata only: phoneme sequence, F1/F2/F3 summaries, compact vowel-space points, model-derived resonance summaries, and a capped speech-frame preview. They must not include `audio_data`, `raw_audio`, raw waveform arrays, or full unbounded formant frame matrices.
+
+Imported WAV/audio sources are explicitly marked unavailable for generated formant frames. WaveToy does not synthesize fake measured formants for imported audio in Task 093; future measured-formant extraction is a separate out-of-scope option.

@@ -166,6 +166,13 @@ def waveform_analysis_asset_name(source_name: str) -> str:
     return cleaned if cleaned.startswith(prefix) else f"{prefix}{cleaned}"
 
 
+def formant_analysis_asset_name(source_name: str) -> str:
+    """Return the standard Speech Asset Library display name for model-derived formant analyses."""
+    cleaned = str(source_name or "Speech").strip() or "Speech"
+    prefix = "Formant Analysis - "
+    return cleaned if cleaned.startswith(prefix) else f"{prefix}{cleaned}"
+
+
 def wavetoy_data_root() -> Path:
     """Return the cross-platform WaveToyData root, with a local override for tests/portable runs."""
     override = os.environ.get("WAVETOY_DATA_DIR")
@@ -195,6 +202,7 @@ WAVETOY_ASSET_CATEGORIES: Dict[str, str] = {
     "note_pattern": "NotePatterns",
     "pitch_curve": "PitchCurves",
     "waveform_analysis": "WaveformAnalyses",
+    "formant_analysis": "FormantAnalyses",
     "articulation_chain": "Chains",
     "imported_wav": "ImportedWav",
     "generated_wav": "GeneratedWav",
@@ -945,6 +953,62 @@ class WaveformAnalysisRecord:
             selection_end_seconds=float(stats["end_seconds"]),
             notes=str(notes or ""),
         )
+
+
+@dataclass
+class FormantAnalysisRecord:
+    """Compact model-derived speech formant/resonance analysis metadata."""
+
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Untitled Formant Analysis"
+    source_kind: str = "unknown"
+    source_path: str | None = None
+    sample_rate: int = SAMPLE_RATE
+    duration_seconds: float = 0.0
+    phoneme_sequence: List[str] = field(default_factory=list)
+    frame_count: int = 0
+    f1_min_hz: float | None = None
+    f1_max_hz: float | None = None
+    f1_mean_hz: float | None = None
+    f2_min_hz: float | None = None
+    f2_max_hz: float | None = None
+    f2_mean_hz: float | None = None
+    f3_min_hz: float | None = None
+    f3_max_hz: float | None = None
+    f3_mean_hz: float | None = None
+    vowel_space_points: List[Dict[str, object]] = field(default_factory=list)
+    resonance_summary: Dict[str, object] = field(default_factory=dict)
+    formant_frames_preview: List[Dict[str, object]] = field(default_factory=list)
+    notes: str = ""
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "uuid": self.uuid,
+            "name": self.name,
+            "source_kind": self.source_kind,
+            "source_path": self.source_path,
+            "sample_rate": int(self.sample_rate),
+            "duration_seconds": _json_safe_float(self.duration_seconds),
+            "phoneme_sequence": [str(item) for item in self.phoneme_sequence],
+            "frame_count": int(self.frame_count),
+            "f1_min_hz": _json_safe_float(self.f1_min_hz) if self.f1_min_hz is not None else None,
+            "f1_max_hz": _json_safe_float(self.f1_max_hz) if self.f1_max_hz is not None else None,
+            "f1_mean_hz": _json_safe_float(self.f1_mean_hz) if self.f1_mean_hz is not None else None,
+            "f2_min_hz": _json_safe_float(self.f2_min_hz) if self.f2_min_hz is not None else None,
+            "f2_max_hz": _json_safe_float(self.f2_max_hz) if self.f2_max_hz is not None else None,
+            "f2_mean_hz": _json_safe_float(self.f2_mean_hz) if self.f2_mean_hz is not None else None,
+            "f3_min_hz": _json_safe_float(self.f3_min_hz) if self.f3_min_hz is not None else None,
+            "f3_max_hz": _json_safe_float(self.f3_max_hz) if self.f3_max_hz is not None else None,
+            "f3_mean_hz": _json_safe_float(self.f3_mean_hz) if self.f3_mean_hz is not None else None,
+            "vowel_space_points": [dict(point) for point in self.vowel_space_points],
+            "resonance_summary": dict(self.resonance_summary or {}),
+            "formant_frames_preview": [dict(frame) for frame in self.formant_frames_preview],
+            "notes": self.notes,
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+        }
 
 
 @dataclass
@@ -5410,6 +5474,178 @@ def simple_spectrogram(audio: np.ndarray, sample_rate: int, frame_ms: float, hop
 def selection_audio_stats(audio: np.ndarray, sample_rate: int, start_seconds: float, end_seconds: float) -> Dict[str, object]:
     return WAVEFORM_ANALYSIS_ENGINE.selection_stats(audio, sample_rate, start_seconds, end_seconds)
 
+
+def _formant_frame_formants(frame: Dict[str, object]) -> Dict[str, object]:
+    formants = frame.get("formants", {}) if isinstance(frame, dict) else {}
+    return dict(formants) if isinstance(formants, dict) else frame
+
+
+def _formant_frame_resonance(frame: Dict[str, object]) -> Dict[str, object]:
+    if not isinstance(frame, dict):
+        return {}
+    state = frame.get("resonance_tract_state") or frame.get("resonance") or frame.get("state") or {}
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def _formant_value(frame: Dict[str, object], key: str) -> float | None:
+    formants = _formant_frame_formants(frame)
+    value = formants.get(key) or formants.get(key.upper()) or formants.get(f"resonance_{key}")
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return _json_safe_float(numeric) if math.isfinite(numeric) and numeric > 0.0 else None
+
+
+def formant_summary_from_frames(frames: List[Dict[str, object]] | Tuple[Dict[str, object], ...]) -> Dict[str, object]:
+    """Summarize generated/model formant frames without estimating from raw audio."""
+    safe_frames = [frame for frame in (frames or []) if isinstance(frame, dict)]
+    summary: Dict[str, object] = {"frame_count": len(safe_frames), "available": bool(safe_frames)}
+    for key in ("f1", "f2", "f3"):
+        values = [_formant_value(frame, key) for frame in safe_frames]
+        numeric = [float(value) for value in values if value is not None]
+        summary[f"{key}_min_hz"] = round(min(numeric), 3) if numeric else None
+        summary[f"{key}_max_hz"] = round(max(numeric), 3) if numeric else None
+        summary[f"{key}_mean_hz"] = round(float(sum(numeric) / len(numeric)), 3) if numeric else None
+    if not safe_frames:
+        summary["status"] = "unavailable"
+        summary["message"] = "No generated formant frames available. Render generated speech to inspect model-derived formants."
+    else:
+        summary["status"] = "available"
+        summary["message"] = "Model-derived generated/resonance formant values; not measured LPC formants."
+    return summary
+
+
+def bounded_formant_frames_preview(frames: List[Dict[str, object]] | Tuple[Dict[str, object], ...], max_frames: int = 96) -> List[Dict[str, object]]:
+    safe_frames = [frame for frame in (frames or []) if isinstance(frame, dict)]
+    limit = max(0, int(max_frames or 0))
+    if limit <= 0 or not safe_frames:
+        return []
+    if len(safe_frames) > limit:
+        indices = sorted({int(round(i)) for i in np.linspace(0, len(safe_frames) - 1, limit)})
+        sampled = [safe_frames[i] for i in indices[:limit]]
+    else:
+        sampled = safe_frames[:limit]
+    preview: List[Dict[str, object]] = []
+    for frame in sampled:
+        resonance = _formant_frame_resonance(frame)
+        formants = _formant_frame_formants(frame)
+        item = {
+            "time_ms": _json_safe_float(float(frame.get("time_ms", frame.get("time", 0.0)) or 0.0)),
+            "phoneme": str(frame.get("phoneme", frame.get("active_phoneme", "")) or ""),
+            "f1": _formant_value(frame, "f1"),
+            "f2": _formant_value(frame, "f2"),
+            "f3": _formant_value(frame, "f3"),
+            "resonance_scale": _json_safe_float(float(formants.get("resonance_formant_scale", resonance.get("formant_scale", 1.0)) or 1.0)),
+            "nasal_coupling": _json_safe_float(float(formants.get("nasal_coupling", resonance.get("nasal_coupling", 0.0)) or 0.0)),
+        }
+        preview.append(item)
+    return preview
+
+
+def vowel_space_points_from_formants(frames: List[Dict[str, object]] | Tuple[Dict[str, object], ...]) -> List[Dict[str, object]]:
+    points: List[Dict[str, object]] = []
+    for frame in [frame for frame in (frames or []) if isinstance(frame, dict)]:
+        f1 = _formant_value(frame, "f1")
+        f2 = _formant_value(frame, "f2")
+        if f1 is None or f2 is None:
+            continue
+        points.append({
+            "time_ms": _json_safe_float(float(frame.get("time_ms", frame.get("time", 0.0)) or 0.0)),
+            "phoneme": str(frame.get("phoneme", frame.get("active_phoneme", "")) or ""),
+            "f1_hz": _json_safe_float(f1),
+            "f2_hz": _json_safe_float(f2),
+        })
+    return points
+
+
+def resonance_summary_from_frames(frames: List[Dict[str, object]] | Tuple[Dict[str, object], ...]) -> Dict[str, object]:
+    fields = [
+        "vocal_tract_length", "larynx_height", "resonance_depth", "chest_resonance",
+        "head_resonance", "nasal_coupling", "brightness", "darkness", "formant_scale",
+        "formant_shift_f1", "formant_shift_f2", "formant_shift_f3",
+    ]
+    safe_frames = [frame for frame in (frames or []) if isinstance(frame, dict)]
+    summary: Dict[str, object] = {"frame_count": len(safe_frames), "available": bool(safe_frames), "model_derived": True}
+    for field_name in fields:
+        values: List[float] = []
+        for frame in safe_frames:
+            resonance = _formant_frame_resonance(frame)
+            formants = _formant_frame_formants(frame)
+            value = resonance.get(field_name, formants.get(field_name, formants.get(f"resonance_{field_name}")))
+            if value is None and field_name == "formant_scale":
+                value = formants.get("resonance_formant_scale")
+            if value is None:
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                values.append(_json_safe_float(numeric))
+        if values:
+            summary[field_name] = {"min": round(min(values), 4), "mean": round(float(sum(values) / len(values)), 4), "max": round(max(values), 4)}
+        else:
+            summary[field_name] = None
+    if not safe_frames:
+        summary["status"] = "unavailable"
+        summary["message"] = "No generated resonance frames available; use current ResonanceTractState as a snapshot if needed."
+    else:
+        summary["status"] = "available"
+        summary["message"] = "Model-derived resonance controls summarized from generated speech frames."
+    return summary
+
+
+def formant_analysis_from_articulation_chain(
+    chain_items: List[object] | Tuple[object, ...],
+    frames: List[Dict[str, object]] | Tuple[Dict[str, object], ...],
+    sample_rate: int,
+    *,
+    name: str = "Formant Analysis",
+    source_kind: str = "generated",
+    source_path: str | None = None,
+    duration_seconds: float = 0.0,
+    notes: str = "",
+) -> FormantAnalysisRecord:
+    safe_frames = [frame for frame in (frames or []) if isinstance(frame, dict)]
+    if str(source_kind or "").lower() in {"selected_imported_wav", "imported_wav", "imported_audio"}:
+        safe_frames = []
+        notes = (notes + "\n" if notes else "") + "No generated formant frames available for imported audio."
+    sequence: List[str] = []
+    for item in chain_items or []:
+        phoneme = getattr(item, "phoneme", item)
+        label = getattr(phoneme, "name", None) or getattr(item, "name", None)
+        if label:
+            sequence.append(str(label))
+    if not sequence:
+        sequence = [str(frame.get("phoneme", frame.get("active_phoneme", ""))) for frame in safe_frames if str(frame.get("phoneme", frame.get("active_phoneme", "")) or "")]
+    summary = formant_summary_from_frames(safe_frames)
+    preview = bounded_formant_frames_preview(safe_frames)
+    return FormantAnalysisRecord(
+        name=formant_analysis_asset_name(str(name or "Speech")),
+        source_kind=str(source_kind or "unknown"),
+        source_path=source_path,
+        sample_rate=max(1, int(sample_rate or SAMPLE_RATE)),
+        duration_seconds=_json_safe_float(duration_seconds),
+        phoneme_sequence=sequence,
+        frame_count=int(summary.get("frame_count", 0) or 0),
+        f1_min_hz=summary.get("f1_min_hz"),
+        f1_max_hz=summary.get("f1_max_hz"),
+        f1_mean_hz=summary.get("f1_mean_hz"),
+        f2_min_hz=summary.get("f2_min_hz"),
+        f2_max_hz=summary.get("f2_max_hz"),
+        f2_mean_hz=summary.get("f2_mean_hz"),
+        f3_min_hz=summary.get("f3_min_hz"),
+        f3_max_hz=summary.get("f3_max_hz"),
+        f3_mean_hz=summary.get("f3_mean_hz"),
+        vowel_space_points=vowel_space_points_from_formants(safe_frames),
+        resonance_summary=resonance_summary_from_frames(safe_frames),
+        formant_frames_preview=preview,
+        notes=str(notes or summary.get("message", "")),
+    )
+
 def compute_waveform_peaks(audio: np.ndarray, bins: int = 36) -> List[float]:
     audio = _ensure_stereo_float(audio)
     if audio.size == 0:
@@ -9694,6 +9930,82 @@ class WaveformAnalysisCanvas(QWidget):
         painter.end()
 
 
+class VowelSpaceCanvas(QWidget):
+    """Compact F1/F2 vowel-space canvas for generated formant frames."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.points: List[Dict[str, object]] = []
+        self.highlight_phoneme: str | None = None
+        self.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setToolTip("Generated-model vowel space only: F1 Hz versus F2 Hz. Imported audio is not measured here.")
+
+    def set_points(self, points: List[Dict[str, object]], highlight_phoneme: str | None = None) -> None:
+        self.points = [dict(point) for point in (points or []) if isinstance(point, dict)][:256]
+        self.highlight_phoneme = str(highlight_phoneme or "") or None
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(54, 18, -18, -38)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#101820"))
+        plot = self._plot_rect()
+        painter.setBrush(QColor("#16213e"))
+        painter.setPen(QPen(QColor("#284b63"), 1))
+        painter.drawRoundedRect(plot, 8, 8)
+        painter.setPen(QPen(QColor("#8d99ae"), 1, Qt.DashLine))
+        for i in range(1, 4):
+            x = plot.left() + plot.width() * i / 4.0
+            y = plot.top() + plot.height() * i / 4.0
+            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+        painter.setPen(QPen(QColor("#d7e3fc"), 1))
+        painter.setFont(QFont("Arial", 9, QFont.Bold))
+        painter.drawText(QRectF(8, 0, self.width() - 16, 18), Qt.AlignLeft, "Vowel Space (generated formant frames)")
+        painter.setFont(QFont("Arial", 8))
+        painter.drawText(QRectF(plot.left(), plot.bottom() + 8, plot.width(), 18), Qt.AlignCenter, "F2 Hz")
+        painter.save()
+        painter.translate(8, plot.center().y() + 30)
+        painter.rotate(-90)
+        painter.drawText(QRectF(0, 0, 80, 18), Qt.AlignCenter, "F1 Hz")
+        painter.restore()
+        if not self.points:
+            painter.setPen(QPen(QColor("#d7e3fc"), 1))
+            painter.drawText(plot, Qt.AlignCenter | Qt.TextWordWrap, "No generated formant frames available. Render a phoneme or word to show model-derived F1/F2 points.")
+            painter.end()
+            return
+        f1_values = [float(point.get("f1_hz", 0.0) or 0.0) for point in self.points]
+        f2_values = [float(point.get("f2_hz", 0.0) or 0.0) for point in self.points]
+        f1_min, f1_max = min(f1_values), max(f1_values)
+        f2_min, f2_max = min(f2_values), max(f2_values)
+        f1_pad = max(50.0, (f1_max - f1_min) * 0.12)
+        f2_pad = max(100.0, (f2_max - f2_min) * 0.12)
+        f1_min, f1_max = max(0.0, f1_min - f1_pad), f1_max + f1_pad
+        f2_min, f2_max = max(0.0, f2_min - f2_pad), f2_max + f2_pad
+        for point in self.points:
+            f1 = float(point.get("f1_hz", 0.0) or 0.0)
+            f2 = float(point.get("f2_hz", 0.0) or 0.0)
+            phoneme = str(point.get("phoneme", "") or "")
+            x = plot.left() + (f2 - f2_min) / max(1.0, f2_max - f2_min) * plot.width()
+            y = plot.bottom() - (f1 - f1_min) / max(1.0, f1_max - f1_min) * plot.height()
+            highlighted = bool(self.highlight_phoneme and phoneme == self.highlight_phoneme)
+            painter.setBrush(QColor("#ffd166" if highlighted else "#24d7ff"))
+            painter.setPen(QPen(QColor("#ffadad" if highlighted else "#023047"), 2 if highlighted else 1))
+            radius = 5.5 if highlighted else 3.5
+            painter.drawEllipse(QPointF(x, y), radius, radius)
+            if highlighted or len(self.points) <= 18:
+                painter.setPen(QPen(QColor("#f8f9fa"), 1))
+                painter.drawText(QRectF(x + 5, y - 10, 44, 18), Qt.AlignLeft, phoneme[:6])
+        painter.setPen(QPen(QColor("#d7e3fc"), 1))
+        painter.drawText(QRectF(plot.left(), plot.bottom() + 22, plot.width(), 16), Qt.AlignCenter, f"F2 {f2_min:.0f}–{f2_max:.0f} Hz • F1 {f1_min:.0f}–{f1_max:.0f} Hz")
+        painter.end()
+
+
 class GraphicalWaveLayerCanvas(QWidget):
     """Compact direct-manipulation editor for one mix layer's level envelope."""
 
@@ -10414,6 +10726,10 @@ class WaveToyWindow(QMainWindow):
         self.articulation_inspector_pitch_label: QLabel | None = None
         self.articulation_inspector_energy_label: QLabel | None = None
         self.articulation_inspector_spectrogram_label: QLabel | None = None
+        self.articulation_inspector_formants_label: QLabel | None = None
+        self.articulation_inspector_vowel_canvas: VowelSpaceCanvas | None = None
+        self.articulation_inspector_resonance_label: QLabel | None = None
+        self.articulation_inspector_frames_label: QLabel | None = None
         self.articulation_inspector_status_label: QLabel | None = None
         self.articulation_inspector_zoom = 1.0
         self.articulation_inspector_audio = np.zeros((0, 2), dtype=np.float32)
@@ -10422,6 +10738,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_inspector_source_path: str | None = None
         self.articulation_inspector_source_name = "Current Rendered Word"
         self.articulation_inspector_analysis: WaveformAnalysisRecord | None = None
+        self.articulation_inspector_formant_analysis: FormantAnalysisRecord | None = None
         self.articulation_inspector_analysis_cache_key: str | None = None
         self.cv_vc_search_edit: QLineEdit | None = None
         self.cv_vc_starts_with_combo: QComboBox | None = None
@@ -12626,6 +12943,24 @@ class WaveToyWindow(QMainWindow):
         self.articulation_inspector_spectrogram_label.setWordWrap(True)
         layout.addWidget(CollapsibleSection("Spectrogram Preview", self.articulation_inspector_spectrogram_label, expanded=False))
 
+        self.articulation_inspector_formants_label = QLabel("Formants: render generated speech to inspect model-derived F1/F2/F3 values.")
+        self.articulation_inspector_formants_label.setObjectName("symbolHint")
+        self.articulation_inspector_formants_label.setWordWrap(True)
+        layout.addWidget(CollapsibleSection("Formants", self.articulation_inspector_formants_label, expanded=False))
+
+        self.articulation_inspector_vowel_canvas = VowelSpaceCanvas()
+        layout.addWidget(CollapsibleSection("Vowel Space", self.articulation_inspector_vowel_canvas, expanded=False))
+
+        self.articulation_inspector_resonance_label = QLabel("Resonance: model-derived tract state summary appears after refresh.")
+        self.articulation_inspector_resonance_label.setObjectName("symbolHint")
+        self.articulation_inspector_resonance_label.setWordWrap(True)
+        layout.addWidget(CollapsibleSection("Resonance", self.articulation_inspector_resonance_label, expanded=False))
+
+        self.articulation_inspector_frames_label = QLabel("Speech Frames: bounded preview appears after generated formant frames are available.")
+        self.articulation_inspector_frames_label.setObjectName("symbolHint")
+        self.articulation_inspector_frames_label.setWordWrap(True)
+        layout.addWidget(CollapsibleSection("Speech Frames", self.articulation_inspector_frames_label, expanded=False))
+
         save_box = QWidget()
         save_layout = QVBoxLayout(save_box)
         save_layout.setContentsMargins(0, 0, 0, 0)
@@ -12633,10 +12968,14 @@ class WaveToyWindow(QMainWindow):
         save_button = QPushButton("Save Waveform Analysis")
         save_button.setObjectName("phonemeCardPrimaryAction")
         save_button.clicked.connect(self._save_current_waveform_analysis)
+        save_formant_button = QPushButton("Save Formant Analysis")
+        save_formant_button.setObjectName("phonemeCardPrimaryAction")
+        save_formant_button.clicked.connect(self._save_current_formant_analysis)
         load_button = QPushButton("Load Analysis Metadata")
         load_button.setObjectName("phonemeCardSecondaryAction")
         load_button.clicked.connect(self._load_latest_waveform_analysis_metadata)
         save_row.addWidget(save_button)
+        save_row.addWidget(save_formant_button)
         save_row.addWidget(load_button)
         save_row.addStretch(1)
         save_layout.addLayout(save_row)
@@ -12652,6 +12991,41 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_inspector_source_combo is None:
             return "current_rendered_word"
         return str(self.articulation_inspector_source_combo.currentData() or "current_rendered_word")
+
+    def _articulation_inspector_formant_frames(self, source_kind: str) -> Tuple[List[Dict[str, object]], List[object], str]:
+        if source_kind == "selected_imported_wav":
+            return [], [], "No generated formant frames available for imported audio."
+        if source_kind in {"selected_speech_asset", "current_timeline_mix"}:
+            return [], [], "No generated formant frames are cached for this source; render an articulation chain or phoneme preview to inspect generated formants."
+        if source_kind == "current_phoneme_preview":
+            phoneme = self.current_phoneme
+            resonance = self._resonance_state_for_phoneme(phoneme)
+            return [{
+                "time_ms": 0.0,
+                "phoneme": phoneme.name,
+                "formants": self._formant_metrics_for_phoneme(phoneme),
+                "resonance_tract_state": resonance.to_json_dict(),
+            }], [phoneme], "Model-derived current phoneme preview formants."
+        if source_kind == "current_rendered_word":
+            if not self.articulation_chain_items:
+                return [], [], "No articulation chain is available for generated formant frames."
+            frames = self._build_viseme_frames(frame_rate=max(1.0, 1000.0 / ARTICULATION_MOTION_FRAME_MS))
+            return frames, list(self.articulation_chain_items), "Model-derived generated word formant frames."
+        return [], [], "No generated formant frames available for this source."
+
+    def _refresh_articulation_formant_analysis(self) -> None:
+        frames, chain_items, message = self._articulation_inspector_formant_frames(self.articulation_inspector_source_kind)
+        duration = len(self.articulation_inspector_audio) / float(max(1, self.articulation_inspector_sample_rate)) if self.articulation_inspector_audio.size else 0.0
+        self.articulation_inspector_formant_analysis = formant_analysis_from_articulation_chain(
+            chain_items,
+            frames,
+            self.articulation_inspector_sample_rate,
+            name=self.articulation_inspector_source_name,
+            source_kind=self.articulation_inspector_source_kind,
+            source_path=self.articulation_inspector_source_path,
+            duration_seconds=duration,
+            notes=message,
+        )
 
     def _articulation_inspector_source_audio(self) -> Tuple[np.ndarray, int, str, str, str | None]:
         key = self._articulation_inspector_source_key()
@@ -12686,6 +13060,7 @@ class WaveToyWindow(QMainWindow):
         if cache_key != self.articulation_inspector_analysis_cache_key:
             self.articulation_inspector_analysis = WaveformAnalysisRecord.from_audio(audio, sample_rate, name=source_name, source_kind=source_kind, source_path=source_path)
             self.articulation_inspector_analysis_cache_key = cache_key
+        self._refresh_articulation_formant_analysis()
         if self.articulation_inspector_canvas is not None:
             self.articulation_inspector_canvas.set_audio(audio, sample_rate)
             self.articulation_inspector_canvas.set_zoom(self.articulation_inspector_zoom)
@@ -12723,9 +13098,54 @@ class WaveToyWindow(QMainWindow):
         spec = analysis.spectrogram_summary
         if self.articulation_inspector_spectrogram_label is not None:
             self.articulation_inspector_spectrogram_label.setText(f"Spectrogram preview: {spec.get('preview_frame_count', spec.get('frame_count', 0))} preview buckets × {spec.get('frequency_band_count', spec.get('frequency_bin_count', 0))} bands • strongest bin around {spec.get('peak_frequency_hz', None)} Hz. Preview is uint8-normalized and bounded for UI/storage safety.")
+        formant_analysis = self.articulation_inspector_formant_analysis
+        if formant_analysis is not None:
+            payload = formant_analysis.to_json_dict()
+            if self.articulation_inspector_formants_label is not None:
+                if formant_analysis.source_kind == "selected_imported_wav":
+                    self.articulation_inspector_formants_label.setText("No generated formant frames available for imported audio. WaveToy does not measure LPC formants from WAV files in this inspector.")
+                elif formant_analysis.frame_count <= 0:
+                    self.articulation_inspector_formants_label.setText(f"Formants unavailable: {formant_analysis.notes or 'render generated speech to create model frames.'}")
+                else:
+                    sequence = " ".join(formant_analysis.phoneme_sequence[:24]) or "unknown"
+                    mode = self._articulation_word_render_mode() if formant_analysis.source_kind == "current_rendered_word" else formant_analysis.source_kind
+                    self.articulation_inspector_formants_label.setText(
+                        "Model-derived generated/resonance values, not measured LPC formants. "
+                        f"Render mode: {mode} • Phonemes: {sequence} • Frames: {formant_analysis.frame_count}\n"
+                        f"F1 min/mean/max: {payload['f1_min_hz']} / {payload['f1_mean_hz']} / {payload['f1_max_hz']} Hz\n"
+                        f"F2 min/mean/max: {payload['f2_min_hz']} / {payload['f2_mean_hz']} / {payload['f2_max_hz']} Hz\n"
+                        f"F3 min/mean/max: {payload['f3_min_hz']} / {payload['f3_mean_hz']} / {payload['f3_max_hz']} Hz"
+                    )
+            if self.articulation_inspector_vowel_canvas is not None:
+                self.articulation_inspector_vowel_canvas.set_points(formant_analysis.vowel_space_points, self.current_phoneme.name if hasattr(self, "current_phoneme") else None)
+            if self.articulation_inspector_resonance_label is not None:
+                res = dict(formant_analysis.resonance_summary or {})
+                if formant_analysis.frame_count <= 0:
+                    snapshot = self.resonance_tract_state.to_json_dict() if hasattr(self, "resonance_tract_state") else {}
+                    self.articulation_inspector_resonance_label.setText(
+                        "Model-derived resonance snapshot (no frame range available): "
+                        + ", ".join(f"{key}={float(snapshot.get(key, 0.0)):.2f}" for key in ("vocal_tract_length", "larynx_height", "resonance_depth", "chest_resonance", "head_resonance", "nasal_coupling", "brightness", "darkness", "formant_scale") if key in snapshot)
+                    )
+                else:
+                    parts = []
+                    for key in ("vocal_tract_length", "larynx_height", "resonance_depth", "chest_resonance", "head_resonance", "nasal_coupling", "brightness", "darkness", "formant_scale", "formant_shift_f1", "formant_shift_f2", "formant_shift_f3"):
+                        value = res.get(key)
+                        if isinstance(value, dict):
+                            parts.append(f"{key}: {value.get('mean')} ({value.get('min')}–{value.get('max')})")
+                    self.articulation_inspector_resonance_label.setText("Model-derived resonance mean/range from generated frames: " + " • ".join(parts))
+            if self.articulation_inspector_frames_label is not None:
+                preview = formant_analysis.formant_frames_preview[:24]
+                if not preview:
+                    self.articulation_inspector_frames_label.setText("Speech Frames: no bounded generated frame preview available.")
+                else:
+                    lines = ["time_ms  phoneme  F1    F2    F3    scale  nasal"]
+                    for item in preview:
+                        lines.append(f"{float(item.get('time_ms', 0.0)):7.1f}  {str(item.get('phoneme', ''))[:7]:<7}  {str(item.get('f1')):<5} {str(item.get('f2')):<5} {str(item.get('f3')):<5} {float(item.get('resonance_scale', 1.0) or 1.0):.2f}   {float(item.get('nasal_coupling', 0.0) or 0.0):.2f}")
+                    self.articulation_inspector_frames_label.setText("Bounded generated speech-frame preview (storage cap: 96):\n" + "\n".join(lines))
         if self.articulation_inspector_status_label is not None:
             raw_audio_keys = [key for key in analysis.to_json_dict().keys() if "audio" in key and key not in {"source_audio_path"}]
-            self.articulation_inspector_status_label.setText(f"Ready to save compact WaveformAnalyses metadata for {self.articulation_inspector_source_name}. Raw audio fields in payload: {raw_audio_keys or 'none'}.")
+            formant_frames = self.articulation_inspector_formant_analysis.frame_count if self.articulation_inspector_formant_analysis is not None else 0
+            self.articulation_inspector_status_label.setText(f"Ready to save compact analysis metadata for {self.articulation_inspector_source_name}. Formant frames: {formant_frames}. Raw audio fields in waveform payload: {raw_audio_keys or 'none'}.")
 
     def _zoom_articulation_inspector(self, factor: float) -> None:
         self.articulation_inspector_zoom = float(np.clip(self.articulation_inspector_zoom * factor, 1.0, 16.0))
@@ -12751,6 +13171,24 @@ class WaveToyWindow(QMainWindow):
         self._refresh_asset_library_view()
         if self.articulation_inspector_status_label is not None:
             self.articulation_inspector_status_label.setText(f"Saved WaveformAnalyses metadata for {record.name}; raw audio was not stored in JSON.")
+
+    def _save_current_formant_analysis(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_inspector_formant_analysis is None:
+            self._refresh_articulation_inspector()
+        if self.articulation_inspector_formant_analysis is None:
+            QMessageBox.information(self, "Formant Analysis", "No formant analysis metadata is available to save yet.")
+            return
+        record = replace(self.articulation_inspector_formant_analysis, modified_at=_utc_now_iso())
+        payload = record.to_json_dict()
+        raw_keys = [key for key in json.dumps(payload).split('"') if key in {"audio_data", "raw_audio"}]
+        if raw_keys:
+            QMessageBox.warning(self, "Formant Analysis", "Formant analysis payload unexpectedly contained raw audio keys and was not saved.")
+            return
+        self._save_library_asset("formant_analysis", record.name, payload, description="Compact model-derived formant/resonance metadata; raw audio and unbounded frames are not embedded.", tags=["analysis", "formants", record.source_kind], source_path=record.source_path)
+        self._refresh_asset_library_view()
+        if self.articulation_inspector_status_label is not None:
+            self.articulation_inspector_status_label.setText(f"Saved FormantAnalyses metadata for {record.name}; raw audio and full frame matrices were not stored in JSON.")
 
     def _load_latest_waveform_analysis_metadata(self, checked: bool = False) -> None:
         del checked
