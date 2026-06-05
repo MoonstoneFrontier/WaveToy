@@ -144,7 +144,61 @@ def test_harmony_json_import_accepts_exported_payload_state():
     assert state == {
         "root_note": "A#",
         "scale_type": "major",
+        "chord_root_note": "A#",
         "chord_type": "dominant_7",
         "spelling_mode": "Auto",
     }
     assert wave_toy.display_note_name(state["root_note"], state["root_note"], state["spelling_mode"]) == "Bb"
+
+
+def _assert_scores_in_range(descriptor):
+    assert 0.0 <= descriptor.stability_score <= 1.0
+    assert 0.0 <= descriptor.brightness_score <= 1.0
+    assert 0.0 <= descriptor.tension_score <= 1.0
+
+
+def test_scale_descriptor_a_major_notes_and_scores():
+    descriptor = wave_toy.scale_descriptor("A", "major")
+    assert descriptor.pitch_classes == ["A", "B", "C#", "D", "E", "F#", "G#"]
+    assert descriptor.displayed_names == ["A", "B", "C#", "D", "E", "F#", "G#"]
+    assert descriptor.degrees == [1, 2, 3, 4, 5, 6, 7]
+    assert descriptor.interval_roles[0] == "root"
+    _assert_scores_in_range(descriptor)
+
+
+def test_scale_descriptor_bb_major_auto_displays_flats():
+    descriptor = wave_toy.scale_descriptor("Bb", "major", "Auto")
+    assert descriptor.pitch_classes == ["A#", "C", "D", "D#", "F", "G", "A"]
+    assert descriptor.displayed_names == ["Bb", "C", "D", "Eb", "F", "G", "A"]
+
+
+def test_chord_descriptor_reports_core_qualities_and_scores():
+    assert wave_toy.chord_descriptor("A", "major_triad").chord_quality == "major"
+    assert wave_toy.chord_descriptor("A", "minor_triad").chord_quality == "minor"
+    diminished = wave_toy.chord_descriptor("B", "diminished_triad")
+    assert diminished.chord_quality == "diminished"
+    assert diminished.degrees == [1, 3, 5]
+    _assert_scores_in_range(diminished)
+
+
+def test_roman_numerals_for_major_and_minor_keys():
+    assert wave_toy.roman_numeral_for_chord("A", "major_triad", "A", "major") == "I"
+    assert wave_toy.roman_numeral_for_chord("E", "dominant_7", "A", "major") == "V7"
+    assert wave_toy.roman_numeral_for_chord("F#", "minor_triad", "A", "major") == "vi"
+    assert wave_toy.roman_numeral_for_chord("C", "major_triad", "A", "natural_minor") == "III"
+    assert wave_toy.roman_numeral_for_chord("Bb", "major_triad", "A", "major") in {"chromatic", "non-diatonic"}
+
+
+def test_chord_descriptor_includes_roman_and_function_relative_to_key():
+    descriptor = wave_toy.chord_descriptor("E", "dominant_7", "A", "major")
+    assert descriptor.roman_numeral == "V7"
+    assert descriptor.harmonic_function == "dominant"
+    _assert_scores_in_range(descriptor)
+
+
+def test_harmony_export_payload_includes_descriptors():
+    payload = wave_toy.harmony_metadata_payload("A", "major", "dominant_7", "Auto", chord_root_note="E", created_at="2026-06-04T00:00:00+00:00")
+    assert payload["scale_descriptor"]["displayed_names"] == ["A", "B", "C#", "D", "E", "F#", "G#"]
+    assert payload["chord_root_note"] == "E"
+    assert payload["chord_descriptor"]["roman_numeral"] == "V7"
+    assert payload["chord_descriptor"]["harmonic_function"] == "dominant"

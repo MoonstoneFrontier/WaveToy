@@ -80,3 +80,7 @@ No audio and no MIDI data are exported.
 ## Task 088 follow-up
 
 Task 088 keeps the Task 087 Harmony Workbench state-sync behavior but hardens the metadata path. Export now appends `.json` when needed, writes with `ensure_ascii=False` and `indent=2`, reports success with a root/scale/chord summary, and warns on write failures. Import Harmony JSON provides low-risk symmetry for `wavetoy.harmony_metadata.v1` metadata without importing audio or changing the project schema.
+
+## Task 089 analysis note
+
+The Harmony Workbench now has a compact descriptor-driven analysis summary. It keeps scale and chord refresh synchronized, separates key root from chord root for simple roman numerals, and reports educational function categories such as tonic, predominant, dominant, color, and chromatic. This remains a workbench helper, not a progression editor or MIDI workflow.

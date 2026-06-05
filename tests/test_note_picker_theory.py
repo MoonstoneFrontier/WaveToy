@@ -209,3 +209,11 @@ def test_picker_interval_status_is_compact(qapp):
     assert status["interval_theory_name"] == "Major Third"
     assert status["semitone_distance"] == 4
     assert status["color"] == wave_toy.interval_color("C#", "A")
+
+
+def test_note_picker_selected_descriptor_uses_scale_and_interval_context():
+    scale = wave_toy.scale_descriptor("A", "major", "Auto")
+    selected = wave_toy.interval_descriptor("C#", "A", "Auto")
+    assert scale.displayed_names[2] == "C#"
+    assert selected["role"] == "major_third"
+    assert selected["mood_label"] == "Bright / Happy"

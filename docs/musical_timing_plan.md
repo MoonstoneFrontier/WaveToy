@@ -62,3 +62,7 @@ Scale, chord, and arpeggio previews remain millisecond/audio-preview features fo
 ## Task 087 harmony timing boundary
 
 The Harmony Workbench now has synchronized scale/chord state and reserved `scale_pattern`, `chord_pattern`, and `chord_progression` asset shapes. These remain metadata foundations only. Musical Timing still defaults to millisecond speech timing, and Task 087 does not add beat-aware progression editing, MIDI export, or a piano roll.
+
+## Task 089 harmony analysis boundary
+
+Harmony descriptors and simple roman numerals are still metadata/education helpers. They do not add beat-aware chord progression editing, MIDI export, piano-roll behavior, or Musical Timing schema changes. Millisecond timing remains the default speech workflow.
