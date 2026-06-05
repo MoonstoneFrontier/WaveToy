@@ -106,7 +106,7 @@ ARTICULATION_PICKER_MIN_WIDTH = 220
 ARTICULATION_PICKER_PREFERRED_WIDTH = 300
 ARTICULATION_PICKER_MAX_WIDTH = 380
 ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Timeline", "Render", "Inspector", "Profiles")
-ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing / Performance", "Motion")
+ARTICULATION_TIMELINE_INTERNAL_SUBTAB_LABELS = ("Chain", "Timing", "Motion")
 MUSIC_THEORY_PICKER_MIN_WIDTH = 220
 MUSIC_THEORY_PICKER_PREFERRED_WIDTH = 300
 MUSIC_THEORY_PICKER_MAX_WIDTH = 380
@@ -3620,17 +3620,20 @@ def viseme_timeline_segments_from_motion_segments(motion_segments: List[MotionTi
     return visemes
 
 
-def motion_summary_text(phoneme_count: int, total_ms: float, transition_count: int, average_phoneme_ms: float, viseme_segments: List[VisemeTimelineSegment]) -> str:
+def motion_summary_text(phoneme_count: int, total_ms: float, transition_count: int, average_phoneme_ms: float, viseme_segments: List[VisemeTimelineSegment], render_diagnostics: List[str] | None = None) -> str:
     """Return compact read-only motion statistics for the Motion tab."""
     total_viseme_segments = len(viseme_segments)
     unique_visemes = len({segment.viseme for segment in viseme_segments})
-    return (
+    summary = (
         f"Motion Summary: {phoneme_count} phoneme{'s' if phoneme_count != 1 else ''} • "
         f"{unique_visemes} unique viseme{'s' if unique_visemes != 1 else ''} / "
         f"{total_viseme_segments} viseme hold{'s' if total_viseme_segments != 1 else ''} • "
         f"{int(round(total_ms))} ms total • {transition_count} transition{'s' if transition_count != 1 else ''} • "
         f"avg phoneme {average_phoneme_ms:.0f} ms"
     )
+    if render_diagnostics:
+        summary += "\n" + " • ".join(render_diagnostics)
+    return summary
 
 MOTION_CURVE_DEFAULT_SAMPLE_STEP_MS = 25
 MOTION_CURVE_MIN_SAMPLE_STEP_MS = 10
@@ -13904,10 +13907,10 @@ class WaveToyWindow(QMainWindow):
         performance_note.setObjectName("symbolHint")
         performance_note.setWordWrap(True)
         performance_note_row.addWidget(performance_note, 1)
-        performance_shortcut = QPushButton("Open Timing / Performance")
+        performance_shortcut = QPushButton("Open Timing")
         performance_shortcut.setObjectName("phonemeCardSecondaryAction")
         performance_shortcut.setCursor(Qt.PointingHandCursor)
-        performance_shortcut.setToolTip("Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
+        performance_shortcut.setToolTip("Jump to the Timeline → Timing page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
         performance_shortcut.clicked.connect(self._show_articulation_timing_page)
         performance_note_row.addWidget(performance_shortcut)
         chain_layout.addLayout(performance_note_row)
@@ -14314,11 +14317,17 @@ class WaveToyWindow(QMainWindow):
         motion_summary_card = self._toy_group("Motion Summary")
         motion_summary_layout = QVBoxLayout(motion_summary_card)
         motion_summary_layout.setContentsMargins(12, 18, 12, 12)
-        self.articulation_motion_summary_label = QLabel("Motion Summary: 0 phonemes • 0 unique visemes / 0 viseme holds • 0 ms total • 0 transitions • avg phoneme 0 ms")
+        self.articulation_motion_summary_label = QLabel(motion_summary_text(0, 0.0, 0, 0.0, [], self._motion_render_diagnostics_summary()))
         self.articulation_motion_summary_label.setObjectName("symbolHint")
         self.articulation_motion_summary_label.setWordWrap(True)
         self.articulation_motion_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         motion_summary_layout.addWidget(self.articulation_motion_summary_label)
+        open_render_settings_button = QPushButton("Open Render Settings")
+        open_render_settings_button.setObjectName("phonemeCardSecondaryAction")
+        open_render_settings_button.setCursor(Qt.PointingHandCursor)
+        open_render_settings_button.setToolTip("Jump to Timeline → Render where Render Mode, Smooth Mouth Transitions, Singing Preview, Musical Timing, and Bypass formants controls live.")
+        open_render_settings_button.clicked.connect(self._show_articulation_render_settings)
+        motion_summary_layout.addWidget(open_render_settings_button)
         self.articulation_transition_analysis_label = QLabel("Transition Analysis: 0 transitions • no curve changes to compare")
         self.articulation_transition_analysis_label.setObjectName("symbolHint")
         self.articulation_transition_analysis_label.setWordWrap(True)
@@ -15926,10 +15935,12 @@ class WaveToyWindow(QMainWindow):
     def _toggle_articulation_smooth_transitions(self, checked: bool) -> None:
         self.articulation_word_render_settings["smooth_mouth_transitions"] = bool(checked)
         self._mark_articulation_word_dirty()
+        self._refresh_articulation_motion_timeline()
 
     def _toggle_continuous_debug_bypass_formants(self, checked: bool) -> None:
         self.articulation_word_render_settings["continuous_debug_bypass_formants"] = bool(checked)
         self._mark_articulation_word_dirty()
+        self._refresh_articulation_motion_timeline()
 
     def _set_continuous_formant_intensity(self, value: float) -> None:
         self.articulation_word_render_settings["continuous_formant_intensity"] = float(np.clip(value, 0.0, 1.0))
@@ -16312,6 +16323,7 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_timeline_canvas is not None:
             self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
         self._mark_articulation_word_dirty()
+        self._refresh_articulation_motion_timeline()
         self._update_speech_diagnostics_panel(self.current_phoneme)
 
     def _set_musical_timing_enabled(self, enabled: bool) -> None:
@@ -16360,6 +16372,7 @@ class WaveToyWindow(QMainWindow):
     def _set_singing_mode_enabled(self, enabled: bool) -> None:
         self.articulation_word_render_settings["singing_mode_enabled"] = bool(enabled)
         self._mark_articulation_word_dirty()
+        self._refresh_articulation_motion_timeline()
         self._update_speech_diagnostics_panel(self.current_phoneme)
 
     def _singing_mode_enabled(self) -> bool:
@@ -16463,10 +16476,32 @@ class WaveToyWindow(QMainWindow):
             return left.transition_curve
         return phoneme_pair_transition_model(left.phoneme_for_render(), right.phoneme_for_render()).curve
 
+    def _motion_diagnostic_state_text(self, label: str, enabled: bool) -> str:
+        return f"{label}: {'On' if enabled else 'Off'}"
+
+    def _continuous_debug_bypass_formants_enabled(self) -> bool:
+        if self.continuous_debug_bypass_formants_checkbox is not None:
+            return bool(self.continuous_debug_bypass_formants_checkbox.isChecked())
+        return bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False))
+
+    def _motion_render_diagnostics_summary(self) -> List[str]:
+        return [
+            f"Current Render Mode: {self._articulation_word_render_mode()}",
+            self._motion_diagnostic_state_text("Smooth Mouth Transitions", self._articulation_smooth_transitions_enabled()),
+            self._motion_diagnostic_state_text("Singing Preview", self._singing_mode_enabled()),
+            self._motion_diagnostic_state_text("Musical Timing", bool(self.musical_timing_settings.enabled)),
+            self._motion_diagnostic_state_text("Bypass Formants", self._continuous_debug_bypass_formants_enabled()),
+        ]
+
     def _show_articulation_timing_page(self, checked: bool = False) -> None:
         del checked
         if self.articulation_timeline_internal_subtabs is not None:
             self.articulation_timeline_internal_subtabs.setCurrentIndex(1)
+
+    def _show_articulation_render_settings(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_timeline_subtabs is not None:
+            self.articulation_timeline_subtabs.setCurrentIndex(1)
 
     def _articulation_motion_timeline(self, include_word_gaps: bool = False) -> Tuple[List[Dict[str, object]], int]:
         del include_word_gaps
@@ -16512,7 +16547,7 @@ class WaveToyWindow(QMainWindow):
             transition_count = sum(1 for segment in motion_segments if segment.kind == "transition")
             phoneme_count = len(self.articulation_chain_items)
             avg_duration = (sum(float(item.duration_ms or item.phoneme.duration_ms) for item in self.articulation_chain_items) / phoneme_count) if phoneme_count else 0.0
-            self.articulation_motion_summary_label.setText(motion_summary_text(phoneme_count, total_ms, transition_count, avg_duration, viseme_segments))
+            self.articulation_motion_summary_label.setText(motion_summary_text(phoneme_count, total_ms, transition_count, avg_duration, viseme_segments, self._motion_render_diagnostics_summary()))
         if self.articulation_motion_canvas is not None:
             self.articulation_motion_canvas.set_motion_timeline(blocks)
         if self.articulation_timeline_canvas is not None:
@@ -22465,6 +22500,41 @@ class WaveToyWindow(QMainWindow):
                 background: #f59e0b;
                 color: #111827;
                 border-color: #b45309;
+            }
+            QTabWidget#articulationTimelineSubtabs::pane, QTabWidget#articulationTimelineInternalSubtabs::pane {
+                background: rgba(248, 250, 252, 0.10);
+                border: 2px solid #1f2937;
+                border-radius: 0 14px 14px 14px;
+                top: -1px;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab {
+                background: #d9e2ec;
+                border: 1px solid #94a3b8;
+                border-bottom: 2px solid #1f2937;
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
+                color: #243b53;
+                font-size: 12px;
+                font-weight: 900;
+                margin-right: 4px;
+                min-height: 32px;
+                padding: 6px 16px;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab:hover, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab:hover {
+                background: #cbd5e1;
+                color: #102a43;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab:selected, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab:selected {
+                background: #1f2937;
+                border: 2px solid #38bdf8;
+                border-bottom: 2px solid #1f2937;
+                color: #ffffff;
+                margin-bottom: -1px;
+            }
+            QTabWidget#articulationTimelineSubtabs QTabBar::tab:disabled, QTabWidget#articulationTimelineInternalSubtabs QTabBar::tab:disabled {
+                background: #e5e7eb;
+                border-color: #cbd5e1;
+                color: #64748b;
             }
             QWidget#articulationLabTab {
                 background: #0d1724;
