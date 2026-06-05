@@ -2,13 +2,22 @@
 
 ## Current focus: Articulation Timeline
 
-The Articulation Timeline tab is organized as a workflow hub with internal subtabs:
+The Articulation Timeline workspace keeps the Task 094 top-level pages:
 
-- **Build** for phoneme chain construction and compact saved/list pickers.
-- **Visual Timeline** for the timeline graphic, transport/playhead controls, and selected-item inspector.
-- **Render / Export** for word render mode, `Play Word`, `Create Word`, `Export Word`, and render status.
-- **Performance** for automation-adjacent previews, voice profile, and musical timing controls.
-- **Advanced** for diagnostics, debug controls, validation details, and verbose status panels.
+- **Timeline**
+- **Render**
+- **Inspector**
+- **Profiles**
+
+The **Timeline** page has its own focused internal subtabs:
+
+- **Chain** for Chain Builder actions, chain cards/source actions, compact Speech Assets, and the collapsible CV / VC Library.
+- **Timing** for Musical Timing + Singing Preview, Visual Speech Timeline controls, the `ArticulationTimelineCanvas` scroll area, selected-phoneme controls, scrub/playhead status, boundary curve controls, and envelope/formant canvases.
+- **Motion** for Word Motion Preview, motion transport controls, viseme/animation JSON export, the front/anatomical motion canvas, and the collapsible side-cutaway SVG canvas.
+
+Timing and Motion include a compact read-only current-chain summary so users can verify phoneme count, approximate duration, and current render mode without duplicating the full chain card list. This reduces scrolling by separating chain management, visual timing edits, and anatomical motion preview instead of stacking every workflow on one dense page.
+
+Non-goals for this layout split: no synthesis feature additions, no render default changes, no project schema changes, no asset-format migration, and no duplicate Articulation Inspector panels.
 
 ## Picker/sidebar width policy
 
@@ -43,4 +52,4 @@ Music Theory picker/list/library panels use the same compact sidebar policy: min
 
 ## Task 092 Articulation Inspector placement
 
-The Articulation Inspector belongs inside Articulation Timeline → Render / Export, near Word Render / Export. It should remain compact and workflow-oriented: waveform, selection statistics, pitch, energy, spectrogram, and save/load areas use internal collapsible sections instead of another giant Build-page stack. This preserves the Task 090 cleanup that keeps Build focused on chain construction and timeline editing.
+The Articulation Inspector belongs inside Articulation Timeline → Inspector. It should remain compact and workflow-oriented: waveform, selection statistics, pitch, energy, spectrogram, and save/load areas use internal collapsible sections instead of another giant Build-page stack. This preserves the Task 090 cleanup that keeps Build focused on chain construction and timeline editing.
