@@ -55,3 +55,9 @@ Unique viseme count is distinct from viseme holds so repeated shapes are easy to
 - No Animation JSON schema changes.
 - No new export formats.
 - No ML lip-sync or voice cloning.
+
+## Task 097 follow-up
+
+Task 097 adds a separate Motion Curves canvas below the Motion Timeline and Viseme Track. The Task 096 segment lanes remain read-only, half-open, fit-to-view timing views; the new curve view samples articulator values for visual debugging only and does not change Viseme JSON or Animation JSON exports. Functional horizontal zoom for all motion inspection views remains a Task 098 TODO.
+
+Task 097a renames the internal Timing lane to **Timing / Performance** and adds a Chain-page shortcut note for tempo and Singing Preview discoverability without changing the Task 096 read-only timeline/viseme lanes.
