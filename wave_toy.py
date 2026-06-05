@@ -1422,33 +1422,266 @@ def display_pitch_class_set(notes: List[str], root_note: str = "A", spelling_mod
     return [display_note_name(normalize_note_name(note), root_note, spelling_mode) for note in notes]
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, round(float(value), 2)))
+
+
+@dataclass
+class ScaleDescriptor:
+    """JSON-safe educational descriptor for a scale selection.
+
+    Scores are heuristic UI hints, not formal musicological analysis.
+    """
+
+    root_note: str
+    root_display: str
+    scale_type: str
+    scale_label: str
+    pitch_classes: List[str]
+    displayed_names: List[str]
+    degrees: List[int]
+    interval_roles: List[str]
+    mood_label: str
+    stability_score: float
+    brightness_score: float
+    tension_score: float
+    description: str
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+@dataclass
+class ChordDescriptor:
+    """JSON-safe educational descriptor for a chord selection.
+
+    Scores are heuristic UI hints, not formal musicological analysis.
+    """
+
+    root_note: str
+    root_display: str
+    chord_type: str
+    chord_label: str
+    pitch_classes: List[str]
+    displayed_names: List[str]
+    degrees: List[int]
+    interval_roles: List[str]
+    chord_quality: str
+    roman_numeral: str
+    harmonic_function: str
+    stability_score: float
+    brightness_score: float
+    tension_score: float
+    description: str
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+def _descriptor_scores(interval_roles: List[str], quality: str = "") -> Tuple[float, float, float]:
+    stability_weights = {
+        "root": 1.0, "perfect_fifth": 0.92, "major_third": 0.78, "minor_third": 0.72,
+        "perfect_fourth": 0.58, "major_sixth": 0.55, "minor_sixth": 0.42,
+        "major_second": 0.36, "minor_seventh": 0.28, "major_seventh": 0.18,
+        "minor_second": 0.14, "tritone": 0.08,
+    }
+    brightness_weights = {
+        "root": 0.55, "major_second": 0.58, "major_third": 0.92, "perfect_fourth": 0.48,
+        "perfect_fifth": 0.62, "major_sixth": 0.9, "major_seventh": 0.84,
+        "minor_second": 0.28, "minor_third": 0.28, "tritone": 0.5, "minor_sixth": 0.2, "minor_seventh": 0.36,
+    }
+    tension_weights = {
+        "root": 0.04, "perfect_fifth": 0.12, "major_third": 0.16, "minor_third": 0.22,
+        "major_second": 0.28, "perfect_fourth": 0.34, "major_sixth": 0.24, "minor_sixth": 0.45,
+        "minor_seventh": 0.62, "major_seventh": 0.78, "minor_second": 0.86, "tritone": 0.95,
+    }
+    roles = interval_roles or ["root"]
+    stability = sum(stability_weights.get(role, 0.4) for role in roles) / len(roles)
+    brightness = sum(brightness_weights.get(role, 0.5) for role in roles) / len(roles)
+    tension = sum(tension_weights.get(role, 0.35) for role in roles) / len(roles)
+    quality_adjustments = {
+        "major": (0.1, 0.1, -0.05),
+        "minor": (0.05, -0.08, 0.02),
+        "diminished": (-0.18, -0.06, 0.24),
+        "augmented": (-0.08, 0.12, 0.14),
+        "dominant": (-0.02, 0.03, 0.18),
+        "suspended": (-0.04, 0.0, 0.08),
+        "power": (0.16, 0.02, -0.08),
+    }
+    ds, db, dt = quality_adjustments.get(quality, (0.0, 0.0, 0.0))
+    return _clamp01(stability + ds), _clamp01(brightness + db), _clamp01(tension + dt)
+
+
+def _safe_scale_type(scale_type: str) -> str:
+    return str(scale_type or "major") if str(scale_type or "major") in SCALE_TYPES else "major"
+
+
+def _safe_chord_type(chord_type: str) -> str:
+    return str(chord_type or "major_triad") if str(chord_type or "major_triad") in CHORD_TYPES else "major_triad"
+
+
+def _analysis_scale_type(scale_type: str = "major") -> str:
+    return "natural_minor" if str(scale_type or "major") in {"minor", "natural_minor"} else "major"
+
+
+def chord_quality_for_type(chord_type: str) -> str:
+    safe = _safe_chord_type(chord_type)
+    if safe == "major_triad" or safe == "major_7":
+        return "major"
+    if safe in {"minor_triad", "minor_7", "minor_major_7"}:
+        return "minor"
+    if safe in {"diminished_triad", "diminished_7", "half_diminished_7"}:
+        return "diminished"
+    if safe == "augmented_triad":
+        return "augmented"
+    if safe in {"sus2", "sus4"}:
+        return "suspended"
+    if safe == "dominant_7":
+        return "dominant"
+    if safe == "power_chord":
+        return "power"
+    return "extended_or_other"
+
+
+def harmonic_function_for_degree(degree: int | None, scale_type: str = "major") -> str:
+    if degree is None or not (1 <= int(degree) <= 7):
+        return "chromatic"
+    major = {1: "tonic", 2: "predominant", 3: "color", 4: "predominant", 5: "dominant", 6: "tonic/color", 7: "dominant/tension"}
+    minor = {1: "tonic", 2: "predominant/tension", 3: "color", 4: "predominant", 5: "dominant", 6: "color", 7: "dominant/color"}
+    return (minor if _analysis_scale_type(scale_type) == "natural_minor" else major).get(int(degree), "chromatic")
+
+
+def roman_numeral_for_chord(root_note: str, chord_type: str, key_root_note: str, scale_type: str = "major") -> str:
+    scale_kind = _analysis_scale_type(scale_type)
+    scale_notes = scale_pitch_classes(key_root_note, scale_kind)
+    root = normalize_note_name(root_note)
+    if root not in scale_notes:
+        return "chromatic"
+    degree = scale_notes.index(root) + 1
+    base_major = ["I", "II", "III", "IV", "V", "VI", "VII"]
+    base_minor = ["i", "ii°", "III", "iv", "v", "VI", "VII"]
+    quality = chord_quality_for_type(chord_type)
+    if scale_kind == "natural_minor":
+        numeral = base_minor[degree - 1]
+        if quality in {"major", "dominant", "augmented"}:
+            numeral = base_major[degree - 1]
+        elif quality == "minor":
+            numeral = base_major[degree - 1].lower()
+        elif quality == "diminished":
+            numeral = base_major[degree - 1].lower() + "°"
+    else:
+        numeral = base_major[degree - 1]
+        if quality == "minor":
+            numeral = numeral.lower()
+        elif quality == "diminished":
+            numeral = numeral.lower() + "°"
+    if chord_type in {"dominant_7", "major_7", "minor_7", "minor_major_7", "diminished_7", "half_diminished_7"}:
+        numeral += "7"
+    return numeral
+
+
+def scale_descriptor(root_note: str, scale_type: str, spelling_mode: str = "Auto") -> ScaleDescriptor:
+    safe_scale_type = _safe_scale_type(scale_type)
+    root = normalize_note_name(root_note)
+    meta = SCALE_TYPES[safe_scale_type]
+    pitch_classes = scale_pitch_classes(root, safe_scale_type)
+    descriptors = [interval_descriptor(note, root, spelling_mode) for note in pitch_classes]
+    interval_roles = [str(item["role"]) for item in descriptors]
+    stability, brightness, tension = _descriptor_scores(interval_roles)
+    return ScaleDescriptor(
+        root_note=root,
+        root_display=display_note_name(root, root_note, spelling_mode),
+        scale_type=safe_scale_type,
+        scale_label=str(meta["label"]),
+        pitch_classes=pitch_classes,
+        displayed_names=display_pitch_class_set(pitch_classes, root_note, spelling_mode),
+        degrees=list(range(1, len(pitch_classes) + 1)),
+        interval_roles=interval_roles,
+        mood_label=str(meta["description"]),
+        stability_score=stability,
+        brightness_score=brightness,
+        tension_score=tension,
+        description=str(meta["description"]),
+    )
+
+
+def chord_descriptor(
+    root_note: str,
+    chord_type: str,
+    key_root_note: str | None = None,
+    scale_type: str = "major",
+    spelling_mode: str = "Auto",
+) -> ChordDescriptor:
+    safe_chord_type = _safe_chord_type(chord_type)
+    root = normalize_note_name(root_note)
+    meta = CHORD_TYPES[safe_chord_type]
+    pitch_classes = chord_pitch_classes(root, safe_chord_type)
+    descriptors = [interval_descriptor(note, root, spelling_mode) for note in pitch_classes]
+    interval_roles = [str(item["role"]) for item in descriptors]
+    degrees = [chord_degree_for_note(note, root, safe_chord_type) or 1 for note in pitch_classes]
+    quality = chord_quality_for_type(safe_chord_type)
+    roman = roman_numeral_for_chord(root, safe_chord_type, key_root_note, scale_type) if key_root_note is not None else ""
+    function_degree = scale_degree_for_note(root, key_root_note, _analysis_scale_type(scale_type)) if key_root_note is not None else None
+    function = harmonic_function_for_degree(function_degree, scale_type)
+    stability, brightness, tension = _descriptor_scores(interval_roles, quality)
+    if roman == "chromatic":
+        tension = _clamp01(tension + 0.18)
+    return ChordDescriptor(
+        root_note=root,
+        root_display=display_note_name(root, root_note, spelling_mode),
+        chord_type=safe_chord_type,
+        chord_label=str(meta["label"]),
+        pitch_classes=pitch_classes,
+        displayed_names=display_pitch_class_set(pitch_classes, root_note, spelling_mode),
+        degrees=degrees,
+        interval_roles=interval_roles,
+        chord_quality=quality,
+        roman_numeral=roman,
+        harmonic_function=function,
+        stability_score=stability,
+        brightness_score=brightness,
+        tension_score=tension,
+        description=str(meta["description"]),
+    )
+
+
 def harmony_metadata_payload(
     root_note: str = "A",
     scale_type: str = "major",
     chord_type: str = "major_triad",
     spelling_mode: str = "Auto",
     created_at: str | None = None,
+    chord_root_note: str | None = None,
 ) -> Dict[str, object]:
     """Build a JSON-safe harmony metadata payload without exporting audio."""
     root = normalize_note_name(root_note)
-    safe_scale_type = str(scale_type or "major") if str(scale_type or "major") in SCALE_TYPES else "major"
-    safe_chord_type = str(chord_type or "major_triad") if str(chord_type or "major_triad") in CHORD_TYPES else "major_triad"
-    scale_notes = scale_pitch_classes(root, safe_scale_type)
-    chord_notes = chord_pitch_classes(root, safe_chord_type)
+    safe_scale_type = _safe_scale_type(scale_type)
+    safe_chord_type = _safe_chord_type(chord_type)
+    safe_spelling_mode = spelling_mode if spelling_mode in {"Auto", "Sharps", "Flats"} else "Auto"
+    chord_root_input = chord_root_note or root_note
+    chord_root = normalize_note_name(chord_root_input)
+    scale_info = scale_descriptor(root_note, safe_scale_type, safe_spelling_mode)
+    chord_info = chord_descriptor(chord_root_input, safe_chord_type, root_note, safe_scale_type, safe_spelling_mode)
+    scale_notes = scale_info.pitch_classes
+    chord_notes = chord_info.pitch_classes
     return {
         "schema": "wavetoy.harmony_metadata.v1",
         "created_at": created_at or _utc_now_iso(),
         "root_note": root,
-        "root_display": display_note_name(root, root_note, spelling_mode),
+        "root_display": scale_info.root_display,
         "scale_type": safe_scale_type,
-        "scale_label": str(SCALE_TYPES[safe_scale_type]["label"]),
+        "scale_label": scale_info.scale_label,
         "scale_pitch_classes": scale_notes,
-        "scale_displayed_names": display_pitch_class_set(scale_notes, root_note, spelling_mode),
+        "scale_displayed_names": scale_info.displayed_names,
+        "scale_descriptor": scale_info.to_json_dict(),
+        "chord_root_note": chord_root,
+        "chord_root_display": chord_info.root_display,
         "chord_type": safe_chord_type,
-        "chord_label": str(CHORD_TYPES[safe_chord_type]["label"]),
+        "chord_label": chord_info.chord_label,
         "chord_pitch_classes": chord_notes,
-        "chord_displayed_names": display_pitch_class_set(chord_notes, root_note, spelling_mode),
-        "spelling_mode": spelling_mode if spelling_mode in {"Auto", "Sharps", "Flats"} else "Auto",
+        "chord_displayed_names": chord_info.displayed_names,
+        "chord_descriptor": chord_info.to_json_dict(),
+        "spelling_mode": safe_spelling_mode,
         "asset_types_reserved": [
             HARMONY_ASSET_CATEGORY_SCALE_PATTERN,
             HARMONY_ASSET_CATEGORY_CHORD_PATTERN,
@@ -1474,6 +1707,7 @@ def harmony_metadata_state_from_payload(payload: object) -> Dict[str, str]:
     root_note = normalize_note_name(str(payload.get("root_note") or payload.get("root_display") or "A"))
     scale_type = str(payload.get("scale_type") or "major")
     chord_type = str(payload.get("chord_type") or "major_triad")
+    chord_root_note = normalize_note_name(str(payload.get("chord_root_note") or payload.get("chord_root_display") or root_note))
     spelling_mode = str(payload.get("spelling_mode") or "Auto")
     if scale_type not in SCALE_TYPES:
         raise ValueError(f"Unsupported scale type: {scale_type}")
@@ -1484,6 +1718,7 @@ def harmony_metadata_state_from_payload(payload: object) -> Dict[str, str]:
     return {
         "root_note": root_note,
         "scale_type": scale_type,
+        "chord_root_note": chord_root_note,
         "chord_type": chord_type,
         "spelling_mode": spelling_mode,
     }
@@ -7607,10 +7842,15 @@ class NoteWheelDialog(QDialog):
         self.harmony_chord_combo = NoWheelComboBox()
         for key, meta in CHORD_TYPES.items():
             self.harmony_chord_combo.addItem(str(meta["label"]), key)
-        wb_row.addWidget(QLabel("Root"))
+        self.harmony_chord_root_combo = NoWheelComboBox()
+        self.harmony_chord_root_combo.addItems(["C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb", "G", "G#", "Ab", "A", "A#", "Bb", "B"])
+        self.harmony_chord_root_combo.setCurrentText(normalize_note_name(selected_note))
+        wb_row.addWidget(QLabel("Key"))
         wb_row.addWidget(self.harmony_root_combo)
         wb_row.addWidget(QLabel("Scale"))
         wb_row.addWidget(self.harmony_scale_combo)
+        wb_row.addWidget(QLabel("Chord Root"))
+        wb_row.addWidget(self.harmony_chord_root_combo)
         wb_row.addWidget(QLabel("Chord"))
         wb_row.addWidget(self.harmony_chord_combo)
         wb_layout.addLayout(wb_row)
@@ -7648,6 +7888,7 @@ class NoteWheelDialog(QDialog):
         self.layout_mode_combo.currentTextChanged.connect(lambda mode: self.refresh_labels())
         self.harmony_root_combo.currentTextChanged.connect(lambda note: self.refresh_labels(main_note=note))
         self.harmony_scale_combo.currentIndexChanged.connect(lambda index: self.refresh_labels())
+        self.harmony_chord_root_combo.currentTextChanged.connect(lambda note: self.refresh_labels())
         self.harmony_chord_combo.currentIndexChanged.connect(lambda index: self.refresh_labels())
         self.highlight_scale_check.toggled.connect(lambda checked: self.refresh_labels())
         self.highlight_chord_check.toggled.connect(lambda checked: self.refresh_labels())
@@ -7692,11 +7933,15 @@ class NoteWheelDialog(QDialog):
         spelling_mode = self.spelling_mode_combo.currentText() if hasattr(self, "spelling_mode_combo") else "Auto"
         scale_type = self._current_scale_type()
         chord_type = self._current_chord_type()
+        chord_root_text = self.harmony_chord_root_combo.currentText() if hasattr(self, "harmony_chord_root_combo") else root_text
+        chord_root = normalize_note_name(chord_root_text)
         scale_notes = scale_pitch_classes(root, scale_type)
-        chord_notes = chord_pitch_classes(root, chord_type)
+        chord_notes = chord_pitch_classes(chord_root, chord_type)
         return {
             "root_text": root_text,
             "root": root,
+            "chord_root_text": chord_root_text,
+            "chord_root": chord_root,
             "spelling_mode": spelling_mode,
             "scale_type": scale_type if scale_type in SCALE_TYPES else "major",
             "chord_type": chord_type if chord_type in CHORD_TYPES else "major_triad",
@@ -7720,21 +7965,22 @@ class NoteWheelDialog(QDialog):
             return
         state = self._current_harmony_state()
         root = str(state["root"])
+        chord_root = str(state.get("chord_root", root))
         self.picker.set_main_note(root)
         self._refresh_harmony_highlights(state)
         spelling_mode = str(state["spelling_mode"])
         scale_type = str(state["scale_type"])
         chord_type = str(state["chord_type"])
-        scale_notes = list(state["scale_notes"])
-        chord_notes = list(state["chord_notes"])
-        scale_meta = SCALE_TYPES.get(scale_type, SCALE_TYPES["major"])
-        chord_meta = CHORD_TYPES.get(chord_type, CHORD_TYPES["major_triad"])
-        scale_display = " ".join(display_pitch_class_set(scale_notes, str(state["root_text"]), spelling_mode))
-        chord_display = " ".join(display_pitch_class_set(chord_notes, str(state["root_text"]), spelling_mode))
+        scale_info = scale_descriptor(str(state["root_text"]), scale_type, spelling_mode)
+        chord_info = chord_descriptor(str(state.get("chord_root_text", state["root_text"])), chord_type, root, scale_type, spelling_mode)
+        scale_notes = scale_info.pitch_classes
+        chord_notes = chord_info.pitch_classes
+        scale_display = " ".join(scale_info.displayed_names)
+        chord_display = " ".join(chord_info.displayed_names)
         selected = str(state["selected"])
         selected_display = display_note_name(selected, str(state["root_text"]), spelling_mode)
         scale_degree = scale_degree_for_note(selected, root, scale_type)
-        chord_degree = chord_degree_for_note(selected, root, chord_type)
+        chord_degree = chord_degree_for_note(selected, chord_root, chord_type)
         degree_bits = []
         if scale_degree is not None:
             degree_bits.append(f"scale degree {scale_degree} / {interval_theory_name(selected, root)}")
@@ -7742,10 +7988,15 @@ class NoteWheelDialog(QDialog):
             degree_bits.append(f"chord degree {chord_degree}")
         degree_text = f"{selected_display} is " + " • ".join(degree_bits) if degree_bits else f"{selected_display} is outside the current scale/chord."
         root_display = display_note_name(root, str(state["root_text"]), spelling_mode)
+        chord_root_display = chord_info.root_display
+        chord_roman = f"{chord_info.roman_numeral} • " if chord_info.roman_numeral else ""
+        selected_interval = interval_descriptor(selected, root, spelling_mode)
         self.harmony_summary_label.setText(
-            f"{root_display} {scale_meta['label']}: {scale_display} — {scale_meta['description']}\n"
-            f"{root_display} {chord_meta['label']}: {chord_display} — {chord_meta['description']}\n"
-            f"{degree_text}"
+            f"Scale: {root_display} {scale_info.scale_label} — {scale_display} — {scale_info.mood_label} • "
+            f"stability {scale_info.stability_score:.2f} • tension {scale_info.tension_score:.2f}\n"
+            f"Chord: {chord_root_display} {chord_info.chord_label} — {chord_display} — {chord_roman}"
+            f"{chord_info.harmonic_function} • {chord_info.description}\n"
+            f"Selected: {selected_display} — {degree_text} • {selected_interval['theory_name']} • {selected_interval['mood_label']}"
         )
 
     def _set_combo_data(self, combo: QComboBox, value: str) -> None:
@@ -7758,6 +8009,8 @@ class NoteWheelDialog(QDialog):
         root = normalize_note_name(state.get("root_note", "A"))
         self.spelling_mode_combo.setCurrentText(state.get("spelling_mode", "Auto"))
         self.harmony_root_combo.setCurrentText(root)
+        if hasattr(self, "harmony_chord_root_combo"):
+            self.harmony_chord_root_combo.setCurrentText(normalize_note_name(state.get("chord_root_note", root)))
         self._set_combo_data(self.harmony_scale_combo, state.get("scale_type", "major"))
         self._set_combo_data(self.harmony_chord_combo, state.get("chord_type", "major_triad"))
         self.picker.set_note(selected)
@@ -7779,6 +8032,7 @@ class NoteWheelDialog(QDialog):
             str(state["scale_type"]),
             str(state["chord_type"]),
             str(state["spelling_mode"]),
+            chord_root_note=str(state.get("chord_root_text", state["root_text"])),
         )
         try:
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -7823,6 +8077,8 @@ class NoteWheelDialog(QDialog):
         if target in {"scale", "chord", "arpeggio"}:
             mode = f"{target}:{self._current_scale_type() if target == 'scale' else self._current_chord_type()}"
             root = self.harmony_root_combo.currentText() if hasattr(self, "harmony_root_combo") else self.picker.main_note()
+            if target != "scale" and hasattr(self, "harmony_chord_root_combo"):
+                root = self.harmony_chord_root_combo.currentText()
             self.preview_callback(mode, normalize_note_name(root))
             return
         mode = self.interval_preview_combo.currentText() if target == "interval" and hasattr(self, "interval_preview_combo") else target

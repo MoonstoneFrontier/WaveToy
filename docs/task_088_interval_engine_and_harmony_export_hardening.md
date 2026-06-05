@@ -46,3 +46,7 @@ The reserved `ScalePatternAsset`, `ChordPatternAsset`, and `ChordProgressionAsse
 - No piano roll.
 - No project schema migration.
 - Harmony import/export remains metadata-only and does not export audio.
+
+## Task 089 descriptor export extension
+
+Task 089 keeps the Task 088 Harmony JSON schema string and adds optional descriptor fields rather than requiring a migration. Exports now include `scale_descriptor` and `chord_descriptor` JSON-safe objects, plus chord-root metadata for key-relative roman-numeral analysis. Import still validates the metadata schema and applies core state fields; descriptors are safe to recompute and do not contain audio.

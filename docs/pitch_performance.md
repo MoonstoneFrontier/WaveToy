@@ -68,3 +68,9 @@ WaveToy now treats interval-derived mood, emoji, relationship, theory name, and 
 Harmony JSON export/import remains metadata-only. Export appends `.json` when needed, uses readable JSON formatting, warns on write failures, and reports a success summary. Import validates the `wavetoy.harmony_metadata.v1` schema and applies root, scale, chord, and spelling mode without importing audio or changing project schema.
 
 Voice Range wording was re-audited: labels remain musical register descriptors, are frequency-derived where possible, and do not imply loudness, body size, gender, or biological identity.
+
+## Task 089 harmony descriptors
+
+Pitch-class helpers now include `ScaleDescriptor` and `ChordDescriptor` JSON-safe dataclasses. They extend interval descriptors with displayed names, degree lists, interval roles, chord quality, roman numerals, harmonic function, and heuristic stability/brightness/tension scores. The scores are intended for UI education and visualization only; they are not formal harmonic analysis.
+
+Known limitations remain intentionally narrow: no inversions, slash chords, secondary dominants, borrowed chords, modulation, progression editor, piano roll, or MIDI export.
