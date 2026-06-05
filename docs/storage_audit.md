@@ -33,3 +33,7 @@ WaveToy now has a persistent storage foundation rooted at `WaveToyData/` (or `WA
 - Legacy `phonemes/*.json`, `articulation_chain.json`, and `*.wave-toy*.json` sidecars remain readable/writable.
 - New library entries wrap payloads with metadata fields: `uuid`, `asset_type`, `name`, `description`, `tags`, `created_at`, `modified_at`, and `version`.
 - Raw audio is not embedded in JSON. Audio assets store source/export paths and sidecar metadata to avoid committing/generated binary data.
+
+## Task 092 WaveformAnalyses storage audit
+
+WaveformAnalyses assets are JSON metadata envelopes in the existing Speech Asset Library category. The analysis payload stores bounded summaries only, including reduced-footprint uint8 spectrogram previews, and must not include `audio_data`, `raw_audio`, full waveform sample arrays, or full spectrogram matrices. Source audio remains in memory or in its original referenced asset/path; analysis JSON can remain valid even when the source audio is unavailable.

@@ -159,6 +159,13 @@ def _safe_storage_name(name: str, fallback: str = "asset") -> str:
     return cleaned[:80] or fallback
 
 
+def waveform_analysis_asset_name(source_name: str) -> str:
+    """Return the standard Speech Asset Library display name for waveform analyses."""
+    cleaned = str(source_name or "Audio").strip() or "Audio"
+    prefix = "Waveform Analysis - "
+    return cleaned if cleaned.startswith(prefix) else f"{prefix}{cleaned}"
+
+
 def wavetoy_data_root() -> Path:
     """Return the cross-platform WaveToyData root, with a local override for tests/portable runs."""
     override = os.environ.get("WAVETOY_DATA_DIR")
@@ -849,6 +856,94 @@ class PerformanceAsset:
             created_at=_utc_now_iso() if fresh_uuid else str(data.get("created_at") or _utc_now_iso()),
             modified_at=_utc_now_iso(),
             version=max(2, int(data.get("version", 2) or 2)),
+        )
+
+
+
+
+@dataclass
+class WaveformAnalysisRecord:
+    """Compact metadata-only waveform analysis asset for Speech Asset Library storage."""
+
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Untitled Waveform Analysis"
+    source_kind: str = "unknown"
+    source_path: str | None = None
+    sample_rate: int = SAMPLE_RATE
+    duration_seconds: float = 0.0
+    channel_count: int = 0
+    peak: float = 0.0
+    rms: float = 0.0
+    dc_offset: float = 0.0
+    zero_crossings: int = 0
+    estimated_pitch_hz: float | None = None
+    energy_summary: Dict[str, object] = field(default_factory=dict)
+    spectrogram_summary: Dict[str, object] = field(default_factory=dict)
+    selection_start_seconds: float = 0.0
+    selection_end_seconds: float = 0.0
+    notes: str = ""
+    created_at: str = field(default_factory=_utc_now_iso)
+    modified_at: str = field(default_factory=_utc_now_iso)
+
+    def to_json_dict(self) -> Dict[str, object]:
+        return {
+            "uuid": self.uuid,
+            "name": self.name,
+            "source_kind": self.source_kind,
+            "source_path": self.source_path,
+            "sample_rate": int(self.sample_rate),
+            "duration_seconds": _json_safe_float(self.duration_seconds),
+            "channel_count": int(self.channel_count),
+            "peak": _json_safe_float(self.peak),
+            "rms": _json_safe_float(self.rms),
+            "dc_offset": _json_safe_float(self.dc_offset),
+            "zero_crossings": int(self.zero_crossings),
+            "estimated_pitch_hz": _json_safe_float(self.estimated_pitch_hz) if self.estimated_pitch_hz is not None else None,
+            "energy_summary": dict(self.energy_summary or {}),
+            "spectrogram_summary": dict(self.spectrogram_summary or {}),
+            "selection_start_seconds": _json_safe_float(self.selection_start_seconds),
+            "selection_end_seconds": _json_safe_float(self.selection_end_seconds),
+            "notes": self.notes,
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+        }
+
+    @classmethod
+    def from_audio(
+        cls,
+        audio: np.ndarray,
+        sample_rate: int,
+        *,
+        name: str = "Waveform Analysis",
+        source_kind: str = "generated",
+        source_path: str | None = None,
+        selection_start_seconds: float = 0.0,
+        selection_end_seconds: float | None = None,
+        notes: str = "",
+    ) -> "WaveformAnalysisRecord":
+        arr = np.asarray(audio, dtype=np.float32) if audio is not None else np.zeros(0, dtype=np.float32)
+        total_samples = int(arr.shape[0]) if arr.ndim >= 1 else 0
+        sr = max(1, int(sample_rate or SAMPLE_RATE))
+        duration = total_samples / float(sr)
+        selection_end = duration if selection_end_seconds is None else float(selection_end_seconds)
+        stats = selection_audio_stats(arr, sr, selection_start_seconds, selection_end)
+        return cls(
+            name=waveform_analysis_asset_name(str(name or "Audio")),
+            source_kind=str(source_kind or "unknown"),
+            source_path=source_path,
+            sample_rate=sr,
+            duration_seconds=duration,
+            channel_count=int(arr.shape[1]) if arr.ndim == 2 else (1 if total_samples else 0),
+            peak=float(stats["peak"]),
+            rms=float(stats["rms"]),
+            dc_offset=float(stats["dc_offset"]),
+            zero_crossings=int(stats["zero_crossings"]),
+            estimated_pitch_hz=stats["estimated_pitch_hz"],
+            energy_summary=short_time_energy(arr, sr, 20.0, 10.0),
+            spectrogram_summary=simple_spectrogram(arr, sr, 25.0, 12.5),
+            selection_start_seconds=float(stats["start_seconds"]),
+            selection_end_seconds=float(stats["end_seconds"]),
+            notes=str(notes or ""),
         )
 
 
@@ -5080,6 +5175,241 @@ class SvgTimelineWaveformRenderer(TimelineWaveformRenderer):
         RasterTimelineWaveformRenderer().draw_waveform(painter, rect, clip, color)
 
 
+
+
+class WaveformAnalysisEngine:
+    """NumPy-only waveform analysis engine kept independent from inspector UI widgets."""
+
+    MAX_AUTOCORRELATION_SECONDS = 0.35
+    MAX_SPECTROGRAM_FRAMES = 32
+    MAX_SPECTROGRAM_BANDS = 16
+    MAX_ENERGY_PREVIEW_BUCKETS = 64
+
+    @staticmethod
+    def mono(audio: np.ndarray) -> np.ndarray:
+        """Return a copy-like mono float32 analysis view without mutating source audio."""
+        if audio is None:
+            return np.zeros(0, dtype=np.float32)
+        arr = np.asarray(audio, dtype=np.float32)
+        if arr.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        if arr.ndim == 1:
+            mono = arr
+        elif arr.ndim == 2:
+            mono = np.mean(arr, axis=1)
+        else:
+            mono = np.ravel(arr)
+        return np.nan_to_num(mono.astype(np.float32, copy=True), nan=0.0, posinf=0.0, neginf=0.0)
+
+    @staticmethod
+    def json_safe_float(value: float, default: float = 0.0) -> float:
+        value = float(value)
+        return value if math.isfinite(value) else float(default)
+
+    @staticmethod
+    def audio_hash(audio: np.ndarray, sample_rate: int) -> str:
+        """Return a stable content hash for analysis-cache invalidation."""
+        arr = np.asarray(audio, dtype=np.float32) if audio is not None else np.zeros(0, dtype=np.float32)
+        contiguous = np.ascontiguousarray(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0))
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(str(int(sample_rate or SAMPLE_RATE)).encode("ascii"))
+        digest.update(str(tuple(contiguous.shape)).encode("ascii"))
+        digest.update(contiguous.tobytes())
+        return digest.hexdigest()
+
+    def peak_series(self, audio: np.ndarray, samples_per_bucket: int) -> List[float]:
+        mono = self.mono(audio)
+        bucket = max(1, int(samples_per_bucket or 1))
+        if mono.size == 0:
+            return []
+        return [self.json_safe_float(np.max(np.abs(mono[i:i + bucket]))) for i in range(0, len(mono), bucket)]
+
+    def rms_series(self, audio: np.ndarray, samples_per_bucket: int) -> List[float]:
+        mono = self.mono(audio)
+        bucket = max(1, int(samples_per_bucket or 1))
+        if mono.size == 0:
+            return []
+        return [self.json_safe_float(math.sqrt(float(np.mean(np.square(mono[i:i + bucket]))))) for i in range(0, len(mono), bucket)]
+
+    def zero_crossings(self, audio: np.ndarray) -> int:
+        mono = self.mono(audio)
+        if mono.size < 2:
+            return 0
+        signs = np.signbit(mono)
+        return int(np.count_nonzero(signs[1:] != signs[:-1]))
+
+    def estimate_pitch(self, audio: np.ndarray, sample_rate: int) -> float | None:
+        mono = self.mono(audio)
+        sr = max(1, int(sample_rate or SAMPLE_RATE))
+        if mono.size < max(32, int(sr * 0.02)):
+            return None
+        max_samples = max(32, int(sr * self.MAX_AUTOCORRELATION_SECONDS))
+        mono = mono[:max_samples]
+        mono = mono - float(np.mean(mono))
+        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        if peak < 1e-5:
+            return None
+        window = np.hanning(len(mono)).astype(np.float32)
+        corr = np.correlate(mono * window, mono * window, mode="full")[len(mono) - 1:]
+        if corr.size == 0 or corr[0] <= 1e-10:
+            return None
+        min_lag = max(1, int(sr / 1200.0))
+        max_lag = min(len(corr) - 1, int(sr / 50.0))
+        if max_lag <= min_lag:
+            return None
+        search = corr[min_lag:max_lag + 1]
+        lag = int(np.argmax(search)) + min_lag
+        confidence = float(corr[lag] / corr[0]) if corr[0] else 0.0
+        if confidence < 0.18:
+            return None
+        return self.json_safe_float(sr / float(lag))
+
+    def short_time_energy(self, audio: np.ndarray, sample_rate: int, frame_ms: float, hop_ms: float) -> Dict[str, object]:
+        mono = self.mono(audio)
+        sr = max(1, int(sample_rate or SAMPLE_RATE))
+        frame = max(1, int(round(sr * float(frame_ms or 20.0) / 1000.0)))
+        hop = max(1, int(round(sr * float(hop_ms or frame_ms or 10.0) / 1000.0)))
+        if mono.size == 0:
+            return {"frame_ms": float(frame_ms), "hop_ms": float(hop_ms), "frame_count": 0, "min": 0.0, "max": 0.0, "mean": 0.0, "preview": []}
+        values = []
+        for start in range(0, max(1, len(mono) - frame + 1), hop):
+            chunk = mono[start:start + frame]
+            if chunk.size:
+                values.append(self.json_safe_float(float(np.mean(np.square(chunk)))))
+        arr = np.asarray(values, dtype=np.float32)
+        preview_count = min(self.MAX_ENERGY_PREVIEW_BUCKETS, len(values))
+        if len(values) > preview_count and preview_count > 0:
+            preview = [self.json_safe_float(float(np.mean(chunk))) for chunk in np.array_split(arr, preview_count)]
+        else:
+            preview = [self.json_safe_float(v) for v in values]
+        return {
+            "frame_ms": float(frame_ms),
+            "hop_ms": float(hop_ms),
+            "frame_count": int(len(values)),
+            "min": self.json_safe_float(float(np.min(arr))) if arr.size else 0.0,
+            "max": self.json_safe_float(float(np.max(arr))) if arr.size else 0.0,
+            "mean": self.json_safe_float(float(np.mean(arr))) if arr.size else 0.0,
+            "preview": preview,
+        }
+
+    def spectrogram(self, audio: np.ndarray, sample_rate: int, frame_ms: float, hop_ms: float) -> Dict[str, object]:
+        mono = self.mono(audio)
+        sr = max(1, int(sample_rate or SAMPLE_RATE))
+        frame = max(16, int(round(sr * float(frame_ms or 25.0) / 1000.0)))
+        hop = max(1, int(round(sr * float(hop_ms or 10.0) / 1000.0)))
+        if mono.size == 0:
+            return {"frame_ms": float(frame_ms), "hop_ms": float(hop_ms), "source_frame_count": 0, "preview_frame_count": 0, "frequency_band_count": 0, "preview": [], "peak_frequency_hz": None, "max_magnitude": 0.0, "preview_encoding": "uint8_normalized"}
+        rows = []
+        peak_freq = None
+        max_mag = 0.0
+        window = np.hanning(frame).astype(np.float32)
+        for start in range(0, max(1, len(mono) - frame + 1), hop):
+            chunk = mono[start:start + frame]
+            if chunk.size < frame:
+                chunk = np.pad(chunk, (0, frame - chunk.size))
+            spectrum = np.abs(np.fft.rfft(chunk * window))
+            if spectrum.size:
+                idx = int(np.argmax(spectrum))
+                mag = float(spectrum[idx])
+                if mag > max_mag:
+                    max_mag = mag
+                    peak_freq = idx * sr / float(frame)
+                bands = np.array_split(spectrum, min(self.MAX_SPECTROGRAM_BANDS, spectrum.size))
+                rows.append([float(np.mean(band)) for band in bands])
+        source_frame_count = len(rows)
+        if source_frame_count > self.MAX_SPECTROGRAM_FRAMES:
+            rows = [[float(np.mean(col)) for col in zip(*group)] for group in np.array_split(np.asarray(rows, dtype=np.float32), self.MAX_SPECTROGRAM_FRAMES)]
+        if rows and max_mag > 1e-12:
+            preview = [[int(np.clip(round((value / max_mag) * 255.0), 0, 255)) for value in row] for row in rows]
+        else:
+            preview = [[0 for _ in row] for row in rows]
+        return {
+            "frame_ms": float(frame_ms),
+            "hop_ms": float(hop_ms),
+            "source_frame_count": int(source_frame_count),
+            "preview_frame_count": int(len(preview)),
+            "frequency_band_count": int(len(preview[0]) if preview else 0),
+            "preview": preview,
+            "peak_frequency_hz": self.json_safe_float(peak_freq) if peak_freq is not None else None,
+            "max_magnitude": self.json_safe_float(max_mag),
+            "preview_encoding": "uint8_normalized",
+        }
+
+    def selection_stats(self, audio: np.ndarray, sample_rate: int, start_seconds: float, end_seconds: float) -> Dict[str, object]:
+        arr = np.asarray(audio, dtype=np.float32) if audio is not None else np.zeros(0, dtype=np.float32)
+        total_samples = int(arr.shape[0]) if arr.ndim >= 1 else 0
+        sr = max(1, int(sample_rate or SAMPLE_RATE))
+        duration = total_samples / float(sr)
+        start = self.json_safe_float(start_seconds)
+        end = self.json_safe_float(end_seconds)
+        if end <= start:
+            start, end = 0.0, duration
+        start = float(np.clip(start, 0.0, duration))
+        end = float(np.clip(end, start, duration))
+        start_sample = int(round(start * sr))
+        end_sample = int(round(end * sr))
+        segment = arr[start_sample:end_sample] if total_samples else np.zeros(0, dtype=np.float32)
+        mono = self.mono(segment)
+        peak = self.json_safe_float(float(np.max(np.abs(mono)))) if mono.size else 0.0
+        rms = self.json_safe_float(math.sqrt(float(np.mean(np.square(mono))))) if mono.size else 0.0
+        dc = self.json_safe_float(float(np.mean(mono))) if mono.size else 0.0
+        pitch = self.estimate_pitch(mono, sr)
+        return {
+            "start_seconds": self.json_safe_float(start),
+            "end_seconds": self.json_safe_float(end),
+            "duration_seconds": self.json_safe_float(max(0.0, end - start)),
+            "sample_count": int(len(mono)),
+            "channel_count": int(arr.shape[1]) if arr.ndim == 2 else (1 if total_samples else 0),
+            "peak": peak,
+            "rms": rms,
+            "dc_offset": dc,
+            "zero_crossings": self.zero_crossings(mono),
+            "estimated_pitch_hz": pitch,
+        }
+
+
+WAVEFORM_ANALYSIS_ENGINE = WaveformAnalysisEngine()
+
+
+def _analysis_mono(audio: np.ndarray) -> np.ndarray:
+    return WAVEFORM_ANALYSIS_ENGINE.mono(audio)
+
+
+def _json_safe_float(value: float, default: float = 0.0) -> float:
+    return WAVEFORM_ANALYSIS_ENGINE.json_safe_float(value, default)
+
+
+def waveform_audio_hash(audio: np.ndarray, sample_rate: int) -> str:
+    return WAVEFORM_ANALYSIS_ENGINE.audio_hash(audio, sample_rate)
+
+
+def waveform_peak_series(audio: np.ndarray, samples_per_bucket: int) -> List[float]:
+    return WAVEFORM_ANALYSIS_ENGINE.peak_series(audio, samples_per_bucket)
+
+
+def waveform_rms_series(audio: np.ndarray, samples_per_bucket: int) -> List[float]:
+    return WAVEFORM_ANALYSIS_ENGINE.rms_series(audio, samples_per_bucket)
+
+
+def zero_crossing_count(audio: np.ndarray) -> int:
+    return WAVEFORM_ANALYSIS_ENGINE.zero_crossings(audio)
+
+
+def estimate_pitch_autocorrelation(audio: np.ndarray, sample_rate: int) -> float | None:
+    return WAVEFORM_ANALYSIS_ENGINE.estimate_pitch(audio, sample_rate)
+
+
+def short_time_energy(audio: np.ndarray, sample_rate: int, frame_ms: float, hop_ms: float) -> Dict[str, object]:
+    return WAVEFORM_ANALYSIS_ENGINE.short_time_energy(audio, sample_rate, frame_ms, hop_ms)
+
+
+def simple_spectrogram(audio: np.ndarray, sample_rate: int, frame_ms: float, hop_ms: float) -> Dict[str, object]:
+    return WAVEFORM_ANALYSIS_ENGINE.spectrogram(audio, sample_rate, frame_ms, hop_ms)
+
+
+def selection_audio_stats(audio: np.ndarray, sample_rate: int, start_seconds: float, end_seconds: float) -> Dict[str, object]:
+    return WAVEFORM_ANALYSIS_ENGINE.selection_stats(audio, sample_rate, start_seconds, end_seconds)
+
 def compute_waveform_peaks(audio: np.ndarray, bins: int = 36) -> List[float]:
     audio = _ensure_stereo_float(audio)
     if audio.size == 0:
@@ -9213,6 +9543,157 @@ class ArticulationWaveformDiagnosticsCanvas(QWidget):
         painter.end()
 
 
+
+
+class WaveformAnalysisCanvas(QWidget):
+    """Reusable compact waveform inspector canvas with selection and zoom."""
+
+    selectionChanged = Signal(float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.audio = np.zeros((0, 2), dtype=np.float32)
+        self.sample_rate = SAMPLE_RATE
+        self.playhead_seconds: float | None = None
+        self.selection_start_seconds = 0.0
+        self.selection_end_seconds = 0.0
+        self.zoom = 1.0
+        self._dragging = False
+        self.setMinimumHeight(220)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CrossCursor)
+        self.setToolTip("Drag to select a region. Use zoom controls to inspect generated or imported audio.")
+
+    def set_audio(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE, playhead_seconds: float | None = None) -> None:
+        self.audio = np.asarray(audio, dtype=np.float32).copy() if audio is not None and audio.size else np.zeros((0, 2), dtype=np.float32)
+        self.sample_rate = max(1, int(sample_rate or SAMPLE_RATE))
+        self.playhead_seconds = playhead_seconds
+        duration = self.duration_seconds()
+        self.selection_start_seconds = 0.0
+        self.selection_end_seconds = duration
+        self.update()
+        self.selectionChanged.emit(self.selection_start_seconds, self.selection_end_seconds)
+
+    def duration_seconds(self) -> float:
+        return (len(self.audio) / float(self.sample_rate)) if self.audio.size else 0.0
+
+    def selection(self) -> Tuple[float, float]:
+        start = min(self.selection_start_seconds, self.selection_end_seconds)
+        end = max(self.selection_start_seconds, self.selection_end_seconds)
+        return start, end
+
+    def set_zoom(self, zoom: float) -> None:
+        self.zoom = float(np.clip(zoom, 1.0, 16.0))
+        self.update()
+
+    def fit_to_audio(self) -> None:
+        self.zoom = 1.0
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(50, 28, -18, -34)
+
+    def _visible_duration(self) -> float:
+        return max(0.001, self.duration_seconds() / self.zoom)
+
+    def _x_for_time(self, seconds: float) -> float:
+        plot = self._plot_rect()
+        return plot.left() + float(np.clip(seconds, 0.0, self._visible_duration())) / self._visible_duration() * plot.width()
+
+    def _time_for_x(self, x: float) -> float:
+        plot = self._plot_rect()
+        ratio = (float(x) - plot.left()) / max(1.0, plot.width())
+        return float(np.clip(ratio, 0.0, 1.0) * self._visible_duration())
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        self._dragging = True
+        t = self._time_for_x(float(pos.x()))
+        self.selection_start_seconds = t
+        self.selection_end_seconds = t
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self._dragging:
+            return
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        self.selection_end_seconds = self._time_for_x(float(pos.x()))
+        self.update()
+        start, end = self.selection()
+        self.selectionChanged.emit(start, end)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        if self._dragging:
+            self._dragging = False
+            start, end = self.selection()
+            if abs(end - start) < 0.001:
+                end = self.duration_seconds()
+                start = 0.0
+                self.selection_start_seconds = start
+                self.selection_end_seconds = end
+            self.selectionChanged.emit(start, end)
+            self.update()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override
+        delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        self.set_zoom(self.zoom * (1.15 if delta > 0 else 1 / 1.15))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#101820"))
+        plot = self._plot_rect()
+        painter.setPen(QPen(QColor("#d7e3fc"), 1))
+        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        painter.drawText(QRectF(10, 4, self.width() - 20, 20), Qt.AlignLeft, "Waveform Envelope")
+        painter.setBrush(QColor("#16213e"))
+        painter.setPen(QPen(QColor("#284b63"), 1))
+        painter.drawRoundedRect(plot, 8, 8)
+        mid_y = plot.center().y()
+        painter.setPen(QPen(QColor("#8d99ae"), 1, Qt.DashLine))
+        painter.drawLine(QPointF(plot.left(), mid_y), QPointF(plot.right(), mid_y))
+        duration = self.duration_seconds()
+        if not self.audio.size or duration <= 0:
+            painter.setPen(QPen(QColor("#d7e3fc"), 1))
+            painter.drawText(plot, Qt.AlignCenter, "Render a phoneme/word or select an imported audio asset to inspect waveform statistics.")
+            painter.end()
+            return
+        mono = _analysis_mono(self.audio)
+        visible_samples = max(1, int(self._visible_duration() * self.sample_rate))
+        mono = mono[:visible_samples]
+        bins = max(80, min(1200, int(plot.width())))
+        bucket = max(1, int(math.ceil(len(mono) / bins)))
+        painter.setPen(QPen(QColor("#24d7ff"), 1))
+        for i in range(0, len(mono), bucket):
+            chunk = mono[i:i + bucket]
+            if not chunk.size:
+                continue
+            x = self._x_for_time(i / float(self.sample_rate))
+            y1 = mid_y - float(np.max(chunk)) * plot.height() * 0.46
+            y2 = mid_y - float(np.min(chunk)) * plot.height() * 0.46
+            painter.drawLine(QPointF(x, y1), QPointF(x, y2))
+        sel_start, sel_end = self.selection()
+        if sel_end > sel_start:
+            left = self._x_for_time(sel_start)
+            right = self._x_for_time(sel_end)
+            painter.fillRect(QRectF(left, plot.top(), max(1.0, right - left), plot.height()), QColor(255, 209, 102, 55))
+            painter.setPen(QPen(QColor("#ffd166"), 2))
+            painter.drawLine(QPointF(left, plot.top()), QPointF(left, plot.bottom()))
+            painter.drawLine(QPointF(right, plot.top()), QPointF(right, plot.bottom()))
+        if self.playhead_seconds is not None:
+            x = self._x_for_time(self.playhead_seconds)
+            painter.setPen(QPen(QColor("#ff006e"), 2))
+            painter.drawLine(QPointF(x, plot.top() - 5), QPointF(x, plot.bottom() + 5))
+        painter.setPen(QPen(QColor("#d7e3fc"), 1))
+        painter.setFont(QFont("Arial", 8))
+        painter.drawText(QRectF(plot.left(), plot.bottom() + 6, 80, 18), Qt.AlignLeft, "0.000s")
+        painter.drawText(QRectF(plot.right() - 100, plot.bottom() + 6, 100, 18), Qt.AlignRight, f"{duration:.3f}s")
+        painter.drawText(QRectF(plot.center().x() - 60, plot.bottom() + 6, 120, 18), Qt.AlignCenter, f"zoom {self.zoom:.1f}×")
+        painter.end()
+
+
 class GraphicalWaveLayerCanvas(QWidget):
     """Compact direct-manipulation editor for one mix layer's level envelope."""
 
@@ -9927,6 +10408,21 @@ class WaveToyWindow(QMainWindow):
         self.continuous_waveform_overlays_checkbox: QCheckBox | None = None
         self.continuous_formant_intensity_spin: QDoubleSpinBox | None = None
         self.continuous_pitch_smoothing_spin: QSpinBox | None = None
+        self.articulation_inspector_source_combo: QComboBox | None = None
+        self.articulation_inspector_canvas: WaveformAnalysisCanvas | None = None
+        self.articulation_inspector_stats_label: QLabel | None = None
+        self.articulation_inspector_pitch_label: QLabel | None = None
+        self.articulation_inspector_energy_label: QLabel | None = None
+        self.articulation_inspector_spectrogram_label: QLabel | None = None
+        self.articulation_inspector_status_label: QLabel | None = None
+        self.articulation_inspector_zoom = 1.0
+        self.articulation_inspector_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_inspector_sample_rate = SAMPLE_RATE
+        self.articulation_inspector_source_kind = "current_rendered_word"
+        self.articulation_inspector_source_path: str | None = None
+        self.articulation_inspector_source_name = "Current Rendered Word"
+        self.articulation_inspector_analysis: WaveformAnalysisRecord | None = None
+        self.articulation_inspector_analysis_cache_key: str | None = None
         self.cv_vc_search_edit: QLineEdit | None = None
         self.cv_vc_starts_with_combo: QComboBox | None = None
         self.cv_vc_contains_combo: QComboBox | None = None
@@ -12067,6 +12563,207 @@ class WaveToyWindow(QMainWindow):
         self._set_phoneme_drawer("vowels")
         self._select_vowel_preset("AH", play=False)
 
+
+    def _build_articulation_inspector_panel(self) -> QWidget:
+        """Build compact Articulation Inspector foundation for waveform analysis."""
+        card = self._toy_group("Articulation Inspector")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 18, 12, 12)
+        layout.setSpacing(8)
+        hint = QLabel("Inspect generated or imported speech audio without changing render defaults. Pitch and spectrogram views are lightweight debugging estimates, not scientific measurements.")
+        hint.setObjectName("symbolHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_row.addWidget(QLabel("Source"))
+        self.articulation_inspector_source_combo = QComboBox()
+        for label, key in (
+            ("Current Rendered Word", "current_rendered_word"),
+            ("Current Phoneme Preview", "current_phoneme_preview"),
+            ("Selected Speech Asset", "selected_speech_asset"),
+            ("Selected Imported WAV / Audio Asset", "selected_imported_wav"),
+            ("Current Timeline Mix", "current_timeline_mix"),
+        ):
+            self.articulation_inspector_source_combo.addItem(label, key)
+        self.articulation_inspector_source_combo.currentIndexChanged.connect(self._refresh_articulation_inspector)
+        source_row.addWidget(self.articulation_inspector_source_combo, 1)
+        for text, callback in (
+            ("Refresh", self._refresh_articulation_inspector),
+            ("− Zoom", lambda checked=False: self._zoom_articulation_inspector(1 / 1.35)),
+            ("+ Zoom", lambda checked=False: self._zoom_articulation_inspector(1.35)),
+            ("Fit", self._fit_articulation_inspector),
+        ):
+            button = QPushButton(text)
+            button.setObjectName("phonemeCardSecondaryAction")
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(callback)
+            source_row.addWidget(button)
+        layout.addLayout(source_row)
+
+        self.articulation_inspector_canvas = WaveformAnalysisCanvas()
+        self.articulation_inspector_canvas.selectionChanged.connect(self._articulation_inspector_selection_changed)
+        layout.addWidget(CollapsibleSection("Waveform", self.articulation_inspector_canvas, expanded=True))
+
+        self.articulation_inspector_stats_label = QLabel("Selection Statistics: refresh a source to begin.")
+        self.articulation_inspector_stats_label.setObjectName("symbolHint")
+        self.articulation_inspector_stats_label.setWordWrap(True)
+        layout.addWidget(CollapsibleSection("Selection Statistics", self.articulation_inspector_stats_label, expanded=True))
+
+        self.articulation_inspector_pitch_label = QLabel("Pitch Track: no estimate yet.")
+        self.articulation_inspector_pitch_label.setObjectName("symbolHint")
+        self.articulation_inspector_pitch_label.setWordWrap(True)
+        layout.addWidget(CollapsibleSection("Pitch Track", self.articulation_inspector_pitch_label, expanded=False))
+
+        self.articulation_inspector_energy_label = QLabel("Energy: no curve yet.")
+        self.articulation_inspector_energy_label.setObjectName("symbolHint")
+        self.articulation_inspector_energy_label.setWordWrap(True)
+        layout.addWidget(CollapsibleSection("Energy", self.articulation_inspector_energy_label, expanded=False))
+
+        self.articulation_inspector_spectrogram_label = QLabel("Spectrogram Preview: no summary yet.")
+        self.articulation_inspector_spectrogram_label.setObjectName("symbolHint")
+        self.articulation_inspector_spectrogram_label.setWordWrap(True)
+        layout.addWidget(CollapsibleSection("Spectrogram Preview", self.articulation_inspector_spectrogram_label, expanded=False))
+
+        save_box = QWidget()
+        save_layout = QVBoxLayout(save_box)
+        save_layout.setContentsMargins(0, 0, 0, 0)
+        save_row = QHBoxLayout()
+        save_button = QPushButton("Save Waveform Analysis")
+        save_button.setObjectName("phonemeCardPrimaryAction")
+        save_button.clicked.connect(self._save_current_waveform_analysis)
+        load_button = QPushButton("Load Analysis Metadata")
+        load_button.setObjectName("phonemeCardSecondaryAction")
+        load_button.clicked.connect(self._load_latest_waveform_analysis_metadata)
+        save_row.addWidget(save_button)
+        save_row.addWidget(load_button)
+        save_row.addStretch(1)
+        save_layout.addLayout(save_row)
+        self.articulation_inspector_status_label = QLabel("WaveformAnalyses assets store compact metadata only; raw audio stays in memory.")
+        self.articulation_inspector_status_label.setObjectName("symbolHint")
+        self.articulation_inspector_status_label.setWordWrap(True)
+        save_layout.addWidget(self.articulation_inspector_status_label)
+        layout.addWidget(CollapsibleSection("Save / Load Analysis", save_box, expanded=True))
+        QTimer.singleShot(0, self._refresh_articulation_inspector)
+        return card
+
+    def _articulation_inspector_source_key(self) -> str:
+        if self.articulation_inspector_source_combo is None:
+            return "current_rendered_word"
+        return str(self.articulation_inspector_source_combo.currentData() or "current_rendered_word")
+
+    def _articulation_inspector_source_audio(self) -> Tuple[np.ndarray, int, str, str, str | None]:
+        key = self._articulation_inspector_source_key()
+        if key == "current_rendered_word" and self.articulation_word_render_audio.size:
+            return np.array(self.articulation_word_render_audio, dtype=np.float32, copy=True), SAMPLE_RATE, key, "Current Rendered Word", str(self.articulation_last_word_render_path) if self.articulation_last_word_render_path else None
+        if key == "selected_speech_asset":
+            item = self._timeline_speech_item_by_id(self.timeline_selected_speech_item_id)
+            if item is not None:
+                audio, warning = self._speech_audio_for_item(item)
+                if warning and self.articulation_inspector_status_label is not None:
+                    self.articulation_inspector_status_label.setText(warning)
+                return audio, SAMPLE_RATE, key, item.name, item.audio_cache_path
+        if key == "selected_imported_wav":
+            item = self._timeline_palette_item_by_id(self.timeline_selected_palette_item_id)
+            if item is not None:
+                return np.array(item.audio_data, dtype=np.float32, copy=True), item.sample_rate, key, item.name, item.source_path
+        if key == "current_timeline_mix" and self.timeline_last_mix.size:
+            return np.array(self.timeline_last_mix, dtype=np.float32, copy=True), SAMPLE_RATE, key, "Current Timeline Mix", str(self.timeline_last_mix_path) if self.timeline_last_mix_path else None
+        if self.phoneme_preview_audio.size == 0:
+            self.phoneme_preview_audio = self._render_articulation_with_source(self.current_phoneme)
+        return np.array(self.phoneme_preview_audio, dtype=np.float32, copy=True), SAMPLE_RATE, "current_phoneme_preview", "Current Phoneme Preview", None
+
+    def _refresh_articulation_inspector(self, checked: bool = False) -> None:
+        del checked
+        audio, sample_rate, source_kind, source_name, source_path = self._articulation_inspector_source_audio()
+        self.articulation_inspector_audio = audio
+        self.articulation_inspector_sample_rate = sample_rate
+        self.articulation_inspector_source_kind = source_kind
+        self.articulation_inspector_source_name = source_name
+        self.articulation_inspector_source_path = source_path
+        cache_key = f"{source_kind}:{source_name}:{source_path}:{waveform_audio_hash(audio, sample_rate)}"
+        if cache_key != self.articulation_inspector_analysis_cache_key:
+            self.articulation_inspector_analysis = WaveformAnalysisRecord.from_audio(audio, sample_rate, name=source_name, source_kind=source_kind, source_path=source_path)
+            self.articulation_inspector_analysis_cache_key = cache_key
+        if self.articulation_inspector_canvas is not None:
+            self.articulation_inspector_canvas.set_audio(audio, sample_rate)
+            self.articulation_inspector_canvas.set_zoom(self.articulation_inspector_zoom)
+        self._update_articulation_inspector_labels()
+
+    def _articulation_inspector_selection_changed(self, start_seconds: float, end_seconds: float) -> None:
+        if self.articulation_inspector_analysis is not None:
+            self.articulation_inspector_analysis.selection_start_seconds = float(start_seconds)
+            self.articulation_inspector_analysis.selection_end_seconds = float(end_seconds)
+            self.articulation_inspector_analysis.modified_at = _utc_now_iso()
+        self._update_articulation_inspector_labels(start_seconds, end_seconds)
+
+    def _update_articulation_inspector_labels(self, start_seconds: float | None = None, end_seconds: float | None = None) -> None:
+        audio = self.articulation_inspector_audio
+        sr = self.articulation_inspector_sample_rate
+        duration = len(audio) / float(sr) if audio.size else 0.0
+        if start_seconds is None or end_seconds is None:
+            start_seconds, end_seconds = 0.0, duration
+        stats = selection_audio_stats(audio, sr, start_seconds, end_seconds)
+        pitch_text = "unvoiced/no stable estimate" if stats["estimated_pitch_hz"] is None else f"{float(stats['estimated_pitch_hz']):.1f} Hz"
+        if self.articulation_inspector_stats_label is not None:
+            self.articulation_inspector_stats_label.setText(
+                f"Source: {self.articulation_inspector_source_name} • start {stats['start_seconds']:.3f}s • end {stats['end_seconds']:.3f}s • duration {stats['duration_seconds']:.3f}s • peak {stats['peak']:.4f} • RMS {stats['rms']:.4f} • DC {stats['dc_offset']:.5f} • zero crossings {stats['zero_crossings']} • estimated pitch {pitch_text}"
+            )
+        analysis = self.articulation_inspector_analysis
+        if analysis is None:
+            return
+        if self.articulation_inspector_pitch_label is not None:
+            whole_pitch = "unvoiced/noisy" if analysis.estimated_pitch_hz is None else f"{analysis.estimated_pitch_hz:.1f} Hz"
+            self.articulation_inspector_pitch_label.setText(f"Basic autocorrelation pitch estimate: {whole_pitch}. This is a debugging overlay and can fail on fricatives, plosives, breath, noise, or polyphonic material.")
+        energy = analysis.energy_summary
+        if self.articulation_inspector_energy_label is not None:
+            preview = energy.get("preview", []) if isinstance(energy, dict) else []
+            self.articulation_inspector_energy_label.setText(f"Energy frames: {energy.get('frame_count', 0)} • mean {float(energy.get('mean', 0.0)):.6f} • max {float(energy.get('max', 0.0)):.6f} • preview buckets {len(preview)}")
+        spec = analysis.spectrogram_summary
+        if self.articulation_inspector_spectrogram_label is not None:
+            self.articulation_inspector_spectrogram_label.setText(f"Spectrogram preview: {spec.get('preview_frame_count', spec.get('frame_count', 0))} preview buckets × {spec.get('frequency_band_count', spec.get('frequency_bin_count', 0))} bands • strongest bin around {spec.get('peak_frequency_hz', None)} Hz. Preview is uint8-normalized and bounded for UI/storage safety.")
+        if self.articulation_inspector_status_label is not None:
+            raw_audio_keys = [key for key in analysis.to_json_dict().keys() if "audio" in key and key not in {"source_audio_path"}]
+            self.articulation_inspector_status_label.setText(f"Ready to save compact WaveformAnalyses metadata for {self.articulation_inspector_source_name}. Raw audio fields in payload: {raw_audio_keys or 'none'}.")
+
+    def _zoom_articulation_inspector(self, factor: float) -> None:
+        self.articulation_inspector_zoom = float(np.clip(self.articulation_inspector_zoom * factor, 1.0, 16.0))
+        if self.articulation_inspector_canvas is not None:
+            self.articulation_inspector_canvas.set_zoom(self.articulation_inspector_zoom)
+
+    def _fit_articulation_inspector(self, checked: bool = False) -> None:
+        del checked
+        self.articulation_inspector_zoom = 1.0
+        if self.articulation_inspector_canvas is not None:
+            self.articulation_inspector_canvas.fit_to_audio()
+
+    def _save_current_waveform_analysis(self, checked: bool = False) -> None:
+        del checked
+        if self.articulation_inspector_analysis is None:
+            self._refresh_articulation_inspector()
+        if self.articulation_inspector_analysis is None:
+            QMessageBox.information(self, "Waveform Analysis", "No waveform analysis is available to save yet.")
+            return
+        record = replace(self.articulation_inspector_analysis, modified_at=_utc_now_iso())
+        payload = record.to_json_dict()
+        self._save_library_asset("waveform_analysis", record.name, payload, description="Compact waveform analysis metadata; raw audio is not embedded.", tags=["analysis", record.source_kind], source_path=record.source_path)
+        self._refresh_asset_library_view()
+        if self.articulation_inspector_status_label is not None:
+            self.articulation_inspector_status_label.setText(f"Saved WaveformAnalyses metadata for {record.name}; raw audio was not stored in JSON.")
+
+    def _load_latest_waveform_analysis_metadata(self, checked: bool = False) -> None:
+        del checked
+        analyses = [(path, record) for path, record in self.storage.iter_assets() if record.asset_type == "waveform_analysis"]
+        if not analyses:
+            QMessageBox.information(self, "Waveform Analysis", "No saved WaveformAnalyses metadata was found yet.")
+            return
+        path, record = max(analyses, key=lambda item: item[1].modified_at)
+        if self.articulation_inspector_status_label is not None:
+            self.articulation_inspector_status_label.setText(f"Loaded metadata only: {record.name} from {path.name}. Source audio is not embedded and may be unavailable.")
+        if self.articulation_inspector_stats_label is not None:
+            self.articulation_inspector_stats_label.setText(json.dumps(record.payload, indent=2, ensure_ascii=False)[:1800])
+
     def _build_articulation_timeline_tab(self) -> None:
         if self.tabs is None:
             return
@@ -12216,6 +12913,7 @@ class WaveToyWindow(QMainWindow):
         render_primary_layout.addLayout(render_primary_buttons)
         render_primary_layout.addWidget(self.articulation_word_status_label)
         render_layout.addWidget(render_primary_card)
+        render_layout.addWidget(self._build_articulation_inspector_panel())
 
         render_settings_card = self._toy_group("Render Mode Settings")
         render_settings_layout = QVBoxLayout(render_settings_card)
@@ -13296,6 +13994,8 @@ class WaveToyWindow(QMainWindow):
         self._update_speech_diagnostics_panel(p)
         if regenerate:
             self.phoneme_preview_audio = self._render_articulation_with_source(p)
+            if self._articulation_inspector_source_key() == "current_phoneme_preview":
+                self._refresh_articulation_inspector()
 
     def _articulation_source_mode_changed(self) -> None:
         if self.articulation_source_combo is None:
@@ -16193,6 +16893,8 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_path = None
         self._update_articulation_word_status()
         self._update_articulation_waveform_diagnostics_canvas()
+        if self._articulation_inspector_source_key() == "current_rendered_word":
+            self._refresh_articulation_inspector()
         return self.articulation_word_render_audio
 
     def _create_articulation_word(self, checked: bool = False) -> np.ndarray:
