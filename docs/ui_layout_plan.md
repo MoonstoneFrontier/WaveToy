@@ -28,6 +28,15 @@ Active editors, graphics, and inspectors should receive more stretch than picker
 - Prefer horizontal split panels for picker + editor layouts.
 - Avoid pixel-perfect geometry dependencies in tests; prefer smoke tests and helper-policy checks.
 
-## Future TODO: Music Theory / Harmony
+## Music Theory / Harmony
 
-Harmony Workbench, pitch selection, interval education, and harmonic analysis are now dense enough to deserve their own layout follow-up. A future task may split those controls into a **Music Theory / Harmony** area with separate pages for note picking, scale/chord analysis, interval education, and export.
+The note-wheel Harmony Workbench now uses a **Music Theory** workflow area with internal subtabs:
+
+- **Notes** for the wheel, note picker, spelling controls, coloration, and selected-note mood.
+- **Intervals** for interval preview, interval mood, and teaching summaries.
+- **Scales** for key root, scale construction, highlighting, descriptors, and mode/degree expansion space.
+- **Chords** for chord root, chord construction, highlighting, quality, and inversion-ready summaries.
+- **Harmony Analysis** for roman numerals, harmonic functions, contextual scale/chord relationships, and descriptor reporting.
+- **Export** for Harmony JSON import/export and future progression export actions.
+
+Music Theory picker/list/library panels use the same compact sidebar policy: minimum `220` px, preferred `300` px, maximum `380` px. Keep primary editing actions near the top of each subtab and move educational detail below core controls. Future progression, cadence, songwriting, composition, harmonic movement, and ear-training features should prefer adding to these workflow pages instead of returning to a single giant vertical page.

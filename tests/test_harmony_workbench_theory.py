@@ -202,3 +202,54 @@ def test_harmony_export_payload_includes_descriptors():
     assert payload["chord_root_note"] == "E"
     assert payload["chord_descriptor"]["roman_numeral"] == "V7"
     assert payload["chord_descriptor"]["harmonic_function"] == "dominant"
+
+
+def test_music_theory_subtab_labels():
+    assert wave_toy.MUSIC_THEORY_SUBTAB_LABELS == (
+        "Notes",
+        "Intervals",
+        "Scales",
+        "Chords",
+        "Harmony Analysis",
+        "Export",
+    )
+
+
+def test_music_theory_sidebar_policy():
+    assert wave_toy.music_theory_picker_width_policy() == {
+        "minimum": 220,
+        "preferred": 300,
+        "maximum": 380,
+    }
+
+
+def test_harmony_layout_helpers():
+    class FakeSidebar:
+        def __init__(self):
+            self.minimum_width = None
+            self.maximum_width = None
+            self.resized_to = None
+            self.size_policy = None
+
+        def setMinimumWidth(self, width):
+            self.minimum_width = width
+
+        def setMaximumWidth(self, width):
+            self.maximum_width = width
+
+        def height(self):
+            return 144
+
+        def resize(self, width, height):
+            self.resized_to = (width, height)
+
+        def setSizePolicy(self, horizontal, vertical):
+            self.size_policy = (horizontal, vertical)
+
+    sidebar = FakeSidebar()
+    wave_toy.apply_music_theory_sidebar_width_policy(sidebar)
+
+    assert sidebar.minimum_width == 220
+    assert sidebar.maximum_width == 380
+    assert sidebar.resized_to == (300, 144)
+    assert sidebar.size_policy == (getattr(wave_toy.QSizePolicy, "Preferred", 0), getattr(wave_toy.QSizePolicy, "Expanding", 1))

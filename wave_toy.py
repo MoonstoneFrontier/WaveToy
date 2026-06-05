@@ -106,6 +106,10 @@ ARTICULATION_PICKER_MIN_WIDTH = 220
 ARTICULATION_PICKER_PREFERRED_WIDTH = 300
 ARTICULATION_PICKER_MAX_WIDTH = 380
 ARTICULATION_TIMELINE_SUBTAB_LABELS = ("Build", "Visual Timeline", "Render / Export", "Performance", "Advanced")
+MUSIC_THEORY_PICKER_MIN_WIDTH = 220
+MUSIC_THEORY_PICKER_PREFERRED_WIDTH = 300
+MUSIC_THEORY_PICKER_MAX_WIDTH = 380
+MUSIC_THEORY_SUBTAB_LABELS = ("Notes", "Intervals", "Scales", "Chords", "Harmony Analysis", "Export")
 
 
 def articulation_picker_width_policy() -> Dict[str, int]:
@@ -123,7 +127,25 @@ def apply_articulation_picker_sidebar_width_policy(widget: QWidget) -> None:
     widget.setMinimumWidth(widths["minimum"])
     widget.setMaximumWidth(widths["maximum"])
     widget.resize(widths["preferred"], widget.height())
-    widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+    widget.setSizePolicy(getattr(QSizePolicy, "Preferred", 0), getattr(QSizePolicy, "Expanding", 1))
+
+
+def music_theory_picker_width_policy() -> Dict[str, int]:
+    """Return compact sidebar widths for Music Theory picker/list/library panels."""
+    return {
+        "minimum": MUSIC_THEORY_PICKER_MIN_WIDTH,
+        "preferred": MUSIC_THEORY_PICKER_PREFERRED_WIDTH,
+        "maximum": MUSIC_THEORY_PICKER_MAX_WIDTH,
+    }
+
+
+def apply_music_theory_sidebar_width_policy(widget: QWidget) -> None:
+    """Keep Music Theory picker and future asset sidebars from dominating layouts."""
+    widths = music_theory_picker_width_policy()
+    widget.setMinimumWidth(widths["minimum"])
+    widget.setMaximumWidth(widths["maximum"])
+    widget.resize(widths["preferred"], widget.height())
+    widget.setSizePolicy(getattr(QSizePolicy, "Preferred", 0), getattr(QSizePolicy, "Expanding", 1))
 
 
 def _utc_now_iso() -> str:
@@ -7794,10 +7816,32 @@ class NoteWheelDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        helper = QLabel("Pick a note character. Colors show interval-relative mood; relationship hints compare each note to Home.")
+        helper = QLabel("Music Theory separates note picking, interval listening, scale/chord building, analysis, and export into focused workflows.")
         helper.setObjectName("subtitle")
         helper.setWordWrap(True)
         layout.addWidget(helper)
+
+        music_theory_box = QGroupBox("Music Theory")
+        music_theory_box.setObjectName("toyGroup")
+        music_theory_layout = QVBoxLayout(music_theory_box)
+        music_theory_layout.setContentsMargins(8, 8, 8, 8)
+        music_theory_layout.setSpacing(6)
+
+        self.music_theory_tabs = QTabWidget()
+        self.music_theory_tabs.setObjectName("musicTheoryTabs")
+        music_theory_layout.addWidget(self.music_theory_tabs)
+
+        notes_tab = QWidget()
+        notes_layout = QHBoxLayout(notes_tab)
+        notes_layout.setContentsMargins(8, 8, 8, 8)
+        notes_layout.setSpacing(10)
+
+        note_picker_panel = QWidget()
+        note_picker_panel.setObjectName("musicTheoryPickerPanel")
+        apply_music_theory_sidebar_width_policy(note_picker_panel)
+        note_picker_layout = QVBoxLayout(note_picker_panel)
+        note_picker_layout.setContentsMargins(0, 0, 0, 0)
+        note_picker_layout.setSpacing(6)
 
         spelling_row = QHBoxLayout()
         spelling_label = QLabel("Spelling")
@@ -7807,31 +7851,48 @@ class NoteWheelDialog(QDialog):
         self.spelling_mode_combo.setToolTip("Auto follows the selected base note/key; Sharps or Flats force one enharmonic spelling style.")
         spelling_row.addWidget(spelling_label)
         spelling_row.addWidget(self.spelling_mode_combo)
-        spelling_row.addSpacing(12)
+        note_picker_layout.addLayout(spelling_row)
+
+        layout_mode_row = QHBoxLayout()
         layout_label = QLabel("Wheel Layout")
         layout_label.setObjectName("tinyPitchLabel")
         self.layout_mode_combo = NoWheelComboBox()
         self.layout_mode_combo.addItems([NOTE_WHEEL_LAYOUT_INTERVALS, NOTE_WHEEL_LAYOUT_FIFTHS])
         self.layout_mode_combo.setToolTip("Intervals places Home at the top and moves chromatically; Circle of Fifths preserves fifth relationships.")
-        spelling_row.addWidget(layout_label)
-        spelling_row.addWidget(self.layout_mode_combo)
-        spelling_row.addStretch(1)
-        layout.addLayout(spelling_row)
+        layout_mode_row.addWidget(layout_label)
+        layout_mode_row.addWidget(self.layout_mode_combo)
+        note_picker_layout.addLayout(layout_mode_row)
 
         self.center_label = QLabel()
         self.center_label.setObjectName("symbolHint")
-        layout.addWidget(self.center_label)
-
-        self.picker = CircleOfFifthsNotePicker(accent_color)
-        self.picker.set_main_note(main_note)
-        self.picker.set_note(selected_note)
-        layout.addWidget(self.picker)
+        self.center_label.setWordWrap(True)
+        note_picker_layout.addWidget(self.center_label)
 
         self.selected_label = QLabel()
         self.selected_label.setObjectName("symbolHint")
         self.selected_label.setWordWrap(True)
-        layout.addWidget(self.selected_label)
+        note_picker_layout.addWidget(self.selected_label)
+        note_picker_layout.addStretch(1)
 
+        self.picker = CircleOfFifthsNotePicker(accent_color)
+        self.picker.set_main_note(main_note)
+        self.picker.set_note(selected_note)
+        notes_layout.addWidget(note_picker_panel)
+        notes_layout.addWidget(self.picker, 1)
+        self.music_theory_tabs.addTab(notes_tab, MUSIC_THEORY_SUBTAB_LABELS[0])
+
+        intervals_tab = QWidget()
+        intervals_layout = QVBoxLayout(intervals_tab)
+        intervals_layout.setContentsMargins(8, 8, 8, 8)
+        intervals_layout.setSpacing(6)
+        interval_intro = QLabel("Learn how the selected note relates to Home through interval color, mood, and preview playback.")
+        interval_intro.setObjectName("subtitle")
+        interval_intro.setWordWrap(True)
+        intervals_layout.addWidget(interval_intro)
+        self.interval_summary_label = QLabel()
+        self.interval_summary_label.setObjectName("symbolHint")
+        self.interval_summary_label.setWordWrap(True)
+        intervals_layout.addWidget(self.interval_summary_label)
         preview_row = QHBoxLayout()
         self.interval_preview_combo = NoWheelComboBox()
         self.interval_preview_combo.addItems(["Melodic", "Harmonic"])
@@ -7847,64 +7908,116 @@ class NoteWheelDialog(QDialog):
         preview_row.addWidget(play_home_button)
         preview_row.addWidget(play_note_button)
         preview_row.addWidget(play_interval_button)
-        layout.addLayout(preview_row)
+        preview_row.addStretch(1)
+        intervals_layout.addLayout(preview_row)
+        intervals_layout.addStretch(1)
+        self.music_theory_tabs.addTab(intervals_tab, MUSIC_THEORY_SUBTAB_LABELS[1])
 
-        workbench = QGroupBox("Harmony Workbench")
-        workbench.setObjectName("toyGroup")
-        wb_layout = QVBoxLayout(workbench)
-        wb_layout.setContentsMargins(8, 8, 8, 8)
-        wb_layout.setSpacing(5)
-
-        wb_row = QHBoxLayout()
+        scales_tab = QWidget()
+        scales_layout = QVBoxLayout(scales_tab)
+        scales_layout.setContentsMargins(8, 8, 8, 8)
+        scales_layout.setSpacing(6)
+        scale_row = QHBoxLayout()
         self.harmony_root_combo = NoWheelComboBox()
         self.harmony_root_combo.addItems(["C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb", "G", "G#", "Ab", "A", "A#", "Bb", "B"])
         self.harmony_root_combo.setCurrentText(normalize_note_name(main_note))
         self.harmony_scale_combo = NoWheelComboBox()
         for key, meta in SCALE_TYPES.items():
             self.harmony_scale_combo.addItem(str(meta["label"]), key)
-        self.harmony_chord_combo = NoWheelComboBox()
-        for key, meta in CHORD_TYPES.items():
-            self.harmony_chord_combo.addItem(str(meta["label"]), key)
+        self.highlight_scale_check = QCheckBox("Highlight Scale")
+        play_scale_button = QPushButton("Play Scale")
+        play_scale_button.clicked.connect(lambda: self._request_preview("scale"))
+        scale_row.addWidget(QLabel("Key"))
+        scale_row.addWidget(self.harmony_root_combo)
+        scale_row.addWidget(QLabel("Scale"))
+        scale_row.addWidget(self.harmony_scale_combo)
+        scale_row.addWidget(self.highlight_scale_check)
+        scale_row.addWidget(play_scale_button)
+        scale_row.addStretch(1)
+        scales_layout.addLayout(scale_row)
+        self.scale_summary_label = QLabel()
+        self.scale_summary_label.setObjectName("symbolHint")
+        self.scale_summary_label.setWordWrap(True)
+        scales_layout.addWidget(self.scale_summary_label)
+        scale_detail = QLabel("Scale descriptors summarize degree roles, mood, stability, brightness, and tension without changing theory calculations.")
+        scale_detail.setObjectName("subtitle")
+        scale_detail.setWordWrap(True)
+        scales_layout.addWidget(scale_detail)
+        scales_layout.addStretch(1)
+        self.music_theory_tabs.addTab(scales_tab, MUSIC_THEORY_SUBTAB_LABELS[2])
+
+        chords_tab = QWidget()
+        chords_layout = QVBoxLayout(chords_tab)
+        chords_layout.setContentsMargins(8, 8, 8, 8)
+        chords_layout.setSpacing(6)
+        chord_row = QHBoxLayout()
         self.harmony_chord_root_combo = NoWheelComboBox()
         self.harmony_chord_root_combo.addItems(["C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb", "G", "G#", "Ab", "A", "A#", "Bb", "B"])
         self.harmony_chord_root_combo.setCurrentText(normalize_note_name(selected_note))
-        wb_row.addWidget(QLabel("Key"))
-        wb_row.addWidget(self.harmony_root_combo)
-        wb_row.addWidget(QLabel("Scale"))
-        wb_row.addWidget(self.harmony_scale_combo)
-        wb_row.addWidget(QLabel("Chord Root"))
-        wb_row.addWidget(self.harmony_chord_root_combo)
-        wb_row.addWidget(QLabel("Chord"))
-        wb_row.addWidget(self.harmony_chord_combo)
-        wb_layout.addLayout(wb_row)
-
-        wb_toggle_row = QHBoxLayout()
-        self.highlight_scale_check = QCheckBox("Highlight Scale")
+        self.harmony_chord_combo = NoWheelComboBox()
+        for key, meta in CHORD_TYPES.items():
+            self.harmony_chord_combo.addItem(str(meta["label"]), key)
         self.highlight_chord_check = QCheckBox("Highlight Chord")
-        play_scale_button = QPushButton("Play Scale")
         play_chord_button = QPushButton("Play Chord")
         play_arpeggio_button = QPushButton("Play Arpeggio")
-        import_harmony_button = QPushButton("Import Harmony JSON")
-        export_harmony_button = QPushButton("Export Harmony JSON")
-        play_scale_button.clicked.connect(lambda: self._request_preview("scale"))
         play_chord_button.clicked.connect(lambda: self._request_preview("chord"))
         play_arpeggio_button.clicked.connect(lambda: self._request_preview("arpeggio"))
-        import_harmony_button.clicked.connect(self._import_harmony_json)
-        export_harmony_button.clicked.connect(self._export_harmony_json)
-        wb_toggle_row.addWidget(self.highlight_scale_check)
-        wb_toggle_row.addWidget(self.highlight_chord_check)
-        wb_toggle_row.addWidget(play_scale_button)
-        wb_toggle_row.addWidget(play_chord_button)
-        wb_toggle_row.addWidget(play_arpeggio_button)
-        wb_toggle_row.addWidget(import_harmony_button)
-        wb_toggle_row.addWidget(export_harmony_button)
-        wb_layout.addLayout(wb_toggle_row)
+        chord_row.addWidget(QLabel("Chord Root"))
+        chord_row.addWidget(self.harmony_chord_root_combo)
+        chord_row.addWidget(QLabel("Chord"))
+        chord_row.addWidget(self.harmony_chord_combo)
+        chord_row.addWidget(self.highlight_chord_check)
+        chord_row.addWidget(play_chord_button)
+        chord_row.addWidget(play_arpeggio_button)
+        chord_row.addStretch(1)
+        chords_layout.addLayout(chord_row)
+        self.chord_summary_label = QLabel()
+        self.chord_summary_label.setObjectName("symbolHint")
+        self.chord_summary_label.setWordWrap(True)
+        chords_layout.addWidget(self.chord_summary_label)
+        chord_detail = QLabel("Chord descriptors keep quality, tone roles, inversion-ready summary space, and harmonic context together.")
+        chord_detail.setObjectName("subtitle")
+        chord_detail.setWordWrap(True)
+        chords_layout.addWidget(chord_detail)
+        chords_layout.addStretch(1)
+        self.music_theory_tabs.addTab(chords_tab, MUSIC_THEORY_SUBTAB_LABELS[3])
 
+        analysis_tab = QWidget()
+        analysis_layout = QVBoxLayout(analysis_tab)
+        analysis_layout.setContentsMargins(8, 8, 8, 8)
+        analysis_layout.setSpacing(6)
+        analysis_intro = QLabel("Contextual summaries combine the active key, scale, chord, selected note, roman numeral, and harmonic function.")
+        analysis_intro.setObjectName("subtitle")
+        analysis_intro.setWordWrap(True)
+        analysis_layout.addWidget(analysis_intro)
         self.harmony_summary_label = QLabel()
         self.harmony_summary_label.setObjectName("symbolHint")
         self.harmony_summary_label.setWordWrap(True)
-        wb_layout.addWidget(self.harmony_summary_label)
-        layout.addWidget(workbench)
+        analysis_layout.addWidget(self.harmony_summary_label)
+        analysis_layout.addStretch(1)
+        self.music_theory_tabs.addTab(analysis_tab, MUSIC_THEORY_SUBTAB_LABELS[4])
+
+        export_tab = QWidget()
+        export_layout = QVBoxLayout(export_tab)
+        export_layout.setContentsMargins(8, 8, 8, 8)
+        export_layout.setSpacing(6)
+        export_intro = QLabel("Export and import Harmony JSON metadata only; audio exports, project schema, and synthesis remain unchanged.")
+        export_intro.setObjectName("subtitle")
+        export_intro.setWordWrap(True)
+        export_layout.addWidget(export_intro)
+        export_row = QHBoxLayout()
+        import_harmony_button = QPushButton("Import Harmony JSON")
+        export_harmony_button = QPushButton("Export Harmony JSON")
+        import_harmony_button.clicked.connect(self._import_harmony_json)
+        export_harmony_button.clicked.connect(self._export_harmony_json)
+        export_row.addWidget(import_harmony_button)
+        export_row.addWidget(export_harmony_button)
+        export_row.addStretch(1)
+        export_layout.addLayout(export_row)
+        export_layout.addStretch(1)
+        self.music_theory_tabs.addTab(export_tab, MUSIC_THEORY_SUBTAB_LABELS[5])
+
+        layout.addWidget(music_theory_box)
 
         self.picker.noteSelected.connect(lambda note: self.refresh_labels(note, self.picker.main_note()))
         self.spelling_mode_combo.currentTextChanged.connect(lambda mode: self.refresh_labels())
@@ -8014,6 +8127,23 @@ class NoteWheelDialog(QDialog):
         chord_root_display = chord_info.root_display
         chord_roman = f"{chord_info.roman_numeral} • " if chord_info.roman_numeral else ""
         selected_interval = interval_descriptor(selected, root, spelling_mode)
+        if hasattr(self, "interval_summary_label"):
+            self.interval_summary_label.setText(
+                f"{selected_display} from {root_display}: {selected_interval['theory_name']} • "
+                f"{selected_interval['mood_label']} • {selected_interval['description']}"
+            )
+        if hasattr(self, "scale_summary_label"):
+            self.scale_summary_label.setText(
+                f"{root_display} {scale_info.scale_label}: {scale_display}\n"
+                f"{scale_info.mood_label} • stability {scale_info.stability_score:.2f} • "
+                f"tension {scale_info.tension_score:.2f} • brightness {scale_info.brightness_score:.2f}"
+            )
+        if hasattr(self, "chord_summary_label"):
+            self.chord_summary_label.setText(
+                f"{chord_root_display} {chord_info.chord_label}: {chord_display}\n"
+                f"Quality: {chord_info.chord_quality} • {chord_roman}{chord_info.harmonic_function} • "
+                f"{chord_info.description}"
+            )
         self.harmony_summary_label.setText(
             f"Scale: {root_display} {scale_info.scale_label} — {scale_display} — {scale_info.mood_label} • "
             f"stability {scale_info.stability_score:.2f} • tension {scale_info.tension_score:.2f}\n"
