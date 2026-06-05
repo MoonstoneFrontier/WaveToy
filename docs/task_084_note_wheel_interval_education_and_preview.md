@@ -66,3 +66,9 @@ Task 085 tightened live refresh behavior for the Task 084 controls. Visible whee
 ## Task 086 follow-up
 
 The note wheel preview system now also supports scale, chord, and arpeggio workbench previews. These still use the same in-memory preview path and do not write preview audio files.
+
+## Task 088 interval engine follow-up
+
+Interval education labels now flow through `interval_descriptor()`, which centralizes semitone distance, theory name, mood, relationship, emoji, color, and display spelling. This prevents stale labels when the same selected pitch class changes role under a different Home note.
+
+Auto spelling now uses `key_spelling_orientation()` to make the UI alias policy explicit: `A#`, `D#`, and `G#` may display as flat-oriented homes (`Bb`, `Eb`, `Ab`) for compatibility, while Sharps and Flats remain explicit overrides.

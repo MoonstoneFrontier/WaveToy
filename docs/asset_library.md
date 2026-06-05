@@ -54,3 +54,7 @@ Loading a performance asset replaces the current performance tracks with a fresh
 WaveToy now reserves lightweight JSON-safe shapes for future harmony assets: `scale_pattern`, `chord_pattern`, and `chord_progression`. Each reserved shape carries `uuid`, `name`, `root_note`, `spelling_mode`, `scale_type`, `chord_type`, `chord_steps`, `tags`, `notes`, `created_at`, and `modified_at`.
 
 These foundations do not yet add Asset Library CRUD integration or a project-schema migration. The Harmony Workbench metadata export is separate from audio export and writes only root, scale, chord, pitch-class, displayed-name, spelling, and timestamp metadata.
+
+## Task 088 reserved harmony asset cleanup
+
+Reserved harmony asset dataclasses now share common JSON-safe fields through `HarmonyAssetBase` while preserving the public `ScalePatternAsset`, `ChordPatternAsset`, and `ChordProgressionAsset` class names. This reduces duplication for future scale, chord, and progression assets without implementing Asset Library CRUD, MIDI export, piano roll editing, or a project schema migration.
