@@ -211,6 +211,12 @@ def test_picker_interval_status_is_compact(qapp):
     assert status["color"] == wave_toy.interval_color("C#", "A")
 
 
+def test_note_wheel_dialog_refresh_labels_uses_available_interval_relationship(qapp):
+    dialog = wave_toy.NoteWheelDialog("sine", "C#", wave_toy.QColor("#66ccff"), "A")
+
+    dialog.refresh_labels("C#", "A")
+
+
 def test_note_picker_selected_descriptor_uses_scale_and_interval_context():
     scale = wave_toy.scale_descriptor("A", "major", "Auto")
     selected = wave_toy.interval_descriptor("C#", "A", "Auto")

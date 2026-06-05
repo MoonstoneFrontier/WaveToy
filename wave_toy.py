@@ -8127,10 +8127,14 @@ class NoteWheelDialog(QDialog):
         chord_root_display = chord_info.root_display
         chord_roman = f"{chord_info.roman_numeral} • " if chord_info.roman_numeral else ""
         selected_interval = interval_descriptor(selected, root, spelling_mode)
+        selected_relationship = selected_interval.get(
+            "relationship_label",
+            selected_interval.get("relationship", ""),
+        )
         if hasattr(self, "interval_summary_label"):
             self.interval_summary_label.setText(
                 f"{selected_display} from {root_display}: {selected_interval['theory_name']} • "
-                f"{selected_interval['mood_label']} • {selected_interval['description']}"
+                f"{selected_interval['mood_label']} • {selected_relationship}"
             )
         if hasattr(self, "scale_summary_label"):
             self.scale_summary_label.setText(
