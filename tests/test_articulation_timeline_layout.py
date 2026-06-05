@@ -39,7 +39,7 @@ def test_articulation_timeline_internal_subtab_labels_are_documented():
 
 def test_performance_timing_controls_are_discoverable_after_split():
     source = _source()
-    assert 'Tempo / Singing Preview moved to Timeline → Timing.' in source
+    assert 'Tempo / Singing Preview moved to Timeline → Timing / Performance.' in source
     assert 'Open Timing / Performance' in source
     assert 'def _show_articulation_timing_page' in source
     assert 'performance_shortcut.clicked.connect(self._show_articulation_timing_page)' in source
@@ -105,3 +105,15 @@ def test_timing_track_lanes_start_collapsed_to_reduce_scroll():
 def test_motion_canvas_can_expand_vertically():
     source = _source()
     assert 'self.articulation_motion_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)' in source
+
+
+def test_task_098_chain_cards_are_compact_and_contextual():
+    source = _source()
+    assert "UI_BUTTON_HEIGHT_COMPACT = 28" in source
+    assert "UI_CARD_PADDING_COMPACT = 8" in source
+    assert "card.setMinimumHeight(104)" in source
+    assert "button.setMinimumHeight(UI_BUTTON_HEIGHT_COMPACT)" in source
+    assert "Apply Current Wave to Selected" in source
+    assert "Apply Current Wave to Chain" in source
+    assert "Reset Selected Source" in source
+    assert "Reset Chain Sources" in source
