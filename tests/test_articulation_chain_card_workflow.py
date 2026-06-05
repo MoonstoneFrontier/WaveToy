@@ -11,6 +11,12 @@ except ImportError:
     import wave_toy
 
 
+
+def _patch_messagebox_yes_no(monkeypatch):
+    monkeypatch.setattr(wave_toy.QMessageBox, "Yes", 1, raising=False)
+    monkeypatch.setattr(wave_toy.QMessageBox, "No", 2, raising=False)
+
+
 def _phoneme(name="AH"):
     return wave_toy.ArticulationPhoneme.from_json_dict(
         wave_toy.VOWEL_PRESETS["AH"] | {"name": name, "voice_pitch": 220.0, "voice_strength": 0.65}
@@ -79,7 +85,7 @@ def test_applying_variation_to_one_chain_item_does_not_mutate_other_items():
     assert win.articulation_selected_chain_index == 0
 
 
-def test_reset_selected_and_whole_chain_source_workflows_remain_available():
+def test_reset_selected_and_whole_chain_source_workflows_remain_available(monkeypatch):
     win = _window_with_chain()
     win.apply_voice_wave_variation_to_chain_item(0, f"{wave_toy.ARTICULATION_SOURCE_MIX_WAVE}:Charles_up")
     win.apply_voice_wave_variation_to_chain_item(1, wave_toy.ARTICULATION_SOURCE_CURRENT)
@@ -89,8 +95,25 @@ def test_reset_selected_and_whole_chain_source_workflows_remain_available():
     assert win.articulation_chain_items[0].phoneme.source_mode == wave_toy.ARTICULATION_SOURCE_DEFAULT
     assert win.articulation_chain_items[1].phoneme.source_mode == wave_toy.ARTICULATION_SOURCE_CURRENT
 
+    _patch_messagebox_yes_no(monkeypatch)
+    monkeypatch.setattr(wave_toy.QMessageBox, "question", lambda *args: wave_toy.QMessageBox.Yes, raising=False)
+
     win._reset_whole_chain_source()
     assert all(item.phoneme.source_mode == wave_toy.ARTICULATION_SOURCE_DEFAULT for item in win.articulation_chain_items)
+
+
+def test_reset_whole_chain_source_cancel_keeps_existing_sources(monkeypatch):
+    win = _window_with_chain()
+    win.apply_voice_wave_variation_to_chain_item(0, f"{wave_toy.ARTICULATION_SOURCE_MIX_WAVE}:Charles_up")
+    win.apply_voice_wave_variation_to_chain_item(1, wave_toy.ARTICULATION_SOURCE_CURRENT)
+    _patch_messagebox_yes_no(monkeypatch)
+    monkeypatch.setattr(wave_toy.QMessageBox, "question", lambda *args: wave_toy.QMessageBox.No, raising=False)
+
+    win._reset_whole_chain_source()
+
+    assert win.articulation_chain_items[0].phoneme.source_mode == wave_toy.ARTICULATION_SOURCE_MIX_WAVE
+    assert win.articulation_chain_items[0].phoneme.source_wave_id == "Charles_up"
+    assert win.articulation_chain_items[1].phoneme.source_mode == wave_toy.ARTICULATION_SOURCE_CURRENT
 
 
 def test_selection_clamps_when_selected_card_is_deleted():

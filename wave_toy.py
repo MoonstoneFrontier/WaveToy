@@ -6838,6 +6838,106 @@ class CollapsibleSection(QWidget):
         self.toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         self.content.setVisible(checked)
 
+def _action_button_style(color: str, role: str) -> str:
+    """Compact shared action-button styling for app-wide workflow hierarchy."""
+    palettes = {
+        "primary": ("rgba(37, 99, 235, 0.92)", "#ffffff", "rgba(191, 219, 254, 0.92)", 10, 900),
+        "secondary": ("rgba(255, 255, 255, 0.90)", "#263238", "rgba(38, 50, 56, 0.18)", 8, 800),
+        "transport": ("rgba(4, 120, 87, 0.92)", "#ffffff", "rgba(167, 243, 208, 0.88)", 8, 900),
+        "destructive": ("rgba(185, 28, 28, 0.92)", "#ffffff", "rgba(254, 202, 202, 0.88)", 8, 900),
+        "export_import": ("rgba(217, 119, 6, 0.92)", "#ffffff", "rgba(254, 240, 138, 0.88)", 8, 900),
+        "diagnostic": ("rgba(124, 58, 237, 0.22)", "#e9d5ff", "rgba(196, 181, 253, 0.45)", 8, 800),
+    }
+    background, text, border, radius, weight = palettes.get(role, palettes["secondary"])
+    return f"""
+        QPushButton {{
+            min-height: {UI_BUTTON_HEIGHT_COMPACT}px;
+            max-height: {UI_BUTTON_HEIGHT_PRIMARY}px;
+            padding: 4px 9px;
+            border-radius: {radius}px;
+            font-size: 12px;
+            font-weight: {weight};
+            color: {text};
+            background: {background};
+            border: 1px solid {border};
+            border-left: 3px solid {color};
+            text-align: left;
+        }}
+        QPushButton:hover {{
+            border-color: rgba(36, 215, 255, 0.92);
+            background: rgba(13, 37, 58, 0.96);
+            color: #ffffff;
+        }}
+        QPushButton:pressed {{
+            padding-top: 6px;
+            background: rgba(5, 12, 23, 1.0);
+        }}
+        QPushButton:checked, QPushButton[active="true"] {{
+            background: rgba(20, 168, 212, 0.34);
+            border-color: #24d7ff;
+            color: #ffffff;
+        }}
+        QPushButton:disabled {{
+            background: rgba(62, 74, 88, 0.52);
+            color: #b7c9d8;
+            border-color: rgba(185, 199, 212, 0.35);
+            border-left-color: #7d8b98;
+        }}
+    """
+
+
+def _make_action_button(text: str, color: str, role: str, callback=None, tooltip: str | None = None) -> QPushButton:
+    button = QPushButton(text)
+    button.setObjectName(f"{role}ActionButton")
+    button.setMinimumHeight(UI_BUTTON_HEIGHT_COMPACT)
+    button.setMaximumHeight(UI_BUTTON_HEIGHT_PRIMARY)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+    button.setStyleSheet(_action_button_style(color, role))
+    if tooltip:
+        button.setToolTip(tooltip)
+    if callback is not None:
+        button.clicked.connect(callback)
+    return button
+
+
+def make_primary_action_button(text: str, callback=None, tooltip: str | None = None) -> QPushButton:
+    return _make_action_button(text, UI_PRIMARY_ACTION_COLOR, "primary", callback, tooltip)
+
+
+def make_secondary_action_button(text: str, callback=None, tooltip: str | None = None) -> QPushButton:
+    return _make_action_button(text, UI_SECONDARY_ACTION_COLOR, "secondary", callback, tooltip)
+
+
+def make_transport_button(text: str, callback=None, tooltip: str | None = None) -> QPushButton:
+    return _make_action_button(text, UI_TRANSPORT_ACTION_COLOR, "transport", callback, tooltip)
+
+
+def make_destructive_action_button(text: str, callback=None, tooltip: str | None = None) -> QPushButton:
+    return _make_action_button(text, UI_DESTRUCTIVE_ACTION_COLOR, "destructive", callback, tooltip)
+
+
+def make_export_import_button(text: str, callback=None, tooltip: str | None = None) -> QPushButton:
+    return _make_action_button(text, "#d97706", "export_import", callback, tooltip)
+
+
+def make_diagnostic_button(text: str, callback=None, tooltip: str | None = None) -> QPushButton:
+    return _make_action_button(text, UI_DIAGNOSTIC_COLOR, "diagnostic", callback, tooltip)
+
+
+def make_button_row_or_toolbar(*buttons: QWidget, spacing: int = UI_SECTION_SPACING_COMPACT, margins: tuple[int, int, int, int] = (0, 0, 0, 0), stretch: bool = True) -> QWidget:
+    row = QWidget()
+    row.setObjectName("compactActionToolbar")
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(*margins)
+    layout.setSpacing(spacing)
+    for button in buttons:
+        layout.addWidget(button)
+    if stretch:
+        layout.addStretch(1)
+    return row
+
+
 
 class ToyButton(QPushButton):
     def __init__(self, text: str, color: str) -> None:
@@ -12331,31 +12431,51 @@ class WaveToyWindow(QMainWindow):
         panel.setObjectName("globalControlPanel")
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(8)
-        actions = (
-            ("play", "▶", "Play", "#5cdb95", self._global_play),
-            ("stop", "■", "Stop", "#ff6b6b", self._global_stop),
-            ("loop", "🔁", "Loop", "#24d7ff", self._global_loop),
-            ("save", "💾", "Save / Export", "#ffd166", self._global_save_export),
-            ("timeline", "➕", "Add to Timeline", "#caffbf", self._global_add_to_timeline),
-            ("render", "⚙", "Render / Create", "#b8f2e6", self._global_render_create),
-            ("reset", "♻", "Reset", "#ffadad", self._global_reset_context),
-            ("help", "?", "Help / Info", "#d7b9ff", self._show_about),
-        )
+        layout.setSpacing(10)
         self.global_action_buttons = {}
-        for key, icon, label, color, callback in actions:
-            button = QPushButton(f"{icon}  {label}")
-            button.setObjectName("globalActionButton")
-            button.setStyleSheet(f"QPushButton#globalActionButton {{ border-left: 4px solid {color}; }}")
-            button.setMinimumHeight(32)
-            button.setCursor(Qt.PointingHandCursor)
-            button.setToolTip(label)
-            if key == "loop":
-                button.setCheckable(True)
-                self.global_loop_button = button
-            button.clicked.connect(callback)
-            layout.addWidget(button)
-            self.global_action_buttons[key] = button
+
+        grouped_actions = (
+            (
+                "transport",
+                (
+                    ("play", make_transport_button("▶ Play", self._global_play, "Play the active workspace")),
+                    ("loop", make_transport_button("🔁 Loop", self._global_loop, "Loop the active workspace")),
+                    ("stop", make_transport_button("■ Stop", self._global_stop, "Stop playback")),
+                ),
+            ),
+            (
+                "primary",
+                (
+                    ("render", make_primary_action_button("Render / Create", self._global_render_create, "Generate or create for the active workspace")),
+                    ("timeline", make_secondary_action_button("Add to Timeline", self._global_add_to_timeline, "Send the current sound or word to the Timeline")),
+                ),
+            ),
+            (
+                "file",
+                (
+                    ("save", make_export_import_button("Save / Export", self._global_save_export, "Save or export from the active workspace")),
+                ),
+            ),
+            (
+                "utility",
+                (
+                    ("reset", make_destructive_action_button("Reset", self._global_reset_context, "Reset the active workspace context")),
+                    ("help", make_diagnostic_button("Help / Info", self._show_about, "Open help and app information")),
+                ),
+            ),
+        )
+        for group_index, (_group_name, actions) in enumerate(grouped_actions):
+            if group_index:
+                gap = QLabel("•")
+                gap.setObjectName("symbolHint")
+                gap.setAlignment(Qt.AlignCenter)
+                layout.addWidget(gap)
+            for key, button in actions:
+                if key == "loop":
+                    button.setCheckable(True)
+                    self.global_loop_button = button
+                layout.addWidget(button)
+                self.global_action_buttons[key] = button
         layout.addStretch(1)
         return panel
 
@@ -13122,8 +13242,7 @@ class WaveToyWindow(QMainWindow):
         ]
 
         for label, callback in presets:
-            button = QPushButton(label)
-            button.clicked.connect(callback)
+            button = make_secondary_action_button(label, callback, f"Apply {label} preset")
             preset_layout.addWidget(button)
 
         self.user_preset_layout = preset_layout
@@ -13136,36 +13255,30 @@ class WaveToyWindow(QMainWindow):
         controls.setSpacing(12)
         outer.addLayout(controls)
 
-        self.make_button = ToyButton("▶ Play", "#5cdb95")
-        self.stop_button = ToyButton("■ Stop", "#ff6b6b")
-        self.loop_button = ToyButton("🔁 Loop", "#24d7ff")
+        self.make_button = make_transport_button("▶ Play", self._play, "Play the current generated sound")
+        self.loop_button = make_transport_button("🔁 Loop", self._toggle_live_loop, "Loop live playback")
+        self.stop_button = make_transport_button("■ Stop", self._stop, "Stop playback")
         self.loop_button.setCheckable(True)
-        self.save_button = ToyButton("💾 Save Audio", "#ffd166")
-        self.load_button = ToyButton("📂 Load Audio", "#b8f2e6")
+        self.save_button = make_export_import_button("Save Audio", self._save, "Save generated audio")
+        self.load_button = make_export_import_button("Load Audio", self._load_sound, "Load audio from disk")
         for button, width in (
-            (self.make_button, 140),
-            (self.stop_button, 110),
-            (self.loop_button, 120),
-            (self.save_button, 160),
-            (self.load_button, 150),
+            (self.make_button, 96),
+            (self.loop_button, 96),
+            (self.stop_button, 96),
+            (self.save_button, 118),
+            (self.load_button, 118),
         ):
             button.setMinimumWidth(width)
-            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
         self.loop_status_label = QLabel("Loop: Off")
         self.loop_status_label.setObjectName("loopStatus")
 
-        controls.addWidget(self.make_button, 2)
-        controls.addWidget(self.stop_button, 1)
-        controls.addWidget(self.loop_button, 1)
-        controls.addWidget(self.save_button, 2)
-        controls.addWidget(self.load_button, 2)
+        controls.addWidget(self.make_button)
+        controls.addWidget(self.loop_button)
+        controls.addWidget(self.stop_button)
+        controls.addSpacing(8)
+        controls.addWidget(self.save_button)
+        controls.addWidget(self.load_button)
         controls.addWidget(self.loop_status_label, 1)
-
-        self.make_button.clicked.connect(self._play)
-        self.stop_button.clicked.connect(self._stop)
-        self.loop_button.clicked.connect(self._toggle_live_loop)
-        self.save_button.clicked.connect(self._save)
-        self.load_button.clicked.connect(self._load_sound)
 
         widgets_to_regenerate = [
             self.duration_slider,
@@ -14008,39 +14121,39 @@ class WaveToyWindow(QMainWindow):
         performance_note.setObjectName("symbolHint")
         performance_note.setWordWrap(True)
         performance_note_row.addWidget(performance_note, 1)
-        performance_shortcut = QPushButton("Open Timing / Performance")
-        performance_shortcut.setObjectName("phonemeCardSecondaryAction")
-        performance_shortcut.setCursor(Qt.PointingHandCursor)
-        performance_shortcut.setToolTip("Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
-        performance_shortcut.clicked.connect(self._show_articulation_timing_page)
+        performance_shortcut = make_secondary_action_button("Open Timing / Performance", self._show_articulation_timing_page, "Jump to the Timeline → Timing / Performance page for tempo, beat grid, snap, count-in, and Singing Preview controls.")
         performance_note_row.addWidget(performance_shortcut)
         chain_layout.addLayout(performance_note_row)
 
-        chain_sections = (
+        chain_action_groups = (
             (
                 "Chain Editing",
-                (("➕", "Add Current", "#5cdb95", self._add_current_phoneme_to_chain, 76), ("🔡", "Create Syllable", "#caffbf", self._create_articulation_syllable, 58), ("🧹", "Clear Chain", "#ffadad", self._clear_articulation_chain, 58)),
+                (
+                    make_secondary_action_button("Add Current", self._add_current_phoneme_to_chain, "Append the current phoneme to the chain"),
+                    make_secondary_action_button("Create Syllable", self._create_articulation_syllable, "Create a syllable from the current chain context"),
+                ),
             ),
             (
                 "Wave Source",
-                (("🌊", "Apply Current Wave to Selected", "#b8f2e6", self._apply_current_wave_to_selected_chain_item, 44), ("🌊", "Apply Current Wave to Chain", "#caffbf", self._apply_current_wave_to_whole_chain, 44), ("♻", "Reset Selected Source", "#ffd166", self._reset_selected_chain_item_source, 44), ("♻", "Reset Chain Sources", "#ffadad", self._reset_whole_chain_source, 44)),
+                (
+                    make_secondary_action_button("Apply Current Source to Selected", self._apply_current_wave_to_selected_chain_item, "Apply the current waveform source to the selected chain card"),
+                    make_secondary_action_button("Apply Current Source to Chain", self._apply_current_wave_to_whole_chain, "Apply the current waveform source to every chain card"),
+                    make_secondary_action_button("Reset Selected Source", self._reset_selected_chain_item_source, "Restore default voice source for the selected card"),
+                ),
+            ),
+            (
+                "Destructive",
+                (
+                    make_destructive_action_button("Reset Chain Sources", self._reset_whole_chain_source, "Restore default voice source for the entire chain"),
+                    make_destructive_action_button("Clear Chain", self._clear_articulation_chain, "Remove all cards from the chain"),
+                ),
             ),
         )
-        for section_title, actions in chain_sections:
+        for section_title, buttons in chain_action_groups:
             label = QLabel(section_title)
             label.setObjectName("timelineInspectorText")
             chain_layout.addWidget(label)
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            for icon, button_label, color, callback, height in actions:
-                button = self._make_story_button(icon, button_label, color, callback)
-                button.setMinimumHeight(min(max(height, WaveToySizing.BUTTON_HEIGHT), 44))
-                if button_label == "Play Word (smoothed render)":
-                    button.setToolTip("Play the smoothed, coarticulated word render using transition handling and Word Motion Preview settings.")
-                elif button_label == "Play Chain (raw sequence)":
-                    button.setToolTip("Play each phoneme sequentially with the raw phoneme render path for checking chain order; it may sound less smooth than Play Word.")
-                row.addWidget(button)
-            chain_layout.addLayout(row)
+            chain_layout.addWidget(make_button_row_or_toolbar(*buttons, spacing=8))
         self.articulation_word_status_label = QLabel("Create Word saves a named asset to Speech Assets without changing the editable chain.")
         self.articulation_word_status_label.setObjectName("symbolHint")
         self.articulation_word_status_label.setWordWrap(True)
@@ -14065,31 +14178,23 @@ class WaveToyWindow(QMainWindow):
         render_primary_hint.setObjectName("symbolHint")
         render_primary_hint.setWordWrap(True)
         render_primary_layout.addWidget(render_primary_hint)
-        render_primary_buttons = QHBoxLayout()
-        render_primary_buttons.setSpacing(8)
-        for icon, label_text, color, callback in (
-            ("▶", "Play Word", "#b8f2e6", self._play_articulation_word),
-            ("🧩", "Create Word", "#ffd166", self._create_articulation_word),
-            ("💾", "Export Word", "#fdffb6", self._export_articulation_word),
-            ("▶", "Play Chain", "#caffbf", self._play_articulation_chain),
-        ):
-            button = self._make_story_button(icon, label_text, color, callback)
-            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
-            render_primary_buttons.addWidget(button)
-        render_primary_layout.addLayout(render_primary_buttons)
-        send_row = QHBoxLayout()
-        send_row.setSpacing(8)
-        for icon, label_text, color, callback in (
-            ("➕", "Send Word to Timeline", "#ffc6ff", self._send_articulation_word_to_timeline),
-            ("➕", "Send Phoneme", "#e7c6ff", self._send_current_phoneme_to_timeline),
-            ("➕", "Send Chain", "#e7c6ff", self._send_articulation_chain_to_timeline),
-            ("💾", "Save Chain", "#ffd166", self._save_articulation_chain),
-            ("📂", "Load Chain", "#d7b9ff", self._load_articulation_chain),
-        ):
-            button = self._make_story_button(icon, label_text, color, callback)
-            button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
-            send_row.addWidget(button)
-        render_primary_layout.addLayout(send_row)
+        primary_word_row = make_button_row_or_toolbar(
+            make_transport_button("▶ Play Word", self._play_articulation_word, "Play the smoothed word render"),
+            make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain"),
+            make_transport_button("▶ Play Chain", self._play_articulation_chain, "Play the raw phoneme sequence for order checking"),
+            spacing=8,
+        )
+        render_primary_layout.addWidget(primary_word_row)
+        export_row = make_button_row_or_toolbar(
+            make_secondary_action_button("Send Word to Timeline", self._send_articulation_word_to_timeline, "Send the rendered word to the Timeline"),
+            make_secondary_action_button("Send Phoneme", self._send_current_phoneme_to_timeline, "Send the current phoneme to the Timeline"),
+            make_secondary_action_button("Send Chain", self._send_articulation_chain_to_timeline, "Send the current chain to the Timeline"),
+            make_export_import_button("Export Word", self._export_articulation_word, "Export the rendered word"),
+            make_export_import_button("Save Chain", self._save_articulation_chain, "Save chain JSON"),
+            make_export_import_button("Load Chain", self._load_articulation_chain, "Load chain JSON"),
+            spacing=8,
+        )
+        render_primary_layout.addWidget(export_row)
         render_primary_layout.addWidget(self.articulation_word_status_label)
         render_layout.addWidget(render_primary_card)
         inspector_layout.addWidget(self._build_articulation_inspector_panel())
@@ -14248,7 +14353,7 @@ class WaveToyWindow(QMainWindow):
         self.continuous_validation_results_label.setObjectName("symbolHint")
         self.continuous_validation_results_label.setWordWrap(True)
         diagnostics_layout.addWidget(self.continuous_validation_results_label)
-        render_layout.addWidget(diagnostics_card)
+        render_layout.addWidget(CollapsibleSection("Continuous Mouth Motion Diagnostics", diagnostics_card, expanded=False))
 
         continuous_tests = ", ".join(" ".join(chain) for chain in CONTINUOUS_RENDER_TEST_CHAINS)
         continuous_test_label = QLabel(f"Continuous validation chains: {continuous_tests}")
@@ -16039,6 +16144,17 @@ class WaveToyWindow(QMainWindow):
 
     def _reset_whole_chain_source(self, checked: bool = False) -> None:
         del checked
+        if not self.articulation_chain_items:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Reset Chain Sources",
+            "Reset every chain card to Default Voice source? Timing and phoneme shapes are not changed.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
         for item in self.articulation_chain_items:
             item.phoneme = ArticulationPhoneme.from_json_dict({**item.phoneme.to_json_dict(), "source_mode": ARTICULATION_SOURCE_DEFAULT, "source_wave_id": None, "source_recipe_snapshot": {}, "source_audio_path": None})
         self._mark_articulation_word_dirty()
@@ -18805,44 +18921,35 @@ class WaveToyWindow(QMainWindow):
         self._load_saved_phonemes()
         self._refresh_phoneme_cards()
 
-    def _make_story_button(self, icon: str, label: str, color: str, callback) -> QPushButton:
-        button = QPushButton(f"{icon}  {label}")
+    def _make_story_button(self, icon: str, label: str, color: str, callback, role: str | None = None) -> QPushButton:
+        text = f"{icon}  {label}" if icon else label
+        role_factories = {
+            "primary": make_primary_action_button,
+            "secondary": make_secondary_action_button,
+            "transport": make_transport_button,
+            "destructive": make_destructive_action_button,
+            "export_import": make_export_import_button,
+            "diagnostic": make_diagnostic_button,
+        }
+        lower = label.lower()
+        inferred_role = role
+        if inferred_role is None:
+            if any(word in lower for word in ("delete", "remove", "clear", "reset")):
+                inferred_role = "destructive"
+            elif any(word in lower for word in ("export", "import", "save", "load")):
+                inferred_role = "export_import"
+            elif any(word in lower for word in ("play", "stop", "loop", "preview")):
+                inferred_role = "transport"
+            elif any(word in lower for word in ("validate", "debug", "diagnostic", "bypass", "test")):
+                inferred_role = "diagnostic"
+            elif any(word in lower for word in ("create", "render mix")):
+                inferred_role = "primary"
+            else:
+                inferred_role = "secondary"
+        button = role_factories.get(inferred_role, make_secondary_action_button)(text, callback, label)
         button.setObjectName("storyTransportButton")
         button.setProperty("accent", color)
-        button.setMinimumSize(QSize(108, WaveToySizing.BUTTON_HEIGHT))
-        button.setCursor(Qt.PointingHandCursor)
-        button.setToolTip(label)
-        button.setStyleSheet(
-            f"""
-            QPushButton#storyTransportButton {{
-                background: rgba(6, 18, 32, 0.88);
-                color: #f7fbff;
-                border: 1px solid rgba(190, 232, 255, 0.62);
-                border-left: 4px solid {color};
-                border-radius: 8px;
-                font-size: 12px;
-                font-weight: 900;
-                min-height: 36px;
-                padding: 5px 10px;
-                text-align: left;
-            }}
-            QPushButton#storyTransportButton:hover {{
-                background: rgba(13, 37, 58, 0.96);
-                border-color: rgba(36, 215, 255, 0.95);
-            }}
-            QPushButton#storyTransportButton:pressed {{
-                background: rgba(5, 12, 23, 1.0);
-                padding-top: 7px;
-            }}
-            QPushButton#storyTransportButton:disabled {{
-                background: rgba(56, 68, 82, 0.72);
-                color: #b7c9d8;
-                border-color: rgba(185, 199, 212, 0.42);
-                border-left-color: #7d8b98;
-            }}
-            """
-        )
-        button.clicked.connect(callback)
+        button.setMinimumWidth(96)
         return button
 
     def _timeline_debug(self, message: str) -> None:
