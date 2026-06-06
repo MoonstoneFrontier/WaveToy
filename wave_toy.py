@@ -1391,6 +1391,12 @@ ARTICULATION_SOURCE_MODES = {
     ARTICULATION_SOURCE_MIX_WAVE: "Selected Mix Wave",
     ARTICULATION_SOURCE_IMPORTED: "Imported WAV",
 }
+VOICE_SOURCE_PROGRESS_CONTINUOUS = "continuous_across_word"
+VOICE_SOURCE_PROGRESS_RESTART = "restart_per_phoneme"
+VOICE_SOURCE_PROGRESS_MODES = {
+    VOICE_SOURCE_PROGRESS_CONTINUOUS: "Continuous Across Word",
+    VOICE_SOURCE_PROGRESS_RESTART: "Restart Per Phoneme",
+}
 
 ARTICULATION_INTERPOLATED_FIELDS = (
     "mouth_open",
@@ -2521,6 +2527,8 @@ class ArticulationPhoneme:
     source_audio_path: str | None = None
     source_start_seconds: float = 0.0
     source_duration_seconds: float = 0.0
+    source_progress_start: float = 0.0
+    source_progress_end: float = 0.0
     source_pitch_follow: bool = True
     source_loop_to_fit: bool = True
     source_gain: float = 1.0
@@ -2556,6 +2564,8 @@ class ArticulationPhoneme:
             source_audio_path=str(self.source_audio_path) if self.source_audio_path else None,
             source_start_seconds=float(max(0.0, self.source_start_seconds)),
             source_duration_seconds=float(max(0.0, self.source_duration_seconds)),
+            source_progress_start=float(np.clip(self.source_progress_start, 0.0, 1.0)),
+            source_progress_end=float(np.clip(self.source_progress_end, 0.0, 1.0)),
             source_pitch_follow=bool(self.source_pitch_follow),
             source_loop_to_fit=bool(self.source_loop_to_fit),
             source_gain=float(np.clip(self.source_gain, 0.0, 4.0)),
@@ -2595,6 +2605,8 @@ class ArticulationPhoneme:
             source_audio_path=str(data.get("source_audio_path")) if data.get("source_audio_path") else None,
             source_start_seconds=float(data.get("source_start_seconds", 0.0)),
             source_duration_seconds=float(data.get("source_duration_seconds", 0.0)),
+            source_progress_start=float(data.get("source_progress_start", 0.0)),
+            source_progress_end=float(data.get("source_progress_end", 0.0)),
             source_pitch_follow=bool(data.get("source_pitch_follow", True)),
             source_loop_to_fit=bool(data.get("source_loop_to_fit", True)),
             source_gain=float(data.get("source_gain", 1.0)),
@@ -2973,6 +2985,8 @@ def interpolate_articulation_phoneme(
         data["source_audio_path"] = end.source_audio_path
         data["source_start_seconds"] = end.source_start_seconds
         data["source_duration_seconds"] = end.source_duration_seconds
+        data["source_progress_start"] = end.source_progress_start
+        data["source_progress_end"] = end.source_progress_end
         data["source_pitch_follow"] = end.source_pitch_follow
         data["source_loop_to_fit"] = end.source_loop_to_fit
         data["source_gain"] = end.source_gain
@@ -4780,8 +4794,14 @@ def prepare_articulation_source_audio(
     if audio.size == 0:
         return np.zeros((target_samples, 2), dtype=np.float32)
 
-    start = min(len(audio), max(0, int(round(phoneme.source_start_seconds * SAMPLE_RATE))))
-    requested = int(round(phoneme.source_duration_seconds * SAMPLE_RATE)) if phoneme.source_duration_seconds > 0 else 0
+    progress_start = float(np.clip(getattr(phoneme, "source_progress_start", 0.0), 0.0, 1.0))
+    progress_end = float(np.clip(getattr(phoneme, "source_progress_end", 0.0), 0.0, 1.0))
+    if progress_end > progress_start:
+        start = min(len(audio), max(0, int(round(progress_start * len(audio)))))
+        requested = max(1, int(round((progress_end - progress_start) * len(audio))))
+    else:
+        start = min(len(audio), max(0, int(round(phoneme.source_start_seconds * SAMPLE_RATE))))
+        requested = int(round(phoneme.source_duration_seconds * SAMPLE_RATE)) if phoneme.source_duration_seconds > 0 else 0
     if requested > 0:
         audio = audio[start:min(len(audio), start + requested)]
     else:
@@ -11684,6 +11704,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_smooth_transitions_checkbox: QCheckBox | None = None
         self.continuous_debug_bypass_formants_checkbox: QCheckBox | None = None
         self.articulation_word_render_mode_combo: QComboBox | None = None
+        self.voice_source_progress_combo: QComboBox | None = None
         self.musical_timing_enabled_checkbox: QCheckBox | None = None
         self.musical_bpm_spin: QDoubleSpinBox | None = None
         self.musical_time_signature_combo: QComboBox | None = None
@@ -11744,6 +11765,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_status_label: QLabel | None = None
         self.articulation_chain_path = self.storage.assets_dir / "Chains" / "articulation_chain.json"
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_last_render_source_snapshot: List[Dict[str, object]] = []
         self.articulation_word_render_signature: str | None = None
         self.articulation_last_word_render_path: Path | None = None
         self.articulation_last_word_render_created_at: float | None = None
@@ -11775,6 +11797,7 @@ class WaveToyWindow(QMainWindow):
             "boundary_smoothing_ms": 8,
             "smooth_mouth_transitions": True,
             "word_render_mode": ARTICULATION_WORD_RENDER_CLIP_CROSSFADE,
+            "voice_source_progress_mode": VOICE_SOURCE_PROGRESS_CONTINUOUS,
             "transition_debug_verbose": False,
             "word_fade_in_ms": 5,
             "word_fade_out_ms": 8,
@@ -14614,8 +14637,20 @@ class WaveToyWindow(QMainWindow):
         self.continuous_debug_bypass_formants_checkbox.setChecked(bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)))
         self.continuous_debug_bypass_formants_checkbox.setToolTip("Diagnostic only: render Continuous Mouth Motion without formant coloration to isolate excitation pitch stability.")
         self.continuous_debug_bypass_formants_checkbox.toggled.connect(self._toggle_continuous_debug_bypass_formants)
+        voice_progress_label = QLabel("Voice Progress")
+        voice_progress_label.setObjectName("timelineInspectorText")
+        self.voice_source_progress_combo = NoWheelComboBox()
+        for mode_key, mode_label_text in VOICE_SOURCE_PROGRESS_MODES.items():
+            self.voice_source_progress_combo.addItem(mode_label_text, mode_key)
+        apply_compact_combo_policy(self.voice_source_progress_combo, minimum=160, maximum=220)
+        current_progress_mode = self._voice_source_progress_mode()
+        self.voice_source_progress_combo.setCurrentText(VOICE_SOURCE_PROGRESS_MODES[current_progress_mode])
+        self.voice_source_progress_combo.setToolTip("Continuous maps the active saved voice through the full word. Restart starts the voice source from the beginning for each phoneme.")
+        self.voice_source_progress_combo.currentTextChanged.connect(self._set_voice_source_progress_mode)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.articulation_word_render_mode_combo, 1)
+        mode_row.addWidget(voice_progress_label)
+        mode_row.addWidget(self.voice_source_progress_combo, 1)
         mode_row.addWidget(validate_button)
         mode_row.addWidget(stop_test_button)
         mode_row.addWidget(self.continuous_debug_bypass_formants_checkbox)
@@ -14988,7 +15023,8 @@ class WaveToyWindow(QMainWindow):
         count = len(self.articulation_chain_items)
         _segments, total_ms = self._articulation_motion_timeline()
         mode = self._articulation_word_render_mode()
-        return f"Chain: {count} phoneme{'s' if count != 1 else ''} • approx. {int(round(total_ms))} ms • render mode: {mode}"
+        progress = VOICE_SOURCE_PROGRESS_MODES.get(self._voice_source_progress_mode(), VOICE_SOURCE_PROGRESS_MODES[VOICE_SOURCE_PROGRESS_CONTINUOUS])
+        return f"Chain: {count} phoneme{'s' if count != 1 else ''} • approx. {int(round(total_ms))} ms • render mode: {mode} • Voice Progress: {progress}"
 
     def _update_articulation_chain_summary_labels(self) -> None:
         summary = self._articulation_chain_summary_text()
@@ -16152,6 +16188,8 @@ class WaveToyWindow(QMainWindow):
             "source_recipe_snapshot": recipe,
             "source_start_seconds": 0.0,
             "source_duration_seconds": 0.0,
+            "source_progress_start": 0.0,
+            "source_progress_end": 0.0,
             "source_pitch_follow": True,
             "source_loop_to_fit": True,
             "source_gain": 1.0,
@@ -16403,6 +16441,8 @@ class WaveToyWindow(QMainWindow):
                 "source_audio_path": None,
                 "source_start_seconds": 0.0,
                 "source_duration_seconds": 0.0,
+                "source_progress_start": 0.0,
+                "source_progress_end": 0.0,
                 "source_pitch_follow": True,
                 "source_loop_to_fit": True,
                 "source_gain": 1.0,
@@ -16451,6 +16491,8 @@ class WaveToyWindow(QMainWindow):
             "source_audio_path": phoneme.source_audio_path,
             "source_start_seconds": phoneme.source_start_seconds,
             "source_duration_seconds": phoneme.source_duration_seconds,
+            "source_progress_start": phoneme.source_progress_start,
+            "source_progress_end": phoneme.source_progress_end,
             "source_pitch_follow": phoneme.source_pitch_follow,
             "source_loop_to_fit": phoneme.source_loop_to_fit,
             "source_gain": phoneme.source_gain,
@@ -16465,6 +16507,8 @@ class WaveToyWindow(QMainWindow):
             "source_audio_path": snapshot.get("source_audio_path"),
             "source_start_seconds": float(snapshot.get("source_start_seconds", 0.0) or 0.0),
             "source_duration_seconds": float(snapshot.get("source_duration_seconds", 0.0) or 0.0),
+            "source_progress_start": float(snapshot.get("source_progress_start", 0.0) or 0.0),
+            "source_progress_end": float(snapshot.get("source_progress_end", 0.0) or 0.0),
             "source_pitch_follow": bool(snapshot.get("source_pitch_follow", True)),
             "source_loop_to_fit": bool(snapshot.get("source_loop_to_fit", True)),
             "source_gain": float(snapshot.get("source_gain", 1.0) or 1.0),
@@ -16508,9 +16552,63 @@ class WaveToyWindow(QMainWindow):
         finally:
             self._refreshing_voice_source_controls = previous_guard
 
+    def _voice_source_progress_mode(self) -> str:
+        settings = getattr(self, "articulation_word_render_settings", {})
+        mode = str(settings.get("voice_source_progress_mode", VOICE_SOURCE_PROGRESS_CONTINUOUS))
+        return mode if mode in VOICE_SOURCE_PROGRESS_MODES else VOICE_SOURCE_PROGRESS_CONTINUOUS
+
+    def _set_voice_source_progress_mode(self, label_or_mode: str) -> None:
+        mode = str(label_or_mode or VOICE_SOURCE_PROGRESS_CONTINUOUS)
+        if mode not in VOICE_SOURCE_PROGRESS_MODES:
+            label_to_mode = {label: key for key, label in VOICE_SOURCE_PROGRESS_MODES.items()}
+            mode = label_to_mode.get(mode, VOICE_SOURCE_PROGRESS_CONTINUOUS)
+        self.articulation_word_render_settings["voice_source_progress_mode"] = mode
+        self._mark_articulation_word_dirty()
+        self._update_articulation_word_status()
+
+    def _chain_item_source_absolute_ranges(self, items: List[ArticulationChainItem]) -> Tuple[float, List[Tuple[float, float]]]:
+        ranges: List[Tuple[float, float]] = []
+        cursor = 0.0
+        for index, item in enumerate(items):
+            duration = max(0.0, float(item.duration_ms or item.phoneme.duration_ms) / 1000.0)
+            start = cursor
+            end = start + duration
+            ranges.append((start, end))
+            cursor = end + (max(0.0, float(self._word_gap_after_ms(item, index))) / 1000.0 if index < len(items) - 1 else 0.0)
+        total = max((ranges[-1][1] if ranges else 0.0), cursor, 1e-9)
+        return total, ranges
+
+    def _apply_voice_source_progress_to_render_chain(self, items: List[ArticulationChainItem]) -> List[ArticulationChainItem]:
+        mode = self._voice_source_progress_mode()
+        if mode == VOICE_SOURCE_PROGRESS_RESTART:
+            for item in items:
+                phoneme = item.phoneme_for_render()
+                data = phoneme.to_json_dict()
+                data["source_start_seconds"] = 0.0
+                data["source_progress_start"] = 0.0
+                data["source_progress_end"] = 1.0
+                item.phoneme = ArticulationPhoneme.from_json_dict(data).clamped()
+            return items
+
+        total_duration, ranges = self._chain_item_source_absolute_ranges(items)
+        for item, (start, end) in zip(items, ranges):
+            phoneme = item.phoneme_for_render()
+            data = phoneme.to_json_dict()
+            progress_start = float(np.clip(start / total_duration, 0.0, 1.0))
+            progress_end = float(np.clip(end / total_duration, progress_start, 1.0))
+            data["source_start_seconds"] = start
+            data["source_duration_seconds"] = max(0.0, end - start)
+            data["source_progress_start"] = progress_start
+            data["source_progress_end"] = progress_end
+            data["source_loop_to_fit"] = bool(data.get("source_loop_to_fit", True))
+            data["source_pitch_follow"] = bool(data.get("source_pitch_follow", True))
+            item.phoneme = ArticulationPhoneme.from_json_dict(data).clamped()
+        return items
+
     def _render_chain_items_snapshot(self) -> List[ArticulationChainItem]:
         """Deep-copy editable chain cards so render-time phoneme changes remain isolated."""
-        return [ArticulationChainItem.from_json_dict(item.to_json_dict()) for item in getattr(self, "articulation_chain_items", [])]
+        items = [ArticulationChainItem.from_json_dict(item.to_json_dict()) for item in getattr(self, "articulation_chain_items", [])]
+        return self._apply_voice_source_progress_to_render_chain(items)
 
     def _refresh_selected_phoneme_source_combos(self, item: ArticulationChainItem | None) -> None:
         del item
@@ -18044,6 +18142,7 @@ class WaveToyWindow(QMainWindow):
     def _mark_articulation_word_dirty(self) -> None:
         self._mark_project_dirty("articulation chain changed")
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_last_render_source_snapshot = []
         self.articulation_word_render_signature = None
         self.articulation_last_word_render_path = None
         self.articulation_last_word_render_created_at = None
@@ -18070,12 +18169,12 @@ class WaveToyWindow(QMainWindow):
             path_text = f" • exported: {self.articulation_last_word_render_path}" if self.articulation_last_word_render_path else ""
             mode = self._articulation_word_render_mode()
             self.articulation_word_status_label.setText(
-                f"Word ready • {duration:.2f}s • {len(self.articulation_chain_items)} phoneme(s) • render mode: {mode} • {transition_text}{path_text}"
+                f"Word ready • {duration:.2f}s • {len(self.articulation_chain_items)} phoneme(s) • render mode: {mode} • Voice Progress: {VOICE_SOURCE_PROGRESS_MODES.get(self._voice_source_progress_mode(), VOICE_SOURCE_PROGRESS_MODES[VOICE_SOURCE_PROGRESS_CONTINUOUS])} • {transition_text}{path_text}"
             )
         elif self.articulation_chain_items:
             mode = self._articulation_word_render_mode()
             self.articulation_word_status_label.setText(
-                f"{len(self.articulation_chain_items)} phoneme(s) in chain • render mode: {mode} • {transition_text}."
+                f"{len(self.articulation_chain_items)} phoneme(s) in chain • render mode: {mode} • Voice Progress: {VOICE_SOURCE_PROGRESS_MODES.get(self._voice_source_progress_mode(), VOICE_SOURCE_PROGRESS_MODES[VOICE_SOURCE_PROGRESS_CONTINUOUS])} • {transition_text}."
             )
         else:
             self.articulation_word_status_label.setText("Create Word makes a smoothed render without changing the editable chain.")
@@ -19485,6 +19584,7 @@ class WaveToyWindow(QMainWindow):
         try:
             self.articulation_chain_items = render_chain_items
             rendered_audio = self._render_articulation_word()
+            self.articulation_last_render_source_snapshot = [self._voice_source_field_snapshot(item.phoneme_for_render()) for item in render_chain_items]
         finally:
             self.articulation_chain_items = editable_chain_items
             self._restore_voice_source_ui_state(voice_source_state)
@@ -20729,6 +20829,7 @@ class WaveToyWindow(QMainWindow):
         self._sync_automation_tracks_from_timeline()
         self._mark_project_dirty(reason)
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
+        self.articulation_last_render_source_snapshot = []
         self.articulation_word_render_signature = None
         self.articulation_last_word_render_path = None
         self.articulation_last_word_render_created_at = None
@@ -21589,7 +21690,7 @@ class WaveToyWindow(QMainWindow):
         metadata = self._speech_chain_metadata_snapshot()
         metadata["render_signature"] = self.articulation_word_render_signature or self._current_word_render_signature()
         metadata["render_mode"] = self._articulation_word_render_mode()
-        metadata["render_source_snapshot"] = [self._voice_source_field_snapshot(item.phoneme_for_render()) for item in self.articulation_chain_items]
+        metadata["render_source_snapshot"] = list(getattr(self, "articulation_last_render_source_snapshot", [])) or [self._voice_source_field_snapshot(item.phoneme_for_render()) for item in self.articulation_chain_items]
         metadata["audio_duration_seconds"] = len(self.articulation_word_render_audio) / SAMPLE_RATE
         return self._add_speech_bin_item(
             name=name,
