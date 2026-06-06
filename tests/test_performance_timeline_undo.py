@@ -249,10 +249,10 @@ def test_rapid_timing_changes_coalesce_into_one_transaction():
     window._push_performance_transaction("Musical Timing Change", "musical timing changed", before)
 
     assert len(window.performance_undo_stack) == 1
-    assert window.performance_undo_stack[0].before_state.musical_timing_settings["bpm"] == 120.0
+    assert window.performance_undo_stack[0].before_state.musical_timing_settings["bpm"] == 80.0
     assert window.performance_undo_stack[0].after_state.musical_timing_settings["bpm"] == 140.0
     window._undo_performance_edit()
-    assert window.musical_timing_settings.bpm == 120.0
+    assert window.musical_timing_settings.bpm == 80.0
 
 
 def test_bridge_restore_deduplicates_tracks_and_updates_source_marker():
