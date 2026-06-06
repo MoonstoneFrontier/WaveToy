@@ -77,6 +77,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -6810,19 +6811,27 @@ class WaveToyScrollArea(QScrollArea):
         x_delta = pixel_delta.x() if not pixel_delta.isNull() else delta.x()
         y_delta = pixel_delta.y() if not pixel_delta.isNull() else delta.y()
         if x_delta == 0 and y_delta == 0:
-            event.ignore()
+            _forward_wheel_to_parent_scroll(self, event)
             return
         horizontal = abs(x_delta) > abs(y_delta) and self.horizontalScrollBar().maximum() > 0
-        if horizontal:
+        if horizontal and self._scrollbar_can_follow_wheel(self.horizontalScrollBar(), x_delta):
             self._scroll_by(dx=-(x_delta / 120.0) * 72.0 * self.scroll_speed, dy=0.0)
-        elif self.verticalScrollBar().maximum() > 0:
+        elif self.verticalScrollBar().maximum() > 0 and self._scrollbar_can_follow_wheel(self.verticalScrollBar(), y_delta):
             self._scroll_by(dx=0.0, dy=-(y_delta / 120.0) * 72.0 * self.scroll_speed)
-        elif self.horizontalScrollBar().maximum() > 0:
+        elif self.horizontalScrollBar().maximum() > 0 and self._scrollbar_can_follow_wheel(self.horizontalScrollBar(), y_delta):
             self._scroll_by(dx=-(y_delta / 120.0) * 72.0 * self.scroll_speed, dy=0.0)
         else:
-            event.ignore()
+            _forward_wheel_to_parent_scroll(self, event)
             return
         event.accept()
+
+    @staticmethod
+    def _scrollbar_can_follow_wheel(scrollbar, wheel_delta: float) -> bool:
+        if scrollbar.maximum() <= scrollbar.minimum() or wheel_delta == 0:
+            return False
+        if wheel_delta > 0:
+            return scrollbar.value() > scrollbar.minimum()
+        return scrollbar.value() < scrollbar.maximum()
 
     def keyPressEvent(self, event) -> None:
         step = int(72 * self.scroll_speed)
@@ -7949,18 +7958,47 @@ class TimelineCanvas(QWidget):
 
 
 
+def _forward_wheel_to_parent_scroll(widget: QWidget, event) -> bool:
+    """Send passive wheel events up to the nearest scrollable parent workspace."""
+    event.ignore()
+    parent = widget.parent() if hasattr(widget, "parent") else None
+    while parent is not None:
+        if parent is widget:
+            break
+        if hasattr(parent, "wheelEvent") and (hasattr(parent, "verticalScrollBar") or isinstance(parent, QScrollArea)):
+            try:
+                parent.wheelEvent(event)
+                return True
+            except Exception:
+                return False
+        parent = parent.parent() if hasattr(parent, "parent") else None
+    return False
+
+
+def _wheel_requires_explicit_focus(widget: QWidget, event) -> bool:
+    """Return True when a wheel event should be passed to the parent instead of editing a control."""
+    if widget.hasFocus():
+        return False
+    _forward_wheel_to_parent_scroll(widget, event)
+    return True
+
+
 class NoWheelSlider(QSlider):
-    """High-resolution slider with click/touch-to-set and disabled wheel edits."""
+    """High-resolution slider that only consumes wheel input after explicit focus."""
 
     def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
         super().__init__(orientation, parent)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_AcceptTouchEvents, True)
         self.setMouseTracking(True)
 
     def wheelEvent(self, event) -> None:
-        event.ignore()
+        if _wheel_requires_explicit_focus(self, event):
+            return
+        super().wheelEvent(event)
 
     def mousePressEvent(self, event) -> None:
+        self.setFocus(Qt.MouseFocusReason)
         if event.button() == Qt.LeftButton and self._set_value_from_position(event.position()):
             event.accept()
             return
@@ -7998,17 +8036,16 @@ class NoWheelSlider(QSlider):
 
 
 class NoWheelComboBox(QComboBox):
-    """Combo box that cannot be accidentally changed by passive page scrolling."""
+    """Combo box that only consumes wheel input after click or keyboard focus."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.setFocusPolicy(Qt.ClickFocus)
+        self.setFocusPolicy(Qt.StrongFocus)
 
     def wheelEvent(self, event) -> None:
-        if self.hasFocus():
-            super().wheelEvent(event)
-        else:
-            event.ignore()
+        if _wheel_requires_explicit_focus(self, event):
+            return
+        super().wheelEvent(event)
 
 
 class PassiveWheelTextEdit(QTextEdit):
@@ -8040,17 +8077,42 @@ class PassiveWheelTableWidget(QTableWidget):
 
 
 class NoWheelSpinBox(QSpinBox):
-    """Spin box that cannot be accidentally changed by page scrolling."""
+    """Spin box that only consumes wheel input after click or keyboard focus."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
 
     def wheelEvent(self, event) -> None:
-        event.ignore()
+        if _wheel_requires_explicit_focus(self, event):
+            return
+        super().wheelEvent(event)
 
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
-    """Double spin box that cannot be accidentally changed by page scrolling."""
+    """Double spin box that only consumes wheel input after click or keyboard focus."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
 
     def wheelEvent(self, event) -> None:
-        event.ignore()
+        if _wheel_requires_explicit_focus(self, event):
+            return
+        super().wheelEvent(event)
+
+
+class NoWheelListWidget(QListWidget):
+    """List widget that lets parent workspaces scroll until the list has focus."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event) -> None:
+        if _wheel_requires_explicit_focus(self, event):
+            return
+        super().wheelEvent(event)
 
 
 class VisualPanelButton(QPushButton):
@@ -11589,6 +11651,17 @@ class WaveToyWindow(QMainWindow):
         self.selected_phoneme_accent_spins: List[QDoubleSpinBox] = []
         self.selected_phoneme_action_buttons: List[QAbstractButton] = []
         self.articulation_voice_profile_combo: QComboBox | None = None
+        self.current_voice_variation_id = ARTICULATION_SOURCE_CURRENT
+        self.voice_source_dock_selector: QComboBox | None = None
+        self.voice_source_dock_status_label: QLabel | None = None
+        self.voice_source_dock_mode_label: QLabel | None = None
+        self.voice_source_dock_badge_label: QLabel | None = None
+        self.voice_source_dock_color_label: QLabel | None = None
+        self.voice_source_dock_category_label: QLabel | None = None
+        self.current_voice_panel_name_label: QLabel | None = None
+        self.current_voice_panel_mode_label: QLabel | None = None
+        self.current_voice_panel_badge_label: QLabel | None = None
+        self.current_voice_panel_waveform_label: QLabel | None = None
         self.articulation_boundary_curve_canvas: ArticulationTrackCanvas | None = None
         self.articulation_envelope_canvas: ArticulationTrackCanvas | None = None
         self.articulation_formant_canvas: ArticulationTrackCanvas | None = None
@@ -14307,6 +14380,9 @@ class WaveToyWindow(QMainWindow):
         ):
             self.articulation_timeline_internal_subtabs.addTab(internal_page, label)
 
+        voice_source_dock = self._build_voice_source_dock()
+        chain_tab_layout.addWidget(voice_source_dock)
+
         chain_split = QHBoxLayout()
         chain_split.setObjectName("speechBuilderWorkspace")
         chain_split.setSpacing(10)
@@ -14339,6 +14415,7 @@ class WaveToyWindow(QMainWindow):
         selected_header = QLabel("Selected Phoneme")
         selected_header.setObjectName("timelineInspectorText")
         build_sidebar.addWidget(selected_header)
+        build_sidebar.addWidget(self._build_current_voice_status_panel())
 
         chain_card = self._toy_group("Chain Editor")
         build_primary.addWidget(chain_card)
@@ -14404,9 +14481,9 @@ class WaveToyWindow(QMainWindow):
         render_primary_hint.setWordWrap(True)
         render_primary_layout.addWidget(render_primary_hint)
         primary_word_row = make_button_row_or_toolbar(
-            make_transport_button("▶ Play Word Preview", self._play_articulation_word, "Preview the smoothed word render; Create Word remains the primary reliable output"),
+            make_transport_button("▶ Preview Word", self._play_articulation_word, "Preview the smoothed word render; Create Word remains the primary reliable output"),
             make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain"),
-            make_transport_button("▶ Play Chain Preview", self._play_articulation_chain, "Preview the raw phoneme sequence for order checking"),
+            make_transport_button("▶ Preview Chain", self._play_articulation_chain, "Preview the raw phoneme sequence for order checking"),
             spacing=8,
         )
         render_primary_layout.addWidget(primary_word_row)
@@ -14444,7 +14521,7 @@ class WaveToyWindow(QMainWindow):
         self.musical_timing_enabled_checkbox.setChecked(self.musical_timing_settings.enabled)
         self.musical_timing_enabled_checkbox.setToolTip("Default off: keep millisecond timing unless explicitly enabled.")
         self.musical_timing_enabled_checkbox.toggled.connect(self._set_musical_timing_enabled)
-        self.musical_bpm_spin = QDoubleSpinBox()
+        self.musical_bpm_spin = NoWheelDoubleSpinBox()
         self.musical_bpm_spin.setRange(20.0, 320.0)
         self.musical_bpm_spin.setSingleStep(1.0)
         self.musical_bpm_spin.setDecimals(1)
@@ -14528,7 +14605,7 @@ class WaveToyWindow(QMainWindow):
         continuous_tuning_row.setSpacing(8)
         formant_label = QLabel("Formant Intensity")
         formant_label.setObjectName("timelineInspectorText")
-        self.continuous_formant_intensity_spin = QDoubleSpinBox()
+        self.continuous_formant_intensity_spin = NoWheelDoubleSpinBox()
         self.continuous_formant_intensity_spin.setRange(0.0, 1.0)
         self.continuous_formant_intensity_spin.setSingleStep(0.05)
         self.continuous_formant_intensity_spin.setDecimals(2)
@@ -14537,7 +14614,7 @@ class WaveToyWindow(QMainWindow):
         self.continuous_formant_intensity_spin.valueChanged.connect(self._set_continuous_formant_intensity)
         pitch_smoothing_label = QLabel("Pitch Glide ms")
         pitch_smoothing_label.setObjectName("timelineInspectorText")
-        self.continuous_pitch_smoothing_spin = QSpinBox()
+        self.continuous_pitch_smoothing_spin = NoWheelSpinBox()
         self.continuous_pitch_smoothing_spin.setRange(0, 120)
         self.continuous_pitch_smoothing_spin.setSingleStep(5)
         self.continuous_pitch_smoothing_spin.setValue(int(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", 20)))
@@ -14899,6 +14976,206 @@ class WaveToyWindow(QMainWindow):
             if label is not None:
                 label.setText(summary)
 
+    def _voice_variation_details(self, variation_id: str | None = None) -> Dict[str, str]:
+        """Return display metadata for the current Speech Builder voice variation."""
+        variation_id = str(variation_id or getattr(self, "current_voice_variation_id", ARTICULATION_SOURCE_CURRENT) or ARTICULATION_SOURCE_CURRENT)
+        fallback = {"id": variation_id, "label": "Current Classic Wave", "category": "classic_controls"}
+        variation = next((option for option in self.available_chain_voice_wave_variations() if option.get("id") == variation_id), fallback)
+        metadata = self._source_metadata_for_variation_id(variation_id)
+        mode = str(metadata.get("source_mode") or ARTICULATION_SOURCE_DEFAULT)
+        wave_id = metadata.get("source_wave_id")
+        audio_path = metadata.get("source_audio_path")
+        badge = articulation_source_badge(mode, str(wave_id) if wave_id else None, str(audio_path) if audio_path else None)
+        if mode == ARTICULATION_SOURCE_MIX_WAVE:
+            waveform = str(wave_id or "Mix Wave")
+        elif mode == ARTICULATION_SOURCE_CURRENT:
+            waveform = "Current Classic Wave"
+        elif mode == ARTICULATION_SOURCE_IMPORTED:
+            waveform = "Imported Audio"
+        else:
+            waveform = "Default Voice"
+        source_mode_label = {
+            ARTICULATION_SOURCE_DEFAULT: "Default Voice",
+            ARTICULATION_SOURCE_CURRENT: "Voice Variation",
+            ARTICULATION_SOURCE_MIX_WAVE: "Voice Variation",
+            ARTICULATION_SOURCE_IMPORTED: "Imported Audio",
+        }.get(mode, mode.replace("_", " ").title())
+        return {
+            "id": variation_id,
+            "label": str(variation.get("label") or badge),
+            "category": str(variation.get("category") or "voice"),
+            "source_mode": mode,
+            "source_mode_label": source_mode_label,
+            "badge": badge,
+            "waveform": waveform,
+        }
+
+    def _voice_preview_color_for_variation(self, variation_id: str | None = None) -> str:
+        details = self._voice_variation_details(variation_id)
+        if details["source_mode"] == ARTICULATION_SOURCE_MIX_WAVE:
+            return str(MiniWavePreview.COLORS.get(details["waveform"], QColor("#b8f2e6")).name())
+        if details["source_mode"] == ARTICULATION_SOURCE_IMPORTED:
+            return "#d7b9ff"
+        if details["source_mode"] == ARTICULATION_SOURCE_CURRENT:
+            return "#5cdb95"
+        return "#ffd166"
+
+    def _build_voice_source_dock(self) -> QWidget:
+        dock = self._toy_group("Voice Source Dock")
+        dock.setObjectName("voiceSourceDock")
+        layout = QVBoxLayout(dock)
+        layout.setContentsMargins(10, 16, 10, 10)
+        layout.setSpacing(8)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        self.voice_source_dock_status_label = QLabel("Current Voice: Current Classic Wave")
+        self.voice_source_dock_status_label.setObjectName("timelineInspectorText")
+        self.voice_source_dock_mode_label = QLabel("Source Mode: Voice Variation")
+        self.voice_source_dock_mode_label.setObjectName("articulationIpaBadge")
+        self.voice_source_dock_badge_label = QLabel("Badge: WaveToy Sound")
+        self.voice_source_dock_badge_label.setObjectName("articulationIpaBadge")
+        self.voice_source_dock_color_label = QLabel("Preview Color")
+        self.voice_source_dock_color_label.setObjectName("articulationIpaBadge")
+        self.voice_source_dock_category_label = QLabel("Category: classic_controls")
+        self.voice_source_dock_category_label.setObjectName("articulationIpaBadge")
+        for label in (
+            self.voice_source_dock_status_label,
+            self.voice_source_dock_mode_label,
+            self.voice_source_dock_badge_label,
+            self.voice_source_dock_color_label,
+            self.voice_source_dock_category_label,
+        ):
+            label.setAlignment(Qt.AlignCenter)
+            status_row.addWidget(label)
+        layout.addLayout(status_row)
+
+        controls = QHBoxLayout()
+        controls.setObjectName("voiceSourceDockToolbar")
+        controls.setSpacing(8)
+        controls.addWidget(QLabel("Voice Selector"))
+        self.voice_source_dock_selector = NoWheelComboBox()
+        self.voice_source_dock_selector.setObjectName("voiceSourceDockVoiceSelector")
+        apply_compact_combo_policy(self.voice_source_dock_selector, minimum=180, maximum=280)
+        self.voice_source_dock_selector.currentIndexChanged.connect(lambda _row, combo=self.voice_source_dock_selector: self._select_current_voice_from_selector(combo))
+        controls.addWidget(self.voice_source_dock_selector, 1)
+        controls.addWidget(make_secondary_action_button("Previous Voice", self._select_previous_voice_source, "Select the previous voice variation without changing chain cards"))
+        controls.addWidget(make_secondary_action_button("Next Voice", self._select_next_voice_source, "Select the next voice variation without changing chain cards"))
+        controls.addWidget(make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview only the current voice variation"))
+        controls.addWidget(make_secondary_action_button("Refresh Library", self._refresh_voice_source_library, "Refresh Voice Source Dock options without migrating project data"))
+        layout.addLayout(controls)
+
+        ready = QLabel("Ready")
+        ready.setObjectName("symbolHint")
+        ready.setAlignment(Qt.AlignRight)
+        layout.addWidget(ready)
+        self._refresh_voice_source_controls()
+        return dock
+
+    def _build_current_voice_status_panel(self) -> QWidget:
+        panel = self._toy_group("Current Voice")
+        panel.setObjectName("currentVoiceStatusPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 16, 10, 10)
+        layout.setSpacing(6)
+        self.current_voice_panel_name_label = QLabel("Variation: Current Classic Wave")
+        self.current_voice_panel_mode_label = QLabel("Source Mode: Voice Variation")
+        self.current_voice_panel_badge_label = QLabel("Voice Badge: WaveToy Sound")
+        self.current_voice_panel_waveform_label = QLabel("Waveform Type: Current Classic Wave")
+        for label in (
+            self.current_voice_panel_name_label,
+            self.current_voice_panel_mode_label,
+            self.current_voice_panel_badge_label,
+            self.current_voice_panel_waveform_label,
+        ):
+            label.setObjectName("symbolHint")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        layout.addWidget(make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview only the current voice variation"))
+        self._refresh_voice_source_controls()
+        return panel
+
+    def _refresh_voice_source_controls(self) -> None:
+        variations = self.available_chain_voice_wave_variations()
+        if not any(option.get("id") == getattr(self, "current_voice_variation_id", None) for option in variations):
+            self.current_voice_variation_id = variations[0]["id"] if variations else ARTICULATION_SOURCE_CURRENT
+        selector = getattr(self, "voice_source_dock_selector", None)
+        if selector is not None:
+            selector.blockSignals(True)
+            selector.clear()
+            selected_index = -1
+            for option_index, variation in enumerate(variations):
+                selector.addItem(variation["label"], variation["id"])
+                if variation["id"] == self.current_voice_variation_id:
+                    selected_index = option_index
+            selector.setCurrentIndex(selected_index)
+            selector.blockSignals(False)
+        for combo in getattr(self, "selected_phoneme_source_combos", []):
+            combo.blockSignals(True)
+            combo.clear()
+            selected_index = -1
+            for option_index, variation in enumerate(variations):
+                combo.addItem(variation["label"], variation["id"])
+                if variation["id"] == self.current_voice_variation_id:
+                    selected_index = option_index
+            combo.setCurrentIndex(selected_index)
+            combo.blockSignals(False)
+        details = self._voice_variation_details()
+        color = self._voice_preview_color_for_variation()
+        label_updates = (
+            (getattr(self, "voice_source_dock_status_label", None), f"Current Voice: {details['label']}"),
+            (getattr(self, "voice_source_dock_mode_label", None), f"Source Mode: {details['source_mode_label']}"),
+            (getattr(self, "voice_source_dock_badge_label", None), f"Badge: {details['badge']}"),
+            (getattr(self, "voice_source_dock_color_label", None), f"Preview Color: {color}"),
+            (getattr(self, "voice_source_dock_category_label", None), f"Category: {details['category']}"),
+            (getattr(self, "current_voice_panel_name_label", None), f"Variation: {details['label']}"),
+            (getattr(self, "current_voice_panel_mode_label", None), f"Source Mode: {details['source_mode_label']}"),
+            (getattr(self, "current_voice_panel_badge_label", None), f"Voice Badge: {details['badge']}"),
+            (getattr(self, "current_voice_panel_waveform_label", None), f"Waveform Type: {details['waveform']}"),
+        )
+        for label, text in label_updates:
+            if label is not None:
+                label.setText(text)
+        if self.voice_source_dock_color_label is not None:
+            self.voice_source_dock_color_label.setStyleSheet(f"QLabel#articulationIpaBadge {{ background: {color}; }}")
+
+    def _select_current_voice_from_selector(self, combo: QComboBox) -> None:
+        variation_id = combo.currentData()
+        if variation_id is None:
+            return
+        self.current_voice_variation_id = str(variation_id)
+        self._refresh_voice_source_controls()
+
+    def _select_relative_voice_source(self, offset: int) -> None:
+        variations = self.available_chain_voice_wave_variations()
+        if not variations:
+            return
+        ids = [str(option["id"]) for option in variations]
+        try:
+            index = ids.index(str(getattr(self, "current_voice_variation_id", ids[0])))
+        except ValueError:
+            index = 0
+        self.current_voice_variation_id = ids[(index + offset) % len(ids)]
+        self._refresh_voice_source_controls()
+
+    def _select_previous_voice_source(self, checked: bool = False) -> None:
+        del checked
+        self._select_relative_voice_source(-1)
+
+    def _select_next_voice_source(self, checked: bool = False) -> None:
+        del checked
+        self._select_relative_voice_source(1)
+
+    def _refresh_voice_source_library(self, checked: bool = False) -> None:
+        del checked
+        self._refresh_voice_source_controls()
+        self._show_non_modal_status("Voice Source Dock refreshed. Ready.")
+
+    def _preview_current_voice(self, checked: bool = False) -> None:
+        del checked
+        # Voice preview intentionally reuses the existing playback path and does not assign or render chain cards.
+        self._play()
+
     def _build_speech_builder_phoneme_library_panel(self) -> QWidget:
         panel = self._toy_group("Phoneme Library")
         panel.setObjectName("speechBuilderPhonemeLibrary")
@@ -14964,11 +15241,14 @@ class WaveToyWindow(QMainWindow):
         source_combo = NoWheelComboBox()
         source_combo.setObjectName("selectedPhonemeVoiceWaveVariationSelector")
         apply_compact_combo_policy(source_combo, minimum=170, maximum=260)
-        source_combo.currentIndexChanged.connect(lambda _row, combo=source_combo: self._set_selected_chain_item_source_from_selector(combo))
+        source_combo.currentIndexChanged.connect(lambda _row, combo=source_combo: self._select_current_voice_from_selector(combo))
         source_row.addWidget(source_combo, 1)
-        source_row.addWidget(make_secondary_action_button("Apply to Selected", self._apply_selected_source_selector_to_selected, "Apply the selected Voice/Wave Variation to only the selected phoneme"))
+        source_row.addWidget(make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview only the current Voice Source Dock variation"))
         layout.addLayout(source_row)
         source_actions = make_button_row_or_toolbar(
+            make_secondary_action_button("Apply Voice to Selected", self._apply_current_voice_to_selected_chain_item, "Apply to Selected scope: apply the Current Voice to only the selected phoneme"),
+            make_secondary_action_button("Apply Voice to Remaining", self._apply_current_voice_to_remaining_chain, "Apply the Current Voice to the selected phoneme and every following phoneme"),
+            make_secondary_action_button("Apply Voice to Whole Chain", self._apply_current_voice_to_whole_chain, "Apply the Current Voice to the entire editable chain"),
             make_secondary_action_button("Reset Selected Source", self._reset_selected_chain_item_source, "Restore Default Voice for only the selected phoneme"),
             spacing=8,
         )
@@ -14980,27 +15260,27 @@ class WaveToyWindow(QMainWindow):
         timing_row = QHBoxLayout()
         timing_row.setSpacing(8)
         timing_row.addWidget(QLabel("Duration"))
-        duration_spin = QSpinBox()
+        duration_spin = NoWheelSpinBox()
         duration_spin.setRange(80, 5000)
         duration_spin.setSingleStep(10)
         duration_spin.setSuffix(" ms")
         duration_spin.valueChanged.connect(self._set_selected_component_duration_ms)
         timing_row.addWidget(duration_spin)
         timing_row.addWidget(QLabel("Transition"))
-        transition_spin = QSpinBox()
+        transition_spin = NoWheelSpinBox()
         transition_spin.setRange(0, 250)
         transition_spin.setSingleStep(5)
         transition_spin.setSuffix(" ms")
         transition_spin.valueChanged.connect(self._set_selected_component_transition_ms)
         timing_row.addWidget(transition_spin)
         timing_row.addWidget(QLabel("Accentuation"))
-        accent_slider = QSlider(Qt.Horizontal)
+        accent_slider = NoWheelSlider(Qt.Horizontal)
         accent_slider.setRange(-120, 120)
         accent_slider.setTickPosition(QSlider.TicksBelow)
         accent_slider.setTickInterval(30)
         accent_slider.valueChanged.connect(lambda raw: self._set_selected_component_accentuation(raw / 10.0, source="slider"))
         timing_row.addWidget(accent_slider, 1)
-        accent_spin = QDoubleSpinBox()
+        accent_spin = NoWheelDoubleSpinBox()
         accent_spin.setRange(-24.0, 24.0)
         accent_spin.setSingleStep(0.5)
         accent_spin.setDecimals(1)
@@ -15017,7 +15297,7 @@ class WaveToyWindow(QMainWindow):
             make_export_import_button("Export Word", self._export_articulation_word, "Export the rendered word without visiting Render"),
             make_secondary_action_button("Send Word to Timeline", self._send_articulation_word_to_timeline, "Send the rendered word to the Timeline"),
             make_transport_button("▶ Play Selected Phoneme", lambda checked=False: self._play_chain_item(self.articulation_selected_chain_index if isinstance(self.articulation_selected_chain_index, int) else -1), "Preview only the selected phoneme"),
-            make_transport_button("▶ Play Chain Preview", self._play_articulation_chain, "Preview the raw chain; Create Word is the primary output"),
+            make_transport_button("▶ Preview Chain", self._play_articulation_chain, "Preview the raw chain; Create Word is the primary output"),
             make_secondary_action_button("Duplicate", lambda checked=False: self._duplicate_selected_component(), "Duplicate the selected phoneme"),
             make_secondary_action_button("Move Left", lambda checked=False: self._move_selected_component(-1), "Move selected phoneme left"),
             make_secondary_action_button("Move Right", lambda checked=False: self._move_selected_component(1), "Move selected phoneme right"),
@@ -15042,6 +15322,7 @@ class WaveToyWindow(QMainWindow):
         self.selected_component_transition_spin = transition_spin
         self.selected_component_accent_slider = accent_slider
         self.selected_component_accent_spin = accent_spin
+        self._refresh_voice_source_controls()
         return panel
 
     def _build_selected_component_controls(self) -> QWidget:
@@ -15062,14 +15343,14 @@ class WaveToyWindow(QMainWindow):
         row1 = QHBoxLayout()
         row1.setSpacing(8)
         row1.addWidget(QLabel("Duration"))
-        self.selected_component_duration_spin = QSpinBox()
+        self.selected_component_duration_spin = NoWheelSpinBox()
         self.selected_component_duration_spin.setRange(80, 5000)
         self.selected_component_duration_spin.setSingleStep(10)
         self.selected_component_duration_spin.setSuffix(" ms")
         self.selected_component_duration_spin.valueChanged.connect(self._set_selected_component_duration_ms)
         row1.addWidget(self.selected_component_duration_spin)
         row1.addWidget(QLabel("Transition"))
-        self.selected_component_transition_spin = QSpinBox()
+        self.selected_component_transition_spin = NoWheelSpinBox()
         self.selected_component_transition_spin.setRange(0, 250)
         self.selected_component_transition_spin.setSingleStep(5)
         self.selected_component_transition_spin.setSuffix(" ms")
@@ -15081,13 +15362,13 @@ class WaveToyWindow(QMainWindow):
         accent_row = QHBoxLayout()
         accent_row.setSpacing(8)
         accent_row.addWidget(QLabel("Accentuation"))
-        self.selected_component_accent_slider = QSlider(Qt.Horizontal)
+        self.selected_component_accent_slider = NoWheelSlider(Qt.Horizontal)
         self.selected_component_accent_slider.setRange(-120, 120)
         self.selected_component_accent_slider.setTickPosition(QSlider.TicksBelow)
         self.selected_component_accent_slider.setTickInterval(30)
         self.selected_component_accent_slider.valueChanged.connect(lambda raw: self._set_selected_component_accentuation(raw / 10.0, source="slider"))
         accent_row.addWidget(self.selected_component_accent_slider, 1)
-        self.selected_component_accent_spin = QDoubleSpinBox()
+        self.selected_component_accent_spin = NoWheelDoubleSpinBox()
         self.selected_component_accent_spin.setRange(-24.0, 24.0)
         self.selected_component_accent_spin.setSingleStep(0.5)
         self.selected_component_accent_spin.setDecimals(1)
@@ -15104,14 +15385,14 @@ class WaveToyWindow(QMainWindow):
         row2 = QHBoxLayout()
         row2.setSpacing(8)
         row2.addWidget(QLabel("Voice strength"))
-        self.selected_component_voice_spin = QDoubleSpinBox()
+        self.selected_component_voice_spin = NoWheelDoubleSpinBox()
         self.selected_component_voice_spin.setRange(0.0, 1.0)
         self.selected_component_voice_spin.setSingleStep(0.05)
         self.selected_component_voice_spin.setDecimals(2)
         self.selected_component_voice_spin.valueChanged.connect(lambda value: self._set_selected_component_phoneme_float("voice_strength", value))
         row2.addWidget(self.selected_component_voice_spin)
         row2.addWidget(QLabel("Air pressure"))
-        self.selected_component_air_spin = QDoubleSpinBox()
+        self.selected_component_air_spin = NoWheelDoubleSpinBox()
         self.selected_component_air_spin.setRange(0.0, 1.0)
         self.selected_component_air_spin.setSingleStep(0.05)
         self.selected_component_air_spin.setDecimals(2)
@@ -15434,7 +15715,7 @@ class WaveToyWindow(QMainWindow):
     def _add_voice_box_slider_row(self, layout: QGridLayout, row: int, field_name: str) -> None:
         label_text = field_name.replace("_", " ")
         label = QLabel(label_text)
-        slider = QSlider(Qt.Horizontal)
+        slider = NoWheelSlider(Qt.Horizontal)
         slider.setRange(0, 100)
         slider.setToolTip(f"VoiceBoxState.{field_name}: normalized 0.0–1.0 render-copy control.")
         value_label = QLabel("0.50")
@@ -15460,7 +15741,7 @@ class WaveToyWindow(QMainWindow):
 
     def _add_resonance_slider_row(self, layout: QGridLayout, row: int, field_name: str) -> None:
         label = QLabel(field_name.replace("_", " "))
-        slider = QSlider(Qt.Horizontal)
+        slider = NoWheelSlider(Qt.Horizontal)
         if field_name.startswith("formant_shift_"):
             slider.setRange(-100, 100)
             default_label = "0.00"
@@ -16066,23 +16347,10 @@ class WaveToyWindow(QMainWindow):
         return articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)
 
     def _refresh_selected_phoneme_source_combos(self, item: ArticulationChainItem | None) -> None:
-        combos = list(getattr(self, "selected_phoneme_source_combos", []))
-        if not combos:
-            return
-        current_variation_id = self._chain_item_variation_id(item.phoneme_for_render()) if item is not None else ARTICULATION_SOURCE_DEFAULT
-        for combo in combos:
-            combo.blockSignals(True)
-            combo.clear()
-            selected_option = -1
-            for option_index, variation in enumerate(self.available_chain_voice_wave_variations()):
-                combo.addItem(variation["label"], variation["id"])
-                if variation["id"] == current_variation_id:
-                    selected_option = option_index
-            if item is not None and selected_option < 0:
-                combo.addItem(f"Existing: {self._selected_chain_item_source_label()}", current_variation_id)
-                selected_option = combo.count() - 1
-            combo.setCurrentIndex(selected_option if item is not None else -1)
-            combo.blockSignals(False)
+        del item
+        # The Selected Phoneme workbench selector mirrors the always-visible Voice Source Dock.
+        # Selecting a voice remains non-destructive until an Apply Voice scope button is pressed.
+        self._refresh_voice_source_controls()
 
     def _set_selected_chain_item_source_from_selector(self, combo: QComboBox) -> None:
         if self._selected_chain_item() is None:
@@ -16165,7 +16433,7 @@ class WaveToyWindow(QMainWindow):
         edit_row.setSpacing(6)
         duration_label = QLabel("Duration")
         duration_label.setObjectName("phonemeCardSummary")
-        duration_spin = QSpinBox()
+        duration_spin = NoWheelSpinBox()
         duration_spin.setObjectName("chainCardDurationSpin")
         duration_spin.setRange(80, 5000)
         duration_spin.setSingleStep(10)
@@ -16208,7 +16476,7 @@ class WaveToyWindow(QMainWindow):
         actions = QHBoxLayout()
         actions.setSpacing(6)
         for text, callback, danger in (
-            ("▶ Play", lambda checked=False, i=index: self._play_chain_item(i), False),
+            ("▶ Play Selected Phoneme", lambda checked=False, i=index: self._play_chain_item(i), False),
             ("Duplicate", lambda checked=False, i=index: self._duplicate_articulation_chain_item(i), False),
             ("Move Left", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
             ("Move Right", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
@@ -16269,7 +16537,7 @@ class WaveToyWindow(QMainWindow):
         fast.setObjectName("articulationToyEndpoint")
         smooth = QLabel("smooth")
         smooth.setObjectName("articulationToyEndpoint")
-        slider = QSlider(Qt.Horizontal)
+        slider = NoWheelSlider(Qt.Horizontal)
         slider.setMinimum(0)
         slider.setMaximum(250)
         slider.setSingleStep(5)
@@ -16574,6 +16842,36 @@ class WaveToyWindow(QMainWindow):
         self._set_articulation_ui_from_phoneme(phoneme, regenerate=False)
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
+
+    def _apply_current_voice_to_chain_range(self, start: int, stop: int) -> None:
+        metadata = self._source_metadata_for_variation_id(getattr(self, "current_voice_variation_id", ARTICULATION_SOURCE_CURRENT))
+        for index in range(max(0, start), min(stop, len(self.articulation_chain_items))):
+            item = self.articulation_chain_items[index]
+            for key, value in metadata.items():
+                setattr(item.phoneme, key, value)
+            item.phoneme = item.phoneme.clamped()
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
+    def _apply_current_voice_to_selected_chain_item(self, checked: bool = False) -> None:
+        del checked
+        selected = self.articulation_selected_chain_index
+        if selected is None or selected >= len(self.articulation_chain_items):
+            QMessageBox.information(self, "Articulation Chain", "Select a chain phoneme first.")
+            return
+        self._apply_current_voice_to_chain_range(int(selected), int(selected) + 1)
+
+    def _apply_current_voice_to_remaining_chain(self, checked: bool = False) -> None:
+        del checked
+        selected = self.articulation_selected_chain_index
+        if selected is None or selected >= len(self.articulation_chain_items):
+            QMessageBox.information(self, "Articulation Chain", "Select a chain phoneme first.")
+            return
+        self._apply_current_voice_to_chain_range(int(selected), len(self.articulation_chain_items))
+
+    def _apply_current_voice_to_whole_chain(self, checked: bool = False) -> None:
+        del checked
+        self._apply_current_voice_to_chain_range(0, len(self.articulation_chain_items))
 
     def _apply_current_wave_to_selected_chain_item(self, checked: bool = False) -> None:
         del checked

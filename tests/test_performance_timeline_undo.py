@@ -56,7 +56,7 @@ def _install_qt_stubs():
         qtcore: "QEvent QMimeData QPoint QPointF QRect QRectF QSize QTimer QByteArray".split(),
         qtgui: "QAction QColor QDrag QFont QKeySequence QLinearGradient QPainter QPainterPath QPen QPixmap QShortcut".split(),
         qtsvg: "QSvgRenderer".split(),
-        qtwidgets: "QApplication QAbstractButton QAbstractSpinBox QCheckBox QComboBox QDialog QFileDialog QGraphicsDropShadowEffect QGridLayout QInputDialog QGroupBox QHBoxLayout QLabel QLayout QLineEdit QMainWindow QMessageBox QMenu QPushButton QScrollArea QAbstractItemView QHeaderView QSlider QStyle QStackedWidget QTabWidget QToolButton QSpinBox QDoubleSpinBox QDockWidget QSizePolicy QTableWidget QTableWidgetItem QTextEdit QVBoxLayout QWidget".split(),
+        qtwidgets: "QApplication QAbstractButton QAbstractSpinBox QCheckBox QComboBox QDialog QFileDialog QGraphicsDropShadowEffect QGridLayout QInputDialog QGroupBox QHBoxLayout QLabel QLayout QLineEdit QListWidget QMainWindow QMessageBox QMenu QPushButton QScrollArea QAbstractItemView QHeaderView QSlider QStyle QStackedWidget QTabWidget QToolButton QSpinBox QDoubleSpinBox QDockWidget QSizePolicy QTableWidget QTableWidgetItem QTextEdit QVBoxLayout QWidget".split(),
     }.items():
         for name in names:
             setattr(module, name, type(name, (_DummyQtBase,), {}))
