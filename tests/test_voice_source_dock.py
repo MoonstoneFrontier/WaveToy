@@ -37,12 +37,12 @@ def test_voice_source_dock_displays_voice_picker_without_raw_metadata_labels():
 
     for expected in (
         'Active Voice:',
-        'Voice preset selector',
+        'Voice selector',
         'voiceSourceDockVoiceSelector',
         '▶ Preview Voice',
-        'Apply to Selected',
-        'Apply to Remaining',
-        'Apply to Whole Chain',
+        'Apply Voice to Selected',
+        'Apply Voice to Remaining',
+        'Apply Voice to Whole Chain',
         'Refresh Voices',
         'Selecting a voice does not change the chain until Apply is clicked.',
         'Ready',

@@ -1223,7 +1223,9 @@ class WaveToyStorage:
         self.legacy_imports_dir = self.root / "LegacyImports"
         self.audio_dir = self.root / "Audio"
         self.voices_dir = self.root / "Voices"
+        self.chains_dir = self.root / "Chains"
         self.words_dir = self.root / "Words"
+        self.analyses_dir = self.root / "Analyses"
         self.phonemes_dir = self.root / "Phonemes"
         self.animations_dir = self.root / "Animations"
         self.visemes_dir = self.root / "Visemes"
@@ -1240,7 +1242,9 @@ class WaveToyStorage:
             self.legacy_imports_dir,
             self.audio_dir,
             self.voices_dir,
+            self.chains_dir,
             self.words_dir,
+            self.analyses_dir,
             self.phonemes_dir,
             self.animations_dir,
             self.visemes_dir,
@@ -11620,6 +11624,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_wave_status_label: QLabel | None = None
         self.articulation_source_combo: QComboBox | None = None
         self.articulation_source_badge_label: QLabel | None = None
+        self.saved_voice_path_status_label: QLabel | None = None
         self.articulation_chain_items: List[ArticulationChainItem] = []
         self.articulation_selected_chain_index: int | None = None
         self.articulation_chain_widget: QWidget | None = None
@@ -13572,6 +13577,11 @@ class WaveToyWindow(QMainWindow):
         controls.addWidget(self.load_button)
         controls.addWidget(self.loop_status_label, 1)
 
+        self.saved_voice_path_status_label = QLabel("Voice presets save to the active data root → Voices/.")
+        self.saved_voice_path_status_label.setObjectName("symbolHint")
+        self.saved_voice_path_status_label.setWordWrap(True)
+        outer.addWidget(self.saved_voice_path_status_label)
+
         widgets_to_regenerate = [
             self.duration_slider,
             self.pitch_start,
@@ -15058,16 +15068,16 @@ class WaveToyWindow(QMainWindow):
         controls = QHBoxLayout()
         controls.setObjectName("voiceSourceDockToolbar")
         controls.setSpacing(8)
-        controls.addWidget(QLabel("Voice preset selector"))
+        controls.addWidget(QLabel("Voice selector"))
         self.voice_source_dock_selector = NoWheelComboBox()
         self.voice_source_dock_selector.setObjectName("voiceSourceDockVoiceSelector")
         apply_compact_combo_policy(self.voice_source_dock_selector, minimum=180, maximum=280)
         self.voice_source_dock_selector.currentIndexChanged.connect(lambda _row, combo=self.voice_source_dock_selector: self._select_current_voice_from_selector(combo))
         controls.addWidget(self.voice_source_dock_selector, 1)
         controls.addWidget(make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview only the active saved or unsaved voice"))
-        controls.addWidget(make_secondary_action_button("Apply to Selected", self._apply_current_voice_to_selected_chain_item, "Apply the active voice to only the selected phoneme"))
-        controls.addWidget(make_secondary_action_button("Apply to Remaining", self._apply_current_voice_to_remaining_chain, "Apply the active voice to the selected phoneme and every following phoneme"))
-        controls.addWidget(make_secondary_action_button("Apply to Whole Chain", self._apply_current_voice_to_whole_chain, "Apply the active voice to the entire editable chain"))
+        controls.addWidget(make_secondary_action_button("Apply Voice to Selected", self._apply_current_voice_to_selected_chain_item, "Apply the active voice to only the selected phoneme"))
+        controls.addWidget(make_secondary_action_button("Apply Voice to Remaining", self._apply_current_voice_to_remaining_chain, "Apply the active voice to the selected phoneme and every following phoneme"))
+        controls.addWidget(make_secondary_action_button("Apply Voice to Whole Chain", self._apply_current_voice_to_whole_chain, "Apply the active voice to the entire editable chain"))
         controls.addWidget(make_secondary_action_button("Refresh Voices", self._refresh_voice_source_library, "Refresh saved Voice Lab presets and imported voice options without changing chain cards"))
         layout.addLayout(controls)
 
@@ -15126,9 +15136,15 @@ class WaveToyWindow(QMainWindow):
             combo.blockSignals(False)
         details = self._voice_variation_details()
         source_type = details.get("source_type", "Saved Voice" if details.get("category") == "voice_preset" else "Current Unsaved Voice")
+        has_saved_voices = any(option.get("category") == "voice_preset" for option in variations)
+        voice_picker_text = (
+            f"{source_type} • choose a saved Voice Lab preset, current unsaved sound, or default voice."
+            if has_saved_voices
+            else "No saved voices yet. Create one in Voice Lab with Save Voice Preset."
+        )
         label_updates = (
             (getattr(self, "voice_source_dock_status_label", None), f"Active Voice: {details['label']}"),
-            (getattr(self, "voice_source_dock_type_label", None), f"{source_type} • choose a Voice Lab preset, current unsaved sound, or supported import."),
+            (getattr(self, "voice_source_dock_type_label", None), voice_picker_text),
             (getattr(self, "current_voice_panel_name_label", None), f"Active Voice: {details['label']}"),
             (getattr(self, "current_voice_panel_type_label", None), source_type),
         )
@@ -16284,14 +16300,53 @@ class WaveToyWindow(QMainWindow):
             "include_render_mode": include_render_mode,
         })
 
+    def _saved_voice_preset_files(self) -> List[Path]:
+        """Return saved project/data-root Voice Lab preset files."""
+        voices_dir = getattr(getattr(self, "storage", None), "voices_dir", None)
+        if voices_dir is None:
+            return []
+        try:
+            voices_dir.mkdir(parents=True, exist_ok=True)
+            return sorted(voices_dir.glob("*.voice.json"))
+        except Exception:
+            return []
+
+    def _read_saved_voice_preset_file(self, path: Path) -> Dict[str, object] | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        name = str(data.get("name") or path.name[:-len(".voice.json")]).strip() or "Saved Voice"
+        recipe = dict(data.get("recipe_snapshot") or {}) if isinstance(data.get("recipe_snapshot"), dict) else {}
+        recipe.setdefault("name", name)
+        recipe["asset_type"] = "voice_preset"
+        recipe["source_label"] = str(data.get("source") or "Voice Lab")
+        recipe["voice_preset"] = True
+        recipe["voice_file"] = str(path)
+        recipe["voice_metadata"] = data
+        recipe["wave_settings"] = dict(data.get("wave_settings") or {}) if isinstance(data.get("wave_settings"), dict) else {}
+        return recipe
+
     def _saved_voice_preset_recipes(self) -> List[Dict[str, object]]:
         """Return Voice Lab recipes that should appear in Speech Builder voice pickers."""
-        if not hasattr(self, "user_presets_path"):
-            return []
         presets: List[Dict[str, object]] = []
-        for recipe in self._read_user_recipes():
-            if bool(recipe.get("voice_preset")) or str(recipe.get("asset_type") or "") == "voice_preset":
-                presets.append(recipe)
+        seen_names: set[str] = set()
+        for path in self._saved_voice_preset_files():
+            recipe = self._read_saved_voice_preset_file(path)
+            if recipe is None:
+                continue
+            name = str(recipe.get("name") or "").strip()
+            presets.append(recipe)
+            seen_names.add(name)
+        if hasattr(self, "user_presets_path"):
+            for recipe in self._read_user_recipes():
+                if bool(recipe.get("voice_preset")) or str(recipe.get("asset_type") or "") == "voice_preset":
+                    name = str(recipe.get("name") or "").strip()
+                    if name and name in seen_names:
+                        continue
+                    presets.append(recipe)
         return presets
 
     def _saved_voice_preset_recipe_by_name(self, name: str) -> Dict[str, object] | None:
@@ -16302,13 +16357,14 @@ class WaveToyWindow(QMainWindow):
 
     def available_chain_voice_wave_variations(self) -> List[Dict[str, str]]:
         """Return compact per-card source choices without triggering render or export work."""
-        variations: List[Dict[str, str]] = [
-            {"id": ARTICULATION_SOURCE_DEFAULT, "label": "Default Voice", "category": "voice"},
-            {"id": ARTICULATION_SOURCE_CURRENT, "label": "Current Unsaved Voice Lab Sound", "category": "voice_lab"},
-        ]
+        variations: List[Dict[str, str]] = []
         for recipe in self._saved_voice_preset_recipes():
             name = str(recipe.get("name") or "Saved Voice").strip() or "Saved Voice"
             variations.append({"id": f"{ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX}{name}", "label": name, "category": "voice_preset"})
+        variations.extend([
+            {"id": ARTICULATION_SOURCE_CURRENT, "label": "Current Unsaved Voice Lab Sound", "category": "voice_lab"},
+            {"id": ARTICULATION_SOURCE_DEFAULT, "label": "Default Voice", "category": "voice"},
+        ])
         for wave_id in getattr(self, "wave_row_order", DEFAULT_WAVE_ORDER):
             variations.append({"id": f"{ARTICULATION_SOURCE_MIX_WAVE}:{wave_id}", "label": f"Mix Wave: {wave_id}", "category": "wave"})
         selected_asset = None
@@ -25158,6 +25214,54 @@ class WaveToyWindow(QMainWindow):
         safe_note = "".join(ch if ch.isalnum() else "_" for ch in note).strip("_") or "Voice"
         return f"{safe_note}_{contour}"
 
+    def _voice_preset_path_for_name(self, name: str) -> Path:
+        """Return the default .voice.json path for a Voice Lab preset name."""
+        safe_name = filesystem_safe_name(name, fallback="Voice")
+        return self.storage.voices_dir / f"{safe_name}.voice.json"
+
+    def _unique_voice_preset_path(self, name: str) -> Path:
+        """Choose a .voice.json filename without silently overwriting an existing preset."""
+        base_path = self._voice_preset_path_for_name(name)
+        if not base_path.exists():
+            return base_path
+        stem = base_path.name[:-len(".voice.json")]
+        for index in range(2, 1000):
+            candidate = base_path.with_name(f"{stem}_{index}.voice.json")
+            if not candidate.exists():
+                return candidate
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        return base_path.with_name(f"{stem}_{timestamp}.voice.json")
+
+    def _voice_preset_document(self, name: str, *, existing: Dict[str, object] | None = None) -> Dict[str, object]:
+        """Build saved Voice Lab preset metadata without embedding rendered audio."""
+        now = _utc_now_iso()
+        recipe = self._settings_to_recipe(name)
+        return {
+            "schema": "wavetoy.voice_preset.v1",
+            "name": name,
+            "created_at": str((existing or {}).get("created_at") or now),
+            "updated_at": now,
+            "source": "Voice Lab",
+            "recipe_snapshot": recipe,
+            "wave_settings": dict(recipe.get("settings", {})) if isinstance(recipe.get("settings"), dict) else {},
+            "preview_color": self._voice_preview_color_for_variation(ARTICULATION_SOURCE_CURRENT),
+            "optional_notes": str((existing or {}).get("optional_notes") or ""),
+        }
+
+    def _save_voice_preset_document(self, name: str) -> Path:
+        """Persist a Voice Lab preset under the active data root's Voices/ folder."""
+        clean_name = str(name).strip() or self._suggested_voice_preset_name()
+        path = self._unique_voice_preset_path(clean_name)
+        document = self._voice_preset_document(path.name[:-len(".voice.json")])
+        self.storage.write_json(path, document)
+        legacy_recipe = dict(document["recipe_snapshot"])
+        legacy_recipe["asset_type"] = "voice_preset"
+        legacy_recipe["source_label"] = "Voice Lab"
+        legacy_recipe["voice_preset"] = True
+        legacy_recipe["voice_file"] = str(path)
+        self._add_recipe_to_sound_experiments(legacy_recipe)
+        return path
+
     def _save_voice_preset(self, checked: bool = False) -> None:
         """Save the current Voice Lab recipe as a reusable Speech Builder voice preset."""
         del checked
@@ -25165,15 +25269,18 @@ class WaveToyWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "Save Voice Preset", "Voice preset name:", text=default_name)
         if not ok:
             return
-        clean_name = str(name).strip() or default_name
-        recipe = self._settings_to_recipe(clean_name)
-        recipe["asset_type"] = "voice_preset"
-        recipe["source_label"] = "Voice Lab"
-        recipe["voice_preset"] = True
-        self._add_recipe_to_sound_experiments(recipe)
+        try:
+            path = self._save_voice_preset_document(str(name).strip() or default_name)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not save voice preset", str(exc))
+            return
+        clean_name = path.name[:-len(".voice.json")]
         self.current_voice_variation_id = f"{ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX}{clean_name}"
         self._refresh_voice_source_controls()
-        self._show_non_modal_status(f"Saved Voice Preset: {clean_name}")
+        status_label = getattr(self, "saved_voice_path_status_label", None)
+        if status_label is not None:
+            status_label.setText(f"Saved Voice Preset: {path}")
+        self._show_non_modal_status(f"Saved Voice Preset: {clean_name} → {path}")
 
     def _save(self) -> None:
         self._generate()
