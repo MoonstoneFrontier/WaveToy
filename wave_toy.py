@@ -14308,25 +14308,48 @@ class WaveToyWindow(QMainWindow):
             self.articulation_timeline_internal_subtabs.addTab(internal_page, label)
 
         chain_split = QHBoxLayout()
-        chain_split.setSpacing(12)
+        chain_split.setObjectName("speechBuilderWorkspace")
+        chain_split.setSpacing(10)
         chain_tab_layout.addLayout(chain_split, 1)
+
+        library_column = QVBoxLayout()
+        library_column.setObjectName("speechBuilderPhonemeLibraryColumn")
+        library_column.setSpacing(8)
+        chain_split.addLayout(library_column, 1)
+
         build_primary = QVBoxLayout()
-        build_primary.setSpacing(10)
-        chain_split.addLayout(build_primary, 3)
+        build_primary.setObjectName("speechBuilderChainEditorColumn")
+        build_primary.setSpacing(8)
+        chain_split.addLayout(build_primary, 2)
+
         build_sidebar = QVBoxLayout()
-        build_sidebar.setSpacing(10)
+        build_sidebar.setObjectName("speechBuilderSelectedPhonemeColumn")
+        build_sidebar.setSpacing(8)
         chain_split.addLayout(build_sidebar, 1)
 
-        chain_card = self._toy_group("Chain Builder")
+        library_header = QLabel("Phoneme Library")
+        library_header.setObjectName("timelineInspectorText")
+        library_column.addWidget(library_header)
+        library_column.addWidget(self._build_speech_builder_phoneme_library_panel())
+
+        chain_header = QLabel("Chain Editor")
+        chain_header.setObjectName("timelineInspectorText")
+        build_primary.addWidget(chain_header)
+
+        selected_header = QLabel("Selected Phoneme")
+        selected_header.setObjectName("timelineInspectorText")
+        build_sidebar.addWidget(selected_header)
+
+        chain_card = self._toy_group("Chain Editor")
         build_primary.addWidget(chain_card)
         chain_layout = QVBoxLayout(chain_card)
         chain_layout.setContentsMargins(12, 18, 12, 12)
         chain_layout.setSpacing(8)
-        chain_hint = QLabel("Build AH → M → OO → N style chains. Each card can use Default Voice or inherit a waveform source.")
+        chain_hint = QLabel("Build AH → M → OO → N style chains. Select a card to focus the docked Selected Phoneme panel; common duration, source, duplicate, remove, and move edits stay inline on each card.")
         chain_hint.setObjectName("symbolHint")
         chain_hint.setWordWrap(True)
         chain_layout.addWidget(chain_hint)
-        primary_label = QLabel("Workflow: Add Current → Create Word → Speech Assets → Add to Timeline")
+        primary_label = QLabel("Object workflow: choose a phoneme in the library, edit cards in place, then create/export/send the selected word from the right panel.")
         primary_label.setObjectName("symbolHint")
         primary_label.setWordWrap(True)
         chain_layout.addWidget(primary_label)
@@ -14347,21 +14370,6 @@ class WaveToyWindow(QMainWindow):
                 (
                     make_secondary_action_button("Add Current", self._add_current_phoneme_to_chain, "Append the current phoneme to the chain"),
                     make_secondary_action_button("Create Syllable", self._create_articulation_syllable, "Create a syllable from the current chain context"),
-                ),
-            ),
-            (
-                "Wave Source",
-                (
-                    make_secondary_action_button("Use Current Wave for Selected", self._apply_current_wave_to_selected_chain_item, "Apply the current waveform source to the selected chain card"),
-                    make_secondary_action_button("Use Current Wave for Remaining", self._apply_current_wave_to_remaining_chain, "Apply the current waveform source to the selected card and every following card"),
-                    make_secondary_action_button("Use Current Wave for Whole Chain", self._apply_current_wave_to_whole_chain, "Apply the current waveform source to every chain card"),
-                    make_secondary_action_button("Reset Selected Source", self._reset_selected_chain_item_source, "Restore default voice source for the selected card"),
-                ),
-            ),
-            (
-                "Destructive",
-                (
-                    make_destructive_action_button("Reset Chain Sources", self._reset_whole_chain_source, "Restore default voice source for the entire chain"),
                     make_destructive_action_button("Clear Chain", self._clear_articulation_chain, "Remove all cards from the chain"),
                 ),
             ),
@@ -14676,8 +14684,8 @@ class WaveToyWindow(QMainWindow):
             action_row.addWidget(button)
         cv_vc_layout.addLayout(action_row)
         self._update_cv_vc_filter_status()
-        chain_tab_layout.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=False))
-        chain_tab_layout.addWidget(self._build_selected_phoneme_workbench())
+        library_column.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=True))
+        build_sidebar.addWidget(self._build_selected_phoneme_workbench())
 
         timeline_header = QHBoxLayout()
         timeline_title = QLabel("🎞 Visual Speech Timeline")
@@ -14718,7 +14726,6 @@ class WaveToyWindow(QMainWindow):
         track_layout.addWidget(self.pitch_lane_preview_label)
         track_layout.addWidget(self.articulation_timeline_scroll)
         timing_layout.addWidget(track_shell)
-        timing_layout.addWidget(self._build_selected_phoneme_workbench())
 
         self.articulation_scrub_label = QLabel("Playhead idle • drag the red marker to inspect phoneme, transition progress, articulator values, and formants.")
         self.articulation_scrub_label.setObjectName("symbolHint")
@@ -14850,7 +14857,8 @@ class WaveToyWindow(QMainWindow):
 
         speech_assets = self._build_speech_assets_panel("articulation_timeline")
         apply_articulation_picker_sidebar_width_policy(speech_assets)
-        build_sidebar.addWidget(speech_assets)
+        library_column.addWidget(CollapsibleSection("Speech Assets", speech_assets, expanded=False))
+        library_column.addStretch(1)
         build_sidebar.addStretch(1)
         render_layout.addStretch(1)
         inspector_layout.addStretch(1)
@@ -14891,6 +14899,43 @@ class WaveToyWindow(QMainWindow):
             if label is not None:
                 label.setText(summary)
 
+    def _build_speech_builder_phoneme_library_panel(self) -> QWidget:
+        panel = self._toy_group("Phoneme Library")
+        panel.setObjectName("speechBuilderPhonemeLibrary")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 16, 10, 10)
+        layout.setSpacing(6)
+
+        hint = QLabel("Pick or save source phonemes here. CV/VC construction and Speech Assets live in this library column so the Chain Editor stays focused on card editing.")
+        hint.setObjectName("symbolHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        preset_title = QLabel("Phoneme Presets")
+        preset_title.setObjectName("timelineInspectorText")
+        layout.addWidget(preset_title)
+        preset_row = make_button_row_or_toolbar(
+            *[
+                make_secondary_action_button(symbol, lambda checked=False, s=symbol: self._add_preset_phoneme_to_chain(s), f"Append {symbol} to the chain")
+                for symbol in ("AH", "EE", "OO", "M", "N", "S", "T", "K")
+            ],
+            spacing=4,
+        )
+        layout.addWidget(preset_row)
+
+        saved_row = make_button_row_or_toolbar(
+            make_secondary_action_button("Add Current", self._add_current_phoneme_to_chain, "Append the current Articulation Lab phoneme"),
+            make_secondary_action_button("Save Phoneme", self._save_current_phoneme, "Save the current shaped phoneme for reuse"),
+            spacing=6,
+        )
+        layout.addWidget(saved_row)
+
+        saved_hint = QLabel("Saved phonemes: use Articulation Lab cards for detailed preset management; Speech Builder keeps the high-frequency add/save workflow visible.")
+        saved_hint.setObjectName("symbolHint")
+        saved_hint.setWordWrap(True)
+        layout.addWidget(saved_hint)
+        return panel
+
     def _build_selected_phoneme_workbench(self) -> QWidget:
         panel = self._toy_group("Selected Phoneme Workbench")
         panel.setObjectName("selectedPhonemeWorkbench")
@@ -14924,10 +14969,6 @@ class WaveToyWindow(QMainWindow):
         source_row.addWidget(make_secondary_action_button("Apply to Selected", self._apply_selected_source_selector_to_selected, "Apply the selected Voice/Wave Variation to only the selected phoneme"))
         layout.addLayout(source_row)
         source_actions = make_button_row_or_toolbar(
-            make_secondary_action_button("Use Current Classic Wave", self._apply_current_wave_to_selected_chain_item, "Use the current Classic Controls wave for only the selected phoneme"),
-            make_secondary_action_button("Use Current Wave for Selected", self._apply_current_wave_to_selected_chain_item, "Use the current wave for only the selected phoneme"),
-            make_secondary_action_button("Use Current Wave for Remaining", self._apply_current_wave_to_remaining_chain, "Use the current wave for the selected phoneme and every following phoneme"),
-            make_secondary_action_button("Use Current Wave for Whole Chain", self._apply_current_wave_to_whole_chain, "Use the current wave for every phoneme in the whole chain"),
             make_secondary_action_button("Reset Selected Source", self._reset_selected_chain_item_source, "Restore Default Voice for only the selected phoneme"),
             spacing=8,
         )
@@ -16076,7 +16117,7 @@ class WaveToyWindow(QMainWindow):
         card = QWidget()
         card.setObjectName("phonemeCardSelected" if index == self.articulation_selected_chain_index else "phonemeCard")
         card.setProperty("selected", index == self.articulation_selected_chain_index)
-        card.setMinimumHeight(104)
+        card.setMinimumHeight(88)
         card.setCursor(Qt.PointingHandCursor)
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         selected = index == self.articulation_selected_chain_index
@@ -16098,13 +16139,12 @@ class WaveToyWindow(QMainWindow):
         number.setObjectName("articulationIpaBadge")
         number.setAlignment(Qt.AlignCenter)
         number.setMinimumWidth(32)
-        title = QLabel(f"{phoneme.name} /{phoneme.ipa}/")
+        title = QLabel(f"{phoneme.name}   IPA /{phoneme.ipa}/")
         title.setObjectName("phonemeCardTitle")
         title.setWordWrap(True)
         details = QLabel(
-            f"{phoneme.phoneme_family.title()} • {int(item.duration_ms or phoneme.duration_ms)} ms • "
-            f"gap {int(item.gap_after_ms)} ms • crossfade {int(item.crossfade_ms)} ms • "
-            f"transition {item.transition_ms if item.transition_ms is not None else 'rule'} ms • "
+            f"{phoneme.phoneme_family.title()} • gap {int(item.gap_after_ms)} ms • "
+            f"crossfade {int(item.crossfade_ms)} ms • transition {item.transition_ms if item.transition_ms is not None else 'rule'} ms • "
             f"accent {float(item.accentuation_db):+0.1f} dB"
         )
         details.setObjectName("phonemeCardSummary")
@@ -16121,9 +16161,21 @@ class WaveToyWindow(QMainWindow):
         header.addLayout(title_stack, 1)
         layout.addLayout(header)
 
-        variation_row = QHBoxLayout()
-        variation_row.setSpacing(6)
-        variation_label = QLabel("Voice / Wave Variation")
+        edit_row = QHBoxLayout()
+        edit_row.setSpacing(6)
+        duration_label = QLabel("Duration")
+        duration_label.setObjectName("phonemeCardSummary")
+        duration_spin = QSpinBox()
+        duration_spin.setObjectName("chainCardDurationSpin")
+        duration_spin.setRange(80, 5000)
+        duration_spin.setSingleStep(10)
+        duration_spin.setSuffix(" ms")
+        duration_spin.setValue(int(item.duration_ms or phoneme.duration_ms))
+        duration_spin.valueChanged.connect(lambda value, i=index: self._set_chain_item_duration_ms(i, value))
+        edit_row.addWidget(duration_label)
+        edit_row.addWidget(duration_spin)
+
+        variation_label = QLabel("Source")
         variation_label.setObjectName("phonemeCardSummary")
         variation_combo = NoWheelComboBox()
         variation_combo.setObjectName("chainCardVoiceWaveVariationSelector")
@@ -16147,20 +16199,19 @@ class WaveToyWindow(QMainWindow):
         reset_button.setMinimumHeight(UI_BUTTON_HEIGHT_COMPACT)
         reset_button.setCursor(Qt.PointingHandCursor)
         reset_button.clicked.connect(lambda checked=False, i=index: self.apply_voice_wave_variation_to_chain_item(i, ARTICULATION_SOURCE_DEFAULT))
-        variation_row.addWidget(variation_label)
-        variation_row.addWidget(variation_combo)
-        variation_row.addWidget(reset_button)
-        variation_row.addStretch(1)
-        layout.addLayout(variation_row)
+        edit_row.addWidget(variation_label)
+        edit_row.addWidget(variation_combo, 1)
+        edit_row.addWidget(reset_button)
+        edit_row.addStretch(1)
+        layout.addLayout(edit_row)
 
         actions = QHBoxLayout()
         actions.setSpacing(6)
         for text, callback, danger in (
             ("▶ Play", lambda checked=False, i=index: self._play_chain_item(i), False),
-            ("Edit", lambda checked=False, i=index: self._select_articulation_chain_item(i), False),
-            ("⧉ Duplicate", lambda checked=False, i=index: self._duplicate_articulation_chain_item(i), False),
-            ("⬅ Move", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
-            ("➡ Move", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
+            ("Duplicate", lambda checked=False, i=index: self._duplicate_articulation_chain_item(i), False),
+            ("Move Left", lambda checked=False, i=index: self._move_articulation_chain_item(i, -1), False),
+            ("Move Right", lambda checked=False, i=index: self._move_articulation_chain_item(i, 1), False),
             ("Remove", lambda checked=False, i=index: self._remove_articulation_chain_item(i), True),
         ):
             button = QPushButton(text)
@@ -16509,6 +16560,18 @@ class WaveToyWindow(QMainWindow):
             new_phoneme = new_phoneme.clamped()
         self.articulation_chain_items.append(ArticulationChainItem(new_phoneme))
         self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
+    def _add_preset_phoneme_to_chain(self, symbol: str) -> None:
+        phoneme = _phoneme_from_preset_symbol(symbol, pitch=self._settings_from_ui().pitch_start_hz if hasattr(self, "pitch_start") else 220.0)
+        if bool(self.articulation_word_render_settings.get("auto_apply_current_wave_to_new_chain_items", True)):
+            for key, value in self._source_metadata_for_mode(ARTICULATION_SOURCE_CURRENT).items():
+                setattr(phoneme, key, value)
+            phoneme = phoneme.clamped()
+        self.articulation_chain_items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=phoneme.duration_ms))
+        self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
+        self._set_articulation_ui_from_phoneme(phoneme, regenerate=False)
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 

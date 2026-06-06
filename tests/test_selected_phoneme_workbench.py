@@ -33,8 +33,9 @@ def test_workbench_exists_in_articulation_timeline_workflow():
 
     assert 'def _build_selected_phoneme_workbench' in source
     assert 'self._toy_group("Selected Phoneme Workbench")' in source
-    assert 'timing_layout.addWidget(self._build_selected_phoneme_workbench())' in source
-    assert 'chain_tab_layout.addWidget(self._build_selected_phoneme_workbench())' in source
+    assert 'build_sidebar.addWidget(self._build_selected_phoneme_workbench())' in source
+    assert 'speechBuilderSelectedPhonemeColumn' in source
+    assert 'timing_layout.addWidget(self._build_selected_phoneme_workbench())' not in source
 
 
 def test_workbench_includes_required_sections_and_primary_create_word():
@@ -52,12 +53,11 @@ def test_workbench_includes_required_sections_and_primary_create_word():
 def test_workbench_source_scope_labels_are_clear():
     source = _source()
 
-    assert 'Use Current Classic Wave' in source
-    assert 'Use Current Wave for Selected' in source
-    assert 'Use Current Wave for Remaining' in source
-    assert 'Use Current Wave for Whole Chain' in source
+    assert 'Voice / Wave Source' in source
+    assert 'selectedPhonemeVoiceWaveVariationSelector' in source
     assert 'Apply to Selected' in source
     assert 'Reset Selected Source' in source
+    assert 'Use Current Classic Wave' not in source
 
 
 def test_selecting_timing_track_or_chain_card_uses_same_selected_index():
