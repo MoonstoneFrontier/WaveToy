@@ -1,6 +1,15 @@
 {
-  "schema": "wavetoy.speech_test_words.v1",
+  "schema": "wavetoy.speech_test_words.v2",
   "categories": {
+    "vowels": ["ah", "ee", "oo"],
+    "basic_words": ["cat", "dog", "fish"],
+    "articulation": ["strength", "communication", "articulation", "Mississippi"],
+    "names": ["Charles", "Moonstone", "Frontier"],
+    "phrases": [
+      "The quick brown fox jumps over the lazy dog.",
+      "She sells seashells by the seashore.",
+      "Pack my box with five dozen liquor jugs."
+    ],
     "basic_vowels": ["ah", "ee", "oo", "oh", "ay", "eye", "ow", "oy"],
     "simple_cv": ["bee", "dee", "gee", "kay", "may", "no", "row", "see"],
     "plosives": ["pop", "bob", "tap", "dad", "kick", "gag", "pipe", "ticket"],
@@ -14,6 +23,12 @@
     "regression_phrases": ["hello", "banana", "communication", "strength", "squirrel", "the quick brown fox", "pack my box with five dozen liquor jugs", "she sells seashells by the seashore"]
   },
   "explicit_phoneme_chains": [
+    {"label": "ah vowel", "chain": ["AH"]},
+    {"label": "ee vowel", "chain": ["EE"]},
+    {"label": "oo vowel", "chain": ["OO"]},
+    {"label": "cat", "chain": ["K", "AH", "T"]},
+    {"label": "dog", "chain": ["D", "AA", "G"]},
+    {"label": "fish", "chain": ["F", "IH", "SH"]},
     {"label": "ee-oo oscillation", "chain": ["EE", "OO", "EE", "OO", "EE"]},
     {"label": "vowel sweep", "chain": ["AH", "EE", "OO", "UW", "AY"]},
     {"label": "morning", "chain": ["M", "AA", "N", "EE", "NG"]},

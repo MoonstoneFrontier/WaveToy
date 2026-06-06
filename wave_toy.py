@@ -15288,6 +15288,119 @@ class WaveToyWindow(QMainWindow):
         saved_hint.setObjectName("symbolHint")
         saved_hint.setWordWrap(True)
         layout.addWidget(saved_hint)
+        layout.addWidget(self._build_speech_regression_suite_panel())
+        return panel
+
+    def _speech_regression_suite_path(self) -> Path:
+        """Return the bundled human-readable speech regression word list."""
+        return Path(__file__).resolve().parent / "test_assets" / "speech_test_words.json"
+
+    def _load_speech_regression_suite(self) -> Dict[str, object]:
+        """Load the bundled speech regression suite without requiring project storage."""
+        try:
+            data = json.loads(self._speech_regression_suite_path().read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"categories": {"unavailable": [f"Speech regression suite unavailable: {exc}"]}, "explicit_phoneme_chains": []}
+        return data if isinstance(data, dict) else {"categories": {}, "explicit_phoneme_chains": []}
+
+    def _speech_regression_suite_entries(self) -> List[Dict[str, object]]:
+        suite = self._load_speech_regression_suite()
+        entries: List[Dict[str, object]] = []
+        categories = suite.get("categories", {})
+        if isinstance(categories, dict):
+            for category, words in categories.items():
+                if isinstance(words, list):
+                    for word in words:
+                        entries.append({"label": str(word), "category": str(category), "word": str(word)})
+        explicit = suite.get("explicit_phoneme_chains", [])
+        if isinstance(explicit, list):
+            for entry in explicit:
+                if isinstance(entry, dict) and isinstance(entry.get("chain"), list):
+                    label = str(entry.get("label") or "explicit chain")
+                    entries.append({"label": label, "category": "explicit_phoneme_chains", "chain": [str(symbol) for symbol in entry["chain"]]})
+        return entries
+
+    def _word_to_regression_chain_symbols(self, word: str) -> List[str]:
+        """Map bundled regression words to deterministic phoneme symbols for quick audition."""
+        key = " ".join(str(word).lower().replace(".", "").split())
+        mappings = {
+            "ah": ["AH"], "ee": ["EE"], "oo": ["OO"],
+            "cat": ["K", "AH", "T"], "dog": ["D", "AA", "G"], "fish": ["F", "IH", "SH"],
+            "strength": ["S", "T", "R", "EE", "NG", "TH"],
+            "communication": ["K", "AH", "M", "Y", "OO", "N", "IH", "K", "AY", "SH", "AH", "N"],
+            "articulation": ["AA", "R", "T", "IH", "K", "Y", "OO", "L", "AY", "SH", "AH", "N"],
+            "mississippi": ["M", "IH", "S", "IH", "S", "IH", "P", "EE"],
+            "charles": ["CH", "AA", "R", "L", "Z"], "moonstone": ["M", "OO", "N", "S", "T", "OO", "N"],
+            "frontier": ["F", "R", "AH", "N", "T", "EE", "R"],
+            "the quick brown fox jumps over the lazy dog": ["DH", "AH", "K", "W", "IH", "K", "B", "R", "OW", "N", "F", "AA", "K", "S", "JH", "AH", "M", "P", "S", "OW", "V", "R", "DH", "AH", "L", "AY", "Z", "EE", "D", "AA", "G"],
+            "she sells seashells by the seashore": ["SH", "EE", "S", "EH", "L", "Z", "S", "EE", "SH", "EH", "L", "Z", "B", "AY", "DH", "AH", "S", "EE", "SH", "OR"],
+            "pack my box with five dozen liquor jugs": ["P", "AH", "K", "M", "AY", "B", "AA", "K", "S", "W", "IH", "TH", "F", "AY", "V", "D", "AH", "Z", "AH", "N", "L", "IH", "K", "R", "JH", "AH", "G", "Z"],
+        }
+        return mappings.get(key, ["AH", "EE", "OO"])
+
+    def _populate_speech_regression_chain(self, symbols: List[str], *, label: str) -> None:
+        self.articulation_chain_items = []
+        for symbol in symbols:
+            preset = find_phoneme_preset(symbol) or (VOWEL_PRESETS["AH"] | {"name": symbol, "ipa": symbol.lower()})
+            phoneme = ArticulationPhoneme.from_json_dict(dict(preset) | {"name": symbol})
+            self.articulation_chain_items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=int(phoneme.duration_ms)))
+        self.articulation_phrase_markers = [{"label": label, "start_index": 0, "end_index": max(0, len(self.articulation_chain_items) - 1)}]
+        self.articulation_selected_chain_index = 0 if self.articulation_chain_items else None
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
+    def _selected_speech_regression_entry(self) -> Dict[str, object] | None:
+        combo = getattr(self, "speech_regression_suite_combo", None)
+        if combo is None:
+            return None
+        data = combo.currentData()
+        return data if isinstance(data, dict) else None
+
+    def _load_speech_regression_entry_to_chain(self, checked: bool = False) -> None:
+        del checked
+        entry = self._selected_speech_regression_entry()
+        if entry is None:
+            return
+        label = str(entry.get("label") or entry.get("word") or "speech regression")
+        symbols = [str(symbol) for symbol in entry.get("chain", [])] if isinstance(entry.get("chain"), list) else self._word_to_regression_chain_symbols(str(entry.get("word") or label))
+        self._populate_speech_regression_chain(symbols, label=label)
+        self._show_non_modal_status(f"Loaded speech regression entry: {label}")
+
+    def _preview_speech_regression_entry(self, checked: bool = False) -> None:
+        self._load_speech_regression_entry_to_chain(checked=False)
+        self._play_articulation_word(checked=False)
+
+    def _render_speech_regression_entry(self, checked: bool = False) -> None:
+        self._load_speech_regression_entry_to_chain(checked=False)
+        self._create_articulation_word(checked=False)
+
+    def _build_speech_regression_suite_panel(self) -> QWidget:
+        panel = self._toy_group("Speech Regression Suite")
+        panel.setObjectName("speechRegressionSuitePanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 16, 10, 10)
+        layout.setSpacing(6)
+        hint = QLabel("Built-in speech quality benchmarks: load, audition, or render repeatable words and phrases before/after speech-engine changes.")
+        hint.setObjectName("symbolHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(QLabel("Benchmark"))
+        self.speech_regression_suite_combo = NoWheelComboBox()
+        self.speech_regression_suite_combo.setObjectName("speechRegressionSuiteSelector")
+        apply_compact_combo_policy(self.speech_regression_suite_combo, minimum=180, maximum=320)
+        for entry in self._speech_regression_suite_entries():
+            row_label = f"{entry.get('category', 'suite')}: {entry.get('label', entry.get('word', 'entry'))}"
+            self.speech_regression_suite_combo.addItem(str(row_label), entry)
+        row.addWidget(self.speech_regression_suite_combo, 1)
+        layout.addLayout(row)
+        layout.addWidget(make_button_row_or_toolbar(
+            make_secondary_action_button("Load Chain", self._load_speech_regression_entry_to_chain, "Load this regression entry into the Chain Editor"),
+            make_transport_button("▶ Audition", self._preview_speech_regression_entry, "Render and play this regression entry using the normal Preview Word path"),
+            make_primary_action_button("Render Benchmark", self._render_speech_regression_entry, "Render this regression entry through the same Create Word path"),
+            spacing=6,
+        ))
         return panel
 
     def _build_selected_phoneme_workbench(self) -> QWidget:
@@ -15366,14 +15479,32 @@ class WaveToyWindow(QMainWindow):
         timing_row.addWidget(accent_spin)
         layout.addLayout(timing_row)
 
-        actions_title = QLabel("Actions")
+        transition_title = QLabel("Transition")
+        transition_title.setObjectName("timelineInspectorText")
+        transition_hint = QLabel("Boundary timing stays editable here and directly on the selected chain card; no Timeline tab switching is required.")
+        transition_hint.setObjectName("symbolHint")
+        transition_hint.setWordWrap(True)
+        layout.addWidget(transition_title)
+        layout.addWidget(transition_hint)
+
+        preview_title = QLabel("Preview")
+        preview_title.setObjectName("timelineInspectorText")
+        layout.addWidget(preview_title)
+        preview_actions = make_button_row_or_toolbar(
+            make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview the active voice before applying it"),
+            make_transport_button("▶ Play Selected Phoneme", lambda checked=False: self._play_chain_item(self.articulation_selected_chain_index if isinstance(self.articulation_selected_chain_index, int) else -1), "Preview only the selected phoneme"),
+            make_transport_button("▶ Preview Word", self._play_articulation_word, "Render Word, then play the same rendered buffer used by Create Word"),
+            spacing=8,
+        )
+        layout.addWidget(preview_actions)
+
+        actions_title = QLabel("Word Actions")
         actions_title.setObjectName("timelineInspectorText")
         layout.addWidget(actions_title)
         actions = make_button_row_or_toolbar(
             make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain without visiting Render"),
             make_export_import_button("Export Word", self._export_articulation_word, "Export the rendered word without visiting Render"),
             make_secondary_action_button("Send Word to Timeline", self._send_articulation_word_to_timeline, "Send the rendered word to the Timeline"),
-            make_transport_button("▶ Play Selected Phoneme", lambda checked=False: self._play_chain_item(self.articulation_selected_chain_index if isinstance(self.articulation_selected_chain_index, int) else -1), "Preview only the selected phoneme"),
             make_transport_button("▶ Preview Chain", self._play_articulation_chain, "Preview the raw chain; Create Word is the primary output"),
             make_secondary_action_button("Duplicate", lambda checked=False: self._duplicate_selected_component(), "Duplicate the selected phoneme"),
             make_secondary_action_button("Move Left", lambda checked=False: self._move_selected_component(-1), "Move selected phoneme left"),
@@ -16695,7 +16826,7 @@ class WaveToyWindow(QMainWindow):
         )
         details.setObjectName("phonemeCardSummary")
         details.setWordWrap(True)
-        source_badge = QLabel(f"Source: {articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)}")
+        source_badge = QLabel(f"Voice: {articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)}")
         source_badge.setObjectName("articulationIpaBadge")
         source_badge.setAlignment(Qt.AlignCenter)
         title_stack = QVBoxLayout()
@@ -16720,6 +16851,19 @@ class WaveToyWindow(QMainWindow):
         duration_spin.valueChanged.connect(lambda value, i=index: self._set_chain_item_duration_ms(i, value))
         edit_row.addWidget(duration_label)
         edit_row.addWidget(duration_spin)
+        transition_label = QLabel("Transition")
+        transition_label.setObjectName("phonemeCardSummary")
+        transition_spin = NoWheelSpinBox()
+        transition_spin.setObjectName("chainCardTransitionSpin")
+        transition_spin.setRange(0, 250)
+        transition_spin.setSingleStep(5)
+        transition_spin.setSuffix(" ms")
+        next_item = self.articulation_chain_items[index + 1] if index + 1 < len(self.articulation_chain_items) else None
+        transition_value = self._chain_transition_duration_ms(item, next_item) if next_item is not None else int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS)
+        transition_spin.setValue(transition_value)
+        transition_spin.valueChanged.connect(lambda value, i=index: self._set_chain_card_transition_ms(i, value))
+        edit_row.addWidget(transition_label)
+        edit_row.addWidget(transition_spin)
 
         variation_label = QLabel("Source")
         variation_label.setObjectName("phonemeCardSummary")
@@ -16847,6 +16991,19 @@ class WaveToyWindow(QMainWindow):
         note.setWordWrap(True)
         layout.addWidget(note)
         return card
+
+    def _set_chain_card_transition_ms(self, index: int, raw_value: int) -> None:
+        """Direct chain-card transition edit; last-card edits are kept as its default outgoing value."""
+        if index < 0 or index >= len(self.articulation_chain_items):
+            return
+        value = int(round(int(raw_value) / 5.0) * 5)
+        value = int(np.clip(value, 0, 250))
+        self.articulation_chain_items[index].transition_to_next_ms = value
+        self.articulation_selected_chain_index = index
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+        self._scrub_articulation_playhead(self.articulation_playhead_ms)
+        self._schedule_live_preview("selected_transition")
 
     def _set_chain_transition_to_next_ms(self, index: int, raw_value: int, value_label: QLabel | None = None) -> None:
         if index < 0 or index >= len(self.articulation_chain_items) - 1:
