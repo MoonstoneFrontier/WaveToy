@@ -11579,6 +11579,15 @@ class WaveToyWindow(QMainWindow):
         self.selected_component_voice_spin: QDoubleSpinBox | None = None
         self.selected_component_air_spin: QDoubleSpinBox | None = None
         self.selected_component_transition_spin: QSpinBox | None = None
+        self.selected_phoneme_workbench_widgets: List[QWidget] = []
+        self.selected_phoneme_status_labels: List[QLabel] = []
+        self.selected_phoneme_source_badges: List[QLabel] = []
+        self.selected_phoneme_source_combos: List[QComboBox] = []
+        self.selected_phoneme_duration_spins: List[QSpinBox] = []
+        self.selected_phoneme_transition_spins: List[QSpinBox] = []
+        self.selected_phoneme_accent_sliders: List[QSlider] = []
+        self.selected_phoneme_accent_spins: List[QDoubleSpinBox] = []
+        self.selected_phoneme_action_buttons: List[QAbstractButton] = []
         self.articulation_voice_profile_combo: QComboBox | None = None
         self.articulation_boundary_curve_canvas: ArticulationTrackCanvas | None = None
         self.articulation_envelope_canvas: ArticulationTrackCanvas | None = None
@@ -14343,8 +14352,9 @@ class WaveToyWindow(QMainWindow):
             (
                 "Wave Source",
                 (
-                    make_secondary_action_button("Apply Current Wave to Selected", self._apply_current_wave_to_selected_chain_item, "Apply the current waveform source to the selected chain card"),
-                    make_secondary_action_button("Apply Current Wave to Chain", self._apply_current_wave_to_whole_chain, "Apply the current waveform source to every chain card"),
+                    make_secondary_action_button("Use Current Wave for Selected", self._apply_current_wave_to_selected_chain_item, "Apply the current waveform source to the selected chain card"),
+                    make_secondary_action_button("Use Current Wave for Remaining", self._apply_current_wave_to_remaining_chain, "Apply the current waveform source to the selected card and every following card"),
+                    make_secondary_action_button("Use Current Wave for Whole Chain", self._apply_current_wave_to_whole_chain, "Apply the current waveform source to every chain card"),
                     make_secondary_action_button("Reset Selected Source", self._reset_selected_chain_item_source, "Restore default voice source for the selected card"),
                 ),
             ),
@@ -14386,9 +14396,9 @@ class WaveToyWindow(QMainWindow):
         render_primary_hint.setWordWrap(True)
         render_primary_layout.addWidget(render_primary_hint)
         primary_word_row = make_button_row_or_toolbar(
-            make_transport_button("▶ Play Word", self._play_articulation_word, "Play the smoothed word render"),
+            make_transport_button("▶ Play Word Preview", self._play_articulation_word, "Preview the smoothed word render; Create Word remains the primary reliable output"),
             make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain"),
-            make_transport_button("▶ Play Chain", self._play_articulation_chain, "Play the raw phoneme sequence for order checking"),
+            make_transport_button("▶ Play Chain Preview", self._play_articulation_chain, "Preview the raw phoneme sequence for order checking"),
             spacing=8,
         )
         render_primary_layout.addWidget(primary_word_row)
@@ -14667,6 +14677,7 @@ class WaveToyWindow(QMainWindow):
         cv_vc_layout.addLayout(action_row)
         self._update_cv_vc_filter_status()
         chain_tab_layout.addWidget(CollapsibleSection("CV / VC Library", cv_vc_card, expanded=False))
+        chain_tab_layout.addWidget(self._build_selected_phoneme_workbench())
 
         timeline_header = QHBoxLayout()
         timeline_title = QLabel("🎞 Visual Speech Timeline")
@@ -14707,6 +14718,7 @@ class WaveToyWindow(QMainWindow):
         track_layout.addWidget(self.pitch_lane_preview_label)
         track_layout.addWidget(self.articulation_timeline_scroll)
         timing_layout.addWidget(track_shell)
+        timing_layout.addWidget(self._build_selected_phoneme_workbench())
 
         self.articulation_scrub_label = QLabel("Playhead idle • drag the red marker to inspect phoneme, transition progress, articulator values, and formants.")
         self.articulation_scrub_label.setObjectName("symbolHint")
@@ -14717,7 +14729,7 @@ class WaveToyWindow(QMainWindow):
         self.articulation_boundary_curve_combo.addItems(list(ARTICULATION_TRANSITION_CURVES))
         apply_compact_combo_policy(self.articulation_boundary_curve_combo, minimum=110, maximum=150)
         self.articulation_boundary_curve_combo.currentTextChanged.connect(self._set_selected_boundary_curve)
-        timing_layout.addWidget(self._build_selected_component_controls())
+        timing_layout.addWidget(CollapsibleSection("Advanced Selected Phoneme Controls", self._build_selected_component_controls(), expanded=False))
 
         self.articulation_envelope_canvas = ArticulationTrackCanvas("envelopes")
         timing_layout.addWidget(CollapsibleSection("Envelope track canvas", self.articulation_envelope_canvas, expanded=False))
@@ -14878,6 +14890,118 @@ class WaveToyWindow(QMainWindow):
         for label in (self.articulation_timing_chain_summary_label, self.articulation_motion_chain_summary_label):
             if label is not None:
                 label.setText(summary)
+
+    def _build_selected_phoneme_workbench(self) -> QWidget:
+        panel = self._toy_group("Selected Phoneme Workbench")
+        panel.setObjectName("selectedPhonemeWorkbench")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 16, 10, 10)
+        layout.setSpacing(8)
+
+        status_title = QLabel("Selected Phoneme Status")
+        status_title.setObjectName("timelineInspectorText")
+        status_label = QLabel("No phoneme selected. Select a chain card or Speech Timeline phoneme block to enable this workbench.")
+        status_label.setObjectName("symbolHint")
+        status_label.setWordWrap(True)
+        source_badge = QLabel("Source: —")
+        source_badge.setObjectName("articulationIpaBadge")
+        source_badge.setAlignment(Qt.AlignCenter)
+        layout.addWidget(status_title)
+        layout.addWidget(status_label)
+        layout.addWidget(source_badge)
+
+        source_title = QLabel("Voice / Wave Source")
+        source_title.setObjectName("timelineInspectorText")
+        layout.addWidget(source_title)
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_row.addWidget(QLabel("Voice/Wave Variation"))
+        source_combo = NoWheelComboBox()
+        source_combo.setObjectName("selectedPhonemeVoiceWaveVariationSelector")
+        apply_compact_combo_policy(source_combo, minimum=170, maximum=260)
+        source_combo.currentIndexChanged.connect(lambda _row, combo=source_combo: self._set_selected_chain_item_source_from_selector(combo))
+        source_row.addWidget(source_combo, 1)
+        source_row.addWidget(make_secondary_action_button("Apply to Selected", self._apply_selected_source_selector_to_selected, "Apply the selected Voice/Wave Variation to only the selected phoneme"))
+        layout.addLayout(source_row)
+        source_actions = make_button_row_or_toolbar(
+            make_secondary_action_button("Use Current Classic Wave", self._apply_current_wave_to_selected_chain_item, "Use the current Classic Controls wave for only the selected phoneme"),
+            make_secondary_action_button("Use Current Wave for Selected", self._apply_current_wave_to_selected_chain_item, "Use the current wave for only the selected phoneme"),
+            make_secondary_action_button("Use Current Wave for Remaining", self._apply_current_wave_to_remaining_chain, "Use the current wave for the selected phoneme and every following phoneme"),
+            make_secondary_action_button("Use Current Wave for Whole Chain", self._apply_current_wave_to_whole_chain, "Use the current wave for every phoneme in the whole chain"),
+            make_secondary_action_button("Reset Selected Source", self._reset_selected_chain_item_source, "Restore Default Voice for only the selected phoneme"),
+            spacing=8,
+        )
+        layout.addWidget(source_actions)
+
+        timing_title = QLabel("Timing")
+        timing_title.setObjectName("timelineInspectorText")
+        layout.addWidget(timing_title)
+        timing_row = QHBoxLayout()
+        timing_row.setSpacing(8)
+        timing_row.addWidget(QLabel("Duration"))
+        duration_spin = QSpinBox()
+        duration_spin.setRange(80, 5000)
+        duration_spin.setSingleStep(10)
+        duration_spin.setSuffix(" ms")
+        duration_spin.valueChanged.connect(self._set_selected_component_duration_ms)
+        timing_row.addWidget(duration_spin)
+        timing_row.addWidget(QLabel("Transition"))
+        transition_spin = QSpinBox()
+        transition_spin.setRange(0, 250)
+        transition_spin.setSingleStep(5)
+        transition_spin.setSuffix(" ms")
+        transition_spin.valueChanged.connect(self._set_selected_component_transition_ms)
+        timing_row.addWidget(transition_spin)
+        timing_row.addWidget(QLabel("Accentuation"))
+        accent_slider = QSlider(Qt.Horizontal)
+        accent_slider.setRange(-120, 120)
+        accent_slider.setTickPosition(QSlider.TicksBelow)
+        accent_slider.setTickInterval(30)
+        accent_slider.valueChanged.connect(lambda raw: self._set_selected_component_accentuation(raw / 10.0, source="slider"))
+        timing_row.addWidget(accent_slider, 1)
+        accent_spin = QDoubleSpinBox()
+        accent_spin.setRange(-24.0, 24.0)
+        accent_spin.setSingleStep(0.5)
+        accent_spin.setDecimals(1)
+        accent_spin.setSuffix(" dB")
+        accent_spin.valueChanged.connect(lambda value: self._set_selected_component_accentuation(value, source="spin"))
+        timing_row.addWidget(accent_spin)
+        layout.addLayout(timing_row)
+
+        actions_title = QLabel("Actions")
+        actions_title.setObjectName("timelineInspectorText")
+        layout.addWidget(actions_title)
+        actions = make_button_row_or_toolbar(
+            make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain without visiting Render"),
+            make_export_import_button("Export Word", self._export_articulation_word, "Export the rendered word without visiting Render"),
+            make_secondary_action_button("Send Word to Timeline", self._send_articulation_word_to_timeline, "Send the rendered word to the Timeline"),
+            make_transport_button("▶ Play Selected Phoneme", lambda checked=False: self._play_chain_item(self.articulation_selected_chain_index if isinstance(self.articulation_selected_chain_index, int) else -1), "Preview only the selected phoneme"),
+            make_transport_button("▶ Play Chain Preview", self._play_articulation_chain, "Preview the raw chain; Create Word is the primary output"),
+            make_secondary_action_button("Duplicate", lambda checked=False: self._duplicate_selected_component(), "Duplicate the selected phoneme"),
+            make_secondary_action_button("Move Left", lambda checked=False: self._move_selected_component(-1), "Move selected phoneme left"),
+            make_secondary_action_button("Move Right", lambda checked=False: self._move_selected_component(1), "Move selected phoneme right"),
+            make_destructive_action_button("Remove", lambda checked=False: self._remove_selected_component(), "Remove selected phoneme"),
+            spacing=8,
+        )
+        layout.addWidget(actions)
+
+        self.selected_phoneme_workbench_widgets.append(panel)
+        self.selected_phoneme_status_labels.append(status_label)
+        self.selected_phoneme_source_badges.append(source_badge)
+        self.selected_phoneme_source_combos.append(source_combo)
+        self.selected_phoneme_duration_spins.append(duration_spin)
+        self.selected_phoneme_transition_spins.append(transition_spin)
+        self.selected_phoneme_accent_sliders.append(accent_slider)
+        self.selected_phoneme_accent_spins.append(accent_spin)
+        for button in panel.findChildren(QAbstractButton):
+            self.selected_phoneme_action_buttons.append(button)
+        self.selected_component_controls_widget = panel
+        self.selected_component_label = status_label
+        self.selected_component_duration_spin = duration_spin
+        self.selected_component_transition_spin = transition_spin
+        self.selected_component_accent_slider = accent_slider
+        self.selected_component_accent_spin = accent_spin
+        return panel
 
     def _build_selected_component_controls(self) -> QWidget:
         panel = self._toy_group("Selected Phoneme Controls")
@@ -15772,6 +15896,7 @@ class WaveToyWindow(QMainWindow):
 
     def _refresh_articulation_chain_cards(self) -> None:
         if self.articulation_chain_widget is None:
+            self._refresh_selected_component_controls()
             return
         if isinstance(self.articulation_selected_chain_index, int):
             if not (0 <= self.articulation_selected_chain_index < len(self.articulation_chain_items)):
@@ -15891,6 +16016,48 @@ class WaveToyWindow(QMainWindow):
             metadata["source_audio_path"] = path or metadata.get("source_audio_path")
             return metadata
         return self._source_metadata_for_variation_id(ARTICULATION_SOURCE_DEFAULT)
+
+    def _selected_chain_item_source_label(self) -> str:
+        item = self._selected_chain_item()
+        if item is None:
+            return "—"
+        phoneme = item.phoneme_for_render().clamped()
+        return articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)
+
+    def _refresh_selected_phoneme_source_combos(self, item: ArticulationChainItem | None) -> None:
+        combos = list(getattr(self, "selected_phoneme_source_combos", []))
+        if not combos:
+            return
+        current_variation_id = self._chain_item_variation_id(item.phoneme_for_render()) if item is not None else ARTICULATION_SOURCE_DEFAULT
+        for combo in combos:
+            combo.blockSignals(True)
+            combo.clear()
+            selected_option = -1
+            for option_index, variation in enumerate(self.available_chain_voice_wave_variations()):
+                combo.addItem(variation["label"], variation["id"])
+                if variation["id"] == current_variation_id:
+                    selected_option = option_index
+            if item is not None and selected_option < 0:
+                combo.addItem(f"Existing: {self._selected_chain_item_source_label()}", current_variation_id)
+                selected_option = combo.count() - 1
+            combo.setCurrentIndex(selected_option if item is not None else -1)
+            combo.blockSignals(False)
+
+    def _set_selected_chain_item_source_from_selector(self, combo: QComboBox) -> None:
+        if self._selected_chain_item() is None:
+            return
+        variation_id = combo.currentData()
+        if variation_id is None:
+            return
+        self.apply_voice_wave_variation_to_chain_item(int(self.articulation_selected_chain_index), str(variation_id))
+
+    def _apply_selected_source_selector_to_selected(self, checked: bool = False) -> None:
+        del checked
+        combos = list(getattr(self, "selected_phoneme_source_combos", []))
+        combo = combos[0] if combos else None
+        if combo is None:
+            return
+        self._set_selected_chain_item_source_from_selector(combo)
 
     def apply_voice_wave_variation_to_chain_item(self, index: int, variation_id: str) -> None:
         """Assign one chain card's Voice / Wave Variation without rendering audio."""
@@ -16207,45 +16374,71 @@ class WaveToyWindow(QMainWindow):
 
     def _refresh_selected_component_controls(self) -> None:
         item = self._selected_chain_item()
+        selected = self.articulation_selected_chain_index
+        duration_spins = [widget for widget in [self.selected_component_duration_spin, *getattr(self, "selected_phoneme_duration_spins", [])] if widget is not None]
+        transition_spins = [widget for widget in [self.selected_component_transition_spin, *getattr(self, "selected_phoneme_transition_spins", [])] if widget is not None]
+        accent_sliders = [widget for widget in [self.selected_component_accent_slider, *getattr(self, "selected_phoneme_accent_sliders", [])] if widget is not None]
+        accent_spins = [widget for widget in [self.selected_component_accent_spin, *getattr(self, "selected_phoneme_accent_spins", [])] if widget is not None]
         widgets = [
-            self.selected_component_duration_spin, self.selected_component_accent_slider, self.selected_component_accent_spin,
-            self.selected_component_voice_spin, self.selected_component_air_spin, self.selected_component_transition_spin,
+            *duration_spins, *accent_sliders, *accent_spins,
+            self.selected_component_voice_spin, self.selected_component_air_spin, *transition_spins,
             self.articulation_boundary_curve_combo,
+            *getattr(self, "selected_phoneme_source_combos", []), *getattr(self, "selected_phoneme_action_buttons", []),
         ]
+        has_selection = item is not None
         for widget in widgets:
             if widget is not None:
-                widget.setEnabled(item is not None)
+                widget.setEnabled(has_selection)
         if item is None:
+            message = "No phoneme selected. Select a chain card or Speech Timeline phoneme block to enable this workbench."
             if self.selected_component_label is not None:
-                self.selected_component_label.setText("Select a phoneme card in Chain or a block in Timing / Performance to edit it here.")
+                self.selected_component_label.setText(message)
+            for label in getattr(self, "selected_phoneme_status_labels", []):
+                label.setText(message)
+            for badge in getattr(self, "selected_phoneme_source_badges", []):
+                badge.setText("Source: —")
+            self._refresh_selected_phoneme_source_combos(None)
             return
         phoneme = item.phoneme_for_render().clamped()
+        next_text = "none"
+        if isinstance(selected, int) and selected < len(self.articulation_chain_items) - 1:
+            next_text = f"{self.articulation_chain_items[selected + 1].phoneme.name} ({self._chain_transition_duration_ms(item, self.articulation_chain_items[selected + 1])} ms)"
+        selected_text = f"Selected phoneme: {phoneme.name} /{phoneme.ipa}/ • {phoneme.phoneme_family.title()} • transition to next: {next_text}"
+        position = int(selected) + 1 if isinstance(selected, int) else 0
+        total_duration = sum(int(chain_item.duration_ms or chain_item.phoneme.duration_ms) for chain_item in self.articulation_chain_items)
+        status_text = (
+            f"{phoneme.name} /{phoneme.ipa}/ • position {position} of {len(self.articulation_chain_items)} • "
+            f"source {self._selected_chain_item_source_label()} • duration {int(item.duration_ms or phoneme.duration_ms)} ms • "
+            f"transition {next_text} • word {len(self.articulation_chain_items)} phonemes / {total_duration} ms"
+        )
         if self.selected_component_label is not None:
-            next_text = "none"
-            selected = self.articulation_selected_chain_index
-            if isinstance(selected, int) and selected < len(self.articulation_chain_items) - 1:
-                next_text = f"{self.articulation_chain_items[selected + 1].phoneme.name} ({self._chain_transition_duration_ms(item, self.articulation_chain_items[selected + 1])} ms)"
-            self.selected_component_label.setText(f"Selected phoneme: {phoneme.name} /{phoneme.ipa}/ • {phoneme.phoneme_family.title()} • transition to next: {next_text}")
+            self.selected_component_label.setText(selected_text)
+        for label in getattr(self, "selected_phoneme_status_labels", []):
+            label.setText(status_text)
+        for badge in getattr(self, "selected_phoneme_source_badges", []):
+            badge.setText(f"Source: {self._selected_chain_item_source_label()}")
         for widget, value in (
-            (self.selected_component_duration_spin, int(item.duration_ms or phoneme.duration_ms)),
+            *[(spin, int(item.duration_ms or phoneme.duration_ms)) for spin in duration_spins],
             (self.selected_component_voice_spin, float(phoneme.voice_strength)),
             (self.selected_component_air_spin, float(phoneme.air_pressure)),
-            (self.selected_component_transition_spin, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS)),
+            *[(spin, int(item.transition_to_next_ms if item.transition_to_next_ms is not None else ARTICULATION_DEFAULT_TRANSITION_MS)) for spin in transition_spins],
         ):
             if widget is not None:
                 widget.blockSignals(True)
                 widget.setValue(value)
                 widget.blockSignals(False)
-        if self.selected_component_transition_spin is not None:
-            self.selected_component_transition_spin.setEnabled(bool(self.articulation_selected_chain_index is not None and self.articulation_selected_chain_index < len(self.articulation_chain_items) - 1))
-        if self.selected_component_accent_slider is not None:
-            self.selected_component_accent_slider.blockSignals(True)
-            self.selected_component_accent_slider.setValue(int(round(float(item.accentuation_db) * 10.0)))
-            self.selected_component_accent_slider.blockSignals(False)
-        if self.selected_component_accent_spin is not None:
-            self.selected_component_accent_spin.blockSignals(True)
-            self.selected_component_accent_spin.setValue(float(item.accentuation_db))
-            self.selected_component_accent_spin.blockSignals(False)
+        can_edit_transition = bool(self.articulation_selected_chain_index is not None and self.articulation_selected_chain_index < len(self.articulation_chain_items) - 1)
+        for spin in transition_spins:
+            spin.setEnabled(can_edit_transition)
+        for slider in accent_sliders:
+            slider.blockSignals(True)
+            slider.setValue(int(round(float(item.accentuation_db) * 10.0)))
+            slider.blockSignals(False)
+        for spin in accent_spins:
+            spin.blockSignals(True)
+            spin.setValue(float(item.accentuation_db))
+            spin.blockSignals(False)
+        self._refresh_selected_phoneme_source_combos(item)
         if self.articulation_boundary_curve_combo is not None:
             self.articulation_boundary_curve_combo.blockSignals(True)
             self.articulation_boundary_curve_combo.setCurrentText(item.transition_curve if item.transition_curve in ARTICULATION_TRANSITION_CURVES else ARTICULATION_DEFAULT_TRANSITION_CURVE)
@@ -16278,6 +16471,7 @@ class WaveToyWindow(QMainWindow):
             self.selected_component_accent_spin.blockSignals(False)
         self._mark_articulation_word_dirty()
         self._refresh_articulation_motion_timeline()
+        self._refresh_selected_component_controls()
         self._schedule_live_preview("selected_transition")
 
     def _set_selected_component_phoneme_float(self, key: str, value: float) -> None:
@@ -16327,6 +16521,20 @@ class WaveToyWindow(QMainWindow):
         for key, value in self._source_metadata_for_mode(self._selected_articulation_source_mode()).items():
             setattr(phoneme, key, value)
         self.articulation_chain_items[self.articulation_selected_chain_index].phoneme = phoneme.clamped()
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
+
+    def _apply_current_wave_to_remaining_chain(self, checked: bool = False) -> None:
+        del checked
+        selected = self.articulation_selected_chain_index
+        if selected is None or selected >= len(self.articulation_chain_items):
+            QMessageBox.information(self, "Articulation Chain", "Select a chain phoneme first.")
+            return
+        metadata = self._source_metadata_for_mode(self._selected_articulation_source_mode())
+        for item in self.articulation_chain_items[int(selected):]:
+            for key, value in metadata.items():
+                setattr(item.phoneme, key, value)
+            item.phoneme = item.phoneme.clamped()
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
 

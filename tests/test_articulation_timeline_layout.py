@@ -113,7 +113,8 @@ def test_task_098_chain_cards_are_compact_and_contextual():
     assert "UI_CARD_PADDING_COMPACT = 8" in source
     assert "card.setMinimumHeight(104)" in source
     assert "button.setMinimumHeight(UI_BUTTON_HEIGHT_COMPACT)" in source
-    assert "Apply Current Wave to Selected" in source
-    assert "Apply Current Wave to Chain" in source
+    assert "Use Current Wave for Selected" in source
+    assert "Use Current Wave for Remaining" in source
+    assert "Use Current Wave for Whole Chain" in source
     assert "Reset Selected Source" in source
     assert "Reset Chain Sources" in source
