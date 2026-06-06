@@ -11658,6 +11658,7 @@ class WaveToyWindow(QMainWindow):
         self.selected_phoneme_action_buttons: List[QAbstractButton] = []
         self.articulation_voice_profile_combo: QComboBox | None = None
         self.current_voice_variation_id = ARTICULATION_SOURCE_CURRENT
+        self._refreshing_voice_source_controls = False
         self.voice_source_dock_selector: QComboBox | None = None
         self.voice_source_dock_status_label: QLabel | None = None
         self.voice_source_dock_mode_label: QLabel | None = None
@@ -11915,6 +11916,11 @@ class WaveToyWindow(QMainWindow):
     def _open_data_directory(self, checked: bool = False) -> None:
         del checked
         self._open_path_in_file_manager(self.storage.root)
+
+    def _open_voices_folder(self, checked: bool = False) -> None:
+        del checked
+        self.storage.voices_dir.mkdir(parents=True, exist_ok=True)
+        self._open_path_in_file_manager(self.storage.voices_dir)
 
     def _reveal_recovery_folder(self, checked: bool = False) -> None:
         del checked
@@ -14993,7 +14999,7 @@ class WaveToyWindow(QMainWindow):
     def _voice_variation_details(self, variation_id: str | None = None) -> Dict[str, str]:
         """Return display metadata for the current Speech Builder voice variation."""
         variation_id = str(variation_id or getattr(self, "current_voice_variation_id", ARTICULATION_SOURCE_CURRENT) or ARTICULATION_SOURCE_CURRENT)
-        fallback = {"id": variation_id, "label": "Current Unsaved Voice Lab Sound", "category": "voice_lab"}
+        fallback = {"id": variation_id, "label": "Current Voice Lab Sound", "category": "voice_lab"}
         variation = next((option for option in self.available_chain_voice_wave_variations() if option.get("id") == variation_id), fallback)
         metadata = self._source_metadata_for_variation_id(variation_id)
         mode = str(metadata.get("source_mode") or ARTICULATION_SOURCE_DEFAULT)
@@ -15003,7 +15009,7 @@ class WaveToyWindow(QMainWindow):
         if mode == ARTICULATION_SOURCE_MIX_WAVE:
             waveform = str(wave_id or "Mix Wave")
         elif mode == ARTICULATION_SOURCE_CURRENT:
-            waveform = "Current Unsaved Voice Lab Sound"
+            waveform = "Current Voice Lab Sound"
         elif mode == ARTICULATION_SOURCE_IMPORTED:
             waveform = "Imported Audio"
         else:
@@ -15017,7 +15023,7 @@ class WaveToyWindow(QMainWindow):
         category = str(variation.get("category") or "voice")
         source_type = {
             "voice_preset": "Saved Voice",
-            "voice_lab": "Current Unsaved Voice",
+            "voice_lab": "Current Voice Lab Sound",
             "library_asset": "Imported Voice/Audio",
             "wave": "Mix Wave",
             "voice": "Default Voice",
@@ -15050,7 +15056,7 @@ class WaveToyWindow(QMainWindow):
         layout.setContentsMargins(10, 16, 10, 10)
         layout.setSpacing(8)
 
-        self.voice_source_dock_status_label = QLabel("Active Voice: Current Unsaved Voice Lab Sound")
+        self.voice_source_dock_status_label = QLabel("Active Voice: Current Voice Lab Sound")
         self.voice_source_dock_status_label.setObjectName("timelineInspectorText")
         self.voice_source_dock_status_label.setWordWrap(True)
         layout.addWidget(self.voice_source_dock_status_label)
@@ -15079,6 +15085,7 @@ class WaveToyWindow(QMainWindow):
         controls.addWidget(make_secondary_action_button("Apply Voice to Remaining", self._apply_current_voice_to_remaining_chain, "Apply the active voice to the selected phoneme and every following phoneme"))
         controls.addWidget(make_secondary_action_button("Apply Voice to Whole Chain", self._apply_current_voice_to_whole_chain, "Apply the active voice to the entire editable chain"))
         controls.addWidget(make_secondary_action_button("Refresh Voices", self._refresh_voice_source_library, "Refresh saved Voice Lab presets and imported voice options without changing chain cards"))
+        controls.addWidget(make_secondary_action_button("Open Voices Folder", self._open_voices_folder, "Open the WaveToy Voices folder used by saved Voice Lab presets"))
         layout.addLayout(controls)
 
         ready = QLabel("Ready")
@@ -15094,8 +15101,8 @@ class WaveToyWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 16, 10, 10)
         layout.setSpacing(6)
-        self.current_voice_panel_name_label = QLabel("Active Voice: Current Unsaved Voice Lab Sound")
-        self.current_voice_panel_type_label = QLabel("Current Unsaved Voice")
+        self.current_voice_panel_name_label = QLabel("Active Voice: Current Voice Lab Sound")
+        self.current_voice_panel_type_label = QLabel("Current Voice Lab Sound")
         self.current_voice_panel_note_label = QLabel("Selecting a voice does not change the chain until Apply is clicked.")
         for label in (
             self.current_voice_panel_name_label,
@@ -15109,50 +15116,59 @@ class WaveToyWindow(QMainWindow):
         self._refresh_voice_source_controls()
         return panel
 
-    def _refresh_voice_source_controls(self) -> None:
-        variations = self.available_chain_voice_wave_variations()
-        if not any(option.get("id") == getattr(self, "current_voice_variation_id", None) for option in variations):
-            self.current_voice_variation_id = variations[0]["id"] if variations else ARTICULATION_SOURCE_CURRENT
-        selector = getattr(self, "voice_source_dock_selector", None)
-        if selector is not None:
-            selector.blockSignals(True)
-            selector.clear()
-            selected_index = -1
-            for option_index, variation in enumerate(variations):
-                selector.addItem(variation["label"], variation["id"])
-                if variation["id"] == self.current_voice_variation_id:
-                    selected_index = option_index
-            selector.setCurrentIndex(selected_index)
-            selector.blockSignals(False)
-        for combo in getattr(self, "selected_phoneme_source_combos", []):
-            combo.blockSignals(True)
+    def _set_combo_items_without_signals(self, combo: QComboBox, variations: List[Dict[str, str]], selected_id: str | None) -> None:
+        """Refresh a voice selector without letting programmatic index changes assign sources."""
+        was_blocked = bool(combo.blockSignals(True))
+        try:
             combo.clear()
             selected_index = -1
             for option_index, variation in enumerate(variations):
                 combo.addItem(variation["label"], variation["id"])
-                if variation["id"] == self.current_voice_variation_id:
+                if str(variation["id"]) == str(selected_id):
                     selected_index = option_index
             combo.setCurrentIndex(selected_index)
-            combo.blockSignals(False)
-        details = self._voice_variation_details()
-        source_type = details.get("source_type", "Saved Voice" if details.get("category") == "voice_preset" else "Current Unsaved Voice")
-        has_saved_voices = any(option.get("category") == "voice_preset" for option in variations)
-        voice_picker_text = (
-            f"{source_type} • choose a saved Voice Lab preset, current unsaved sound, or default voice."
-            if has_saved_voices
-            else "No saved voices yet. Create one in Voice Lab with Save Voice Preset."
-        )
-        label_updates = (
-            (getattr(self, "voice_source_dock_status_label", None), f"Active Voice: {details['label']}"),
-            (getattr(self, "voice_source_dock_type_label", None), voice_picker_text),
-            (getattr(self, "current_voice_panel_name_label", None), f"Active Voice: {details['label']}"),
-            (getattr(self, "current_voice_panel_type_label", None), source_type),
-        )
-        for label, text in label_updates:
-            if label is not None:
-                label.setText(text)
+        finally:
+            combo.blockSignals(was_blocked)
+
+    def _refresh_voice_source_controls(self) -> None:
+        previous_guard = bool(getattr(self, "_refreshing_voice_source_controls", False))
+        self._refreshing_voice_source_controls = True
+        try:
+            variations = self.available_chain_voice_wave_variations()
+            if not any(option.get("id") == getattr(self, "current_voice_variation_id", None) for option in variations):
+                self.current_voice_variation_id = variations[0]["id"] if variations else ARTICULATION_SOURCE_CURRENT
+            current_id = str(getattr(self, "current_voice_variation_id", ARTICULATION_SOURCE_CURRENT))
+            selector = getattr(self, "voice_source_dock_selector", None)
+            if selector is not None:
+                self._set_combo_items_without_signals(selector, variations, current_id)
+            selected_combos = getattr(self, "selected_phoneme_source_combos", [])
+            if not isinstance(selected_combos, (list, tuple)):
+                selected_combos = []
+            for combo in selected_combos:
+                self._set_combo_items_without_signals(combo, variations, current_id)
+            details = self._voice_variation_details()
+            source_type = details.get("source_type", "Saved Voice" if details.get("category") == "voice_preset" else "Current Voice Lab Sound")
+            has_saved_voices = any(option.get("category") == "voice_preset" for option in variations)
+            voice_picker_text = (
+                f"{source_type} • choose a saved Voice Lab preset, current Voice Lab sound, or default voice."
+                if has_saved_voices
+                else "No saved voices yet. Create one in Voice Lab with Save Voice Preset."
+            )
+            label_updates = (
+                (getattr(self, "voice_source_dock_status_label", None), f"Active Voice: {details['label']}"),
+                (getattr(self, "voice_source_dock_type_label", None), voice_picker_text),
+                (getattr(self, "current_voice_panel_name_label", None), f"Active Voice: {details['label']}"),
+                (getattr(self, "current_voice_panel_type_label", None), source_type),
+            )
+            for label, text in label_updates:
+                if label is not None:
+                    label.setText(text)
+        finally:
+            self._refreshing_voice_source_controls = previous_guard
 
     def _select_current_voice_from_selector(self, combo: QComboBox) -> None:
+        if bool(getattr(self, "_refreshing_voice_source_controls", False)):
+            return
         variation_id = combo.currentData()
         if variation_id is None:
             return
@@ -16362,7 +16378,7 @@ class WaveToyWindow(QMainWindow):
             name = str(recipe.get("name") or "Saved Voice").strip() or "Saved Voice"
             variations.append({"id": f"{ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX}{name}", "label": name, "category": "voice_preset"})
         variations.extend([
-            {"id": ARTICULATION_SOURCE_CURRENT, "label": "Current Unsaved Voice Lab Sound", "category": "voice_lab"},
+            {"id": ARTICULATION_SOURCE_CURRENT, "label": "Current Voice Lab Sound", "category": "voice_lab"},
             {"id": ARTICULATION_SOURCE_DEFAULT, "label": "Default Voice", "category": "voice"},
         ])
         for wave_id in getattr(self, "wave_row_order", DEFAULT_WAVE_ORDER):
@@ -16426,6 +16442,76 @@ class WaveToyWindow(QMainWindow):
         phoneme = item.phoneme_for_render().clamped()
         return articulation_source_badge(phoneme.source_mode, phoneme.source_wave_id, phoneme.source_audio_path)
 
+    def _voice_source_field_snapshot(self, phoneme: ArticulationPhoneme) -> Dict[str, object]:
+        """Copy only source-assignment fields that rendering must never mutate."""
+        return {
+            "source_mode": phoneme.source_mode,
+            "source_wave_id": phoneme.source_wave_id,
+            "source_recipe_snapshot": dict(phoneme.source_recipe_snapshot or {}),
+            "source_audio_path": phoneme.source_audio_path,
+            "source_start_seconds": phoneme.source_start_seconds,
+            "source_duration_seconds": phoneme.source_duration_seconds,
+            "source_pitch_follow": phoneme.source_pitch_follow,
+            "source_loop_to_fit": phoneme.source_loop_to_fit,
+            "source_gain": phoneme.source_gain,
+        }
+
+    def _restore_voice_source_fields(self, phoneme: ArticulationPhoneme, snapshot: Dict[str, object]) -> ArticulationPhoneme:
+        data = phoneme.to_json_dict()
+        data.update({
+            "source_mode": snapshot.get("source_mode", ARTICULATION_SOURCE_DEFAULT),
+            "source_wave_id": snapshot.get("source_wave_id"),
+            "source_recipe_snapshot": dict(snapshot.get("source_recipe_snapshot") or {}),
+            "source_audio_path": snapshot.get("source_audio_path"),
+            "source_start_seconds": float(snapshot.get("source_start_seconds", 0.0) or 0.0),
+            "source_duration_seconds": float(snapshot.get("source_duration_seconds", 0.0) or 0.0),
+            "source_pitch_follow": bool(snapshot.get("source_pitch_follow", True)),
+            "source_loop_to_fit": bool(snapshot.get("source_loop_to_fit", True)),
+            "source_gain": float(snapshot.get("source_gain", 1.0) or 1.0),
+        })
+        return ArticulationPhoneme.from_json_dict(data).clamped()
+
+    def _snapshot_voice_source_ui_state(self) -> Dict[str, object]:
+        selector = getattr(self, "voice_source_dock_selector", None)
+        selector_data = None
+        if selector is not None:
+            try:
+                selector_data = selector.currentData()
+            except Exception:
+                selector_data = None
+        current_phoneme = getattr(self, "current_phoneme", None)
+        if not isinstance(current_phoneme, ArticulationPhoneme):
+            current_phoneme = _phoneme_from_preset_symbol("AH")
+        return {
+            "current_voice_variation_id": getattr(self, "current_voice_variation_id", ARTICULATION_SOURCE_CURRENT),
+            "articulation_selected_chain_index": getattr(self, "articulation_selected_chain_index", None),
+            "chain_sources": [self._voice_source_field_snapshot(item.phoneme) for item in getattr(self, "articulation_chain_items", [])],
+            "current_phoneme_source": self._voice_source_field_snapshot(current_phoneme),
+            "voice_source_dock_selector_data": selector_data,
+        }
+
+    def _restore_voice_source_ui_state(self, snapshot: Dict[str, object]) -> None:
+        self.current_voice_variation_id = str(snapshot.get("current_voice_variation_id") or ARTICULATION_SOURCE_CURRENT)
+        chain_sources = list(snapshot.get("chain_sources") or [])
+        for item, source_snapshot in zip(getattr(self, "articulation_chain_items", []), chain_sources):
+            if isinstance(source_snapshot, dict):
+                item.phoneme = self._restore_voice_source_fields(item.phoneme, source_snapshot)
+        current_snapshot = snapshot.get("current_phoneme_source")
+        if isinstance(current_snapshot, dict) and hasattr(self, "current_phoneme"):
+            self.current_phoneme = self._restore_voice_source_fields(self.current_phoneme, current_snapshot)
+        self.articulation_selected_chain_index = snapshot.get("articulation_selected_chain_index")
+        previous_guard = bool(getattr(self, "_refreshing_voice_source_controls", False))
+        self._refreshing_voice_source_controls = True
+        try:
+            self._refresh_voice_source_controls()
+            self._refresh_selected_phoneme_source_combos(self._selected_chain_item())
+        finally:
+            self._refreshing_voice_source_controls = previous_guard
+
+    def _render_chain_items_snapshot(self) -> List[ArticulationChainItem]:
+        """Deep-copy editable chain cards so render-time phoneme changes remain isolated."""
+        return [ArticulationChainItem.from_json_dict(item.to_json_dict()) for item in getattr(self, "articulation_chain_items", [])]
+
     def _refresh_selected_phoneme_source_combos(self, item: ArticulationChainItem | None) -> None:
         del item
         # The Selected Phoneme workbench selector mirrors the always-visible Voice Source Dock.
@@ -16433,6 +16519,8 @@ class WaveToyWindow(QMainWindow):
         self._refresh_voice_source_controls()
 
     def _set_selected_chain_item_source_from_selector(self, combo: QComboBox) -> None:
+        if bool(getattr(self, "_refreshing_voice_source_controls", False)):
+            return
         if self._selected_chain_item() is None:
             return
         variation_id = combo.currentData()
@@ -19391,7 +19479,16 @@ class WaveToyWindow(QMainWindow):
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Create Word", "Add at least one phoneme to the Articulation Chain first.")
             return np.zeros((0, 2), dtype=np.float32)
-        self.articulation_word_render_audio = self._render_articulation_word()
+        voice_source_state = self._snapshot_voice_source_ui_state()
+        editable_chain_items = self.articulation_chain_items
+        render_chain_items = self._render_chain_items_snapshot()
+        try:
+            self.articulation_chain_items = render_chain_items
+            rendered_audio = self._render_articulation_word()
+        finally:
+            self.articulation_chain_items = editable_chain_items
+            self._restore_voice_source_ui_state(voice_source_state)
+        self.articulation_word_render_audio = rendered_audio
         self.articulation_word_render_signature = self._current_word_render_signature() if self.articulation_word_render_audio.size else None
         self.articulation_last_word_render_created_at = time.time()
         self.articulation_last_word_render_path = None
@@ -21492,6 +21589,7 @@ class WaveToyWindow(QMainWindow):
         metadata = self._speech_chain_metadata_snapshot()
         metadata["render_signature"] = self.articulation_word_render_signature or self._current_word_render_signature()
         metadata["render_mode"] = self._articulation_word_render_mode()
+        metadata["render_source_snapshot"] = [self._voice_source_field_snapshot(item.phoneme_for_render()) for item in self.articulation_chain_items]
         metadata["audio_duration_seconds"] = len(self.articulation_word_render_audio) / SAMPLE_RATE
         return self._add_speech_bin_item(
             name=name,
@@ -25275,7 +25373,6 @@ class WaveToyWindow(QMainWindow):
             QMessageBox.warning(self, "Could not save voice preset", str(exc))
             return
         clean_name = path.name[:-len(".voice.json")]
-        self.current_voice_variation_id = f"{ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX}{clean_name}"
         self._refresh_voice_source_controls()
         status_label = getattr(self, "saved_voice_path_status_label", None)
         if status_label is not None:

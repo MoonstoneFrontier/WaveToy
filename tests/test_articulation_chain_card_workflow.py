@@ -69,7 +69,7 @@ def test_voice_wave_variation_options_include_default_and_current_voice_lab_soun
     ids = {option["id"] for option in options}
 
     assert "Default Voice" in labels
-    assert "Current Unsaved Voice Lab Sound" in labels
+    assert "Current Voice Lab Sound" in labels
     assert wave_toy.ARTICULATION_SOURCE_DEFAULT in ids
     assert wave_toy.ARTICULATION_SOURCE_CURRENT in ids
 

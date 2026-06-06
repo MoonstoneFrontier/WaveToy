@@ -57,7 +57,7 @@ def test_workbench_source_scope_labels_are_clear():
     assert 'selectedPhonemeVoiceWaveVariationSelector' in source
     assert 'Apply to Selected' in source
     assert 'Reset Selected to Default Voice' in source
-    assert 'Use Current Unsaved Voice Lab Sound' not in source
+    assert 'Use Current Voice Lab Sound' not in source
 
 
 def test_selecting_timing_track_or_chain_card_uses_same_selected_index():
