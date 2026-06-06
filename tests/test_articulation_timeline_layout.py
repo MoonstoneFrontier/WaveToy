@@ -52,8 +52,8 @@ def test_render_and_performance_toggles_remain_accessible_without_old_crowded_ta
     assert 'self.articulation_smooth_transitions_checkbox = QCheckBox("Smooth Mouth Transitions")' in source
     assert 'mode_label = QLabel("Word Render Mode")' in source
     assert 'self.continuous_debug_bypass_formants_checkbox = QCheckBox("Bypass formants")' in source
-    assert 'self.singing_mode_checkbox = QCheckBox("Singing Preview")' in source
-    assert 'self.musical_timing_enabled_checkbox = QCheckBox("Musical Timing")' in source
+    assert 'self.singing_mode_checkbox = QCheckBox("Enable Singing Preview")' in source
+    assert 'self.musical_timing_enabled_checkbox = QCheckBox("Use Musical Timing")' in source
     assert 'self._toy_group("Performance")' not in source
 
 

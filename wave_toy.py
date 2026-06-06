@@ -1466,6 +1466,9 @@ ARTICULATION_DEFAULT_TRANSITION_MS = 35
 ARTICULATION_MOTION_FRAME_MS = 5
 ARTICULATION_MIN_WORD_CROSSFADE_MS = 12
 ARTICULATION_DEFAULT_WORD_CROSSFADE_MS = 69
+DEFAULT_CHAIN_PHONEME_DURATION_MS = 250
+CONTINUOUS_DEFAULT_FORMANT_INTENSITY = 1.0
+CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS = 120
 ARTICULATION_WORD_RENDER_PLAIN = "Plain"
 ARTICULATION_WORD_RENDER_CLIP_CROSSFADE = "Clip Crossfade"
 ARTICULATION_WORD_RENDER_CONTINUOUS = "Continuous Mouth Motion"
@@ -3217,16 +3220,16 @@ def write_pitch_timeline_track_to_pitch_automation_points(track: TimelineParamet
 class MusicalTimingSettings:
     """Optional beat/measure timing layer; milliseconds remain the default workflow."""
 
-    enabled: bool = False
-    bpm: float = 120.0
+    enabled: bool = True
+    bpm: float = 80.0
     time_signature_numerator: int = 4
     time_signature_denominator: int = 4
-    snap_enabled: bool = False
-    snap_subdivision: str = "Off"
+    snap_enabled: bool = True
+    snap_subdivision: str = "1/4"
     swing_percent: float = 0.0
-    count_in_enabled: bool = False
-    grid_visible: bool = False
-    beat_unit_ms: float = 500.0
+    count_in_enabled: bool = True
+    grid_visible: bool = True
+    beat_unit_ms: float = 750.0
     bars_visible: bool = True
 
     def clamped(self) -> "MusicalTimingSettings":
@@ -11783,7 +11786,7 @@ class WaveToyWindow(QMainWindow):
         self.performance_timeline_engine.on_diagnostics_changed = self._performance_engine_diagnostics_changed
         self.timeline_tracks = self.performance_timeline_engine.timeline_tracks
         self._sync_performance_state_from_engine()
-        self.live_preview_enabled = False
+        self.live_preview_enabled = True
         self.live_preview_target = "selected_timeline_fragment"
         self.live_preview_timer = QTimer(self)
         self.live_preview_timer.setSingleShot(True)
@@ -11796,7 +11799,7 @@ class WaveToyWindow(QMainWindow):
             "allow_word_gaps": False,
             "boundary_smoothing_ms": 8,
             "smooth_mouth_transitions": True,
-            "word_render_mode": ARTICULATION_WORD_RENDER_CLIP_CROSSFADE,
+            "word_render_mode": ARTICULATION_WORD_RENDER_CONTINUOUS,
             "voice_source_progress_mode": VOICE_SOURCE_PROGRESS_CONTINUOUS,
             "transition_debug_verbose": False,
             "word_fade_in_ms": 5,
@@ -11809,11 +11812,11 @@ class WaveToyWindow(QMainWindow):
             "legacy_voice_profile_map": dict(LEGACY_VOICE_PROFILE_CHARACTER_MAP["Neutral"]),
             "musical_timing_settings": self.musical_timing_settings.to_json_dict(),
             "continuous_debug_bypass_formants": False,
-            "continuous_formant_intensity": 0.45,
-            "continuous_pitch_smoothing_ms": 20,
+            "continuous_formant_intensity": CONTINUOUS_DEFAULT_FORMANT_INTENSITY,
+            "continuous_pitch_smoothing_ms": CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS,
             "pitch_envelopes": [],
             "note_events": [],
-            "singing_mode_enabled": False,
+            "singing_mode_enabled": True,
             "auto_apply_current_wave_to_new_chain_items": True,
         }
         self.note_events: List[NoteEvent] = []
@@ -12151,6 +12154,10 @@ class WaveToyWindow(QMainWindow):
             self.articulation_phrase_markers = list(chain.get("phrase_markers", [])) if isinstance(chain.get("phrase_markers", []), list) else []
             if isinstance(chain.get("word_render_settings"), dict):
                 self.articulation_word_render_settings.update(chain["word_render_settings"])
+                if self.singing_mode_checkbox is not None:
+                    self.singing_mode_checkbox.blockSignals(True)
+                    self.singing_mode_checkbox.setChecked(bool(self.articulation_word_render_settings.get("singing_mode_enabled", True)))
+                    self.singing_mode_checkbox.blockSignals(False)
         performance = data.get("performance", {})
         if isinstance(performance, dict):
             self.performance_asset = PerformanceAsset.from_json_dict(performance)
@@ -12193,6 +12200,11 @@ class WaveToyWindow(QMainWindow):
             self.note_events = [NoteEvent.from_json_dict(item) for item in timing.get("note_events", []) if isinstance(item, dict)] if isinstance(timing.get("note_events", []), list) else []
             self.pitch_automation_points = [PitchAutomationPoint.from_json_dict(item) for item in timing.get("pitch_curve", []) if isinstance(item, dict)] if isinstance(timing.get("pitch_curve", []), list) else []
             self.syllable_stress_markers = [SyllableStressMarker.from_json_dict(item) for item in timing.get("stress_markers", []) if isinstance(item, dict)] if isinstance(timing.get("stress_markers", []), list) else []
+            self.performance_timeline_engine.set_musical_timing_settings(self.musical_timing_settings)
+            self.articulation_word_render_settings["musical_timing_settings"] = self.musical_timing_settings.to_json_dict()
+            self._refresh_musical_timing_controls()
+            if self.articulation_timeline_canvas is not None:
+                self.articulation_timeline_canvas.set_musical_timing_settings(self.musical_timing_settings)
             self._sync_timeline_bridges()
         timeline = data.get("timeline", {})
         if isinstance(timeline, dict):
@@ -14505,12 +14517,12 @@ class WaveToyWindow(QMainWindow):
 
         live_preview_row = QHBoxLayout()
         live_preview_row.setSpacing(8)
-        self.live_preview_checkbox = QCheckBox("Live Preview")
-        self.live_preview_checkbox.setChecked(False)
-        self.live_preview_checkbox.setToolTip("Default off. When enabled, timing and articulation edits debounce for about 320 ms, stop any previous preview, and play the selected phoneme/fragment.")
+        self.live_preview_checkbox = QCheckBox("Live Preview — debounced, no overlap")
+        self.live_preview_checkbox.setChecked(self.live_preview_enabled)
+        self.live_preview_checkbox.setToolTip("When enabled, timing and articulation edits debounce for about 320 ms, stop any previous preview, and play the selected phoneme/fragment without overlap.")
         self.live_preview_checkbox.toggled.connect(self._set_live_preview_enabled)
         live_preview_row.addWidget(self.live_preview_checkbox)
-        live_preview_note = QLabel("Debounced edit audition; no overlapping preview playback.")
+        live_preview_note = QLabel("Edits audition after a short debounce and stop any previous preview before playing.")
         live_preview_note.setObjectName("symbolHint")
         live_preview_row.addWidget(live_preview_note, 1)
         chain_layout.addLayout(live_preview_row)
@@ -14560,9 +14572,9 @@ class WaveToyWindow(QMainWindow):
         musical_layout.addWidget(performance_timing_header)
         musical_row = QHBoxLayout()
         musical_row.setSpacing(6)
-        self.musical_timing_enabled_checkbox = QCheckBox("Musical Timing")
+        self.musical_timing_enabled_checkbox = QCheckBox("Use Musical Timing")
         self.musical_timing_enabled_checkbox.setChecked(self.musical_timing_settings.enabled)
-        self.musical_timing_enabled_checkbox.setToolTip("Default off: keep millisecond timing unless explicitly enabled.")
+        self.musical_timing_enabled_checkbox.setToolTip("Use the beat/measure timing layer for performance-oriented speech and voice testing.")
         self.musical_timing_enabled_checkbox.toggled.connect(self._set_musical_timing_enabled)
         self.musical_bpm_spin = NoWheelDoubleSpinBox()
         self.musical_bpm_spin.setRange(20.0, 320.0)
@@ -14582,17 +14594,17 @@ class WaveToyWindow(QMainWindow):
         self.musical_snap_combo.setCurrentText(self.musical_timing_settings.snap_subdivision if self.musical_timing_settings.snap_enabled else "Off")
         self.musical_snap_combo.setToolTip("When not Off, phoneme duration drags snap to this beat grid. Transition timing stays in milliseconds for articulation safety.")
         self.musical_snap_combo.currentTextChanged.connect(self._set_musical_snap_subdivision)
-        self.musical_count_in_checkbox = QCheckBox("Count-in")
+        self.musical_count_in_checkbox = QCheckBox("Enable Count-in")
         self.musical_count_in_checkbox.setChecked(self.musical_timing_settings.count_in_enabled)
         self.musical_count_in_checkbox.toggled.connect(self._set_musical_count_in_enabled)
         self.musical_grid_checkbox = QCheckBox("Show Beat Grid")
         self.musical_grid_checkbox.setChecked(self.musical_timing_settings.grid_visible)
         self.musical_grid_checkbox.toggled.connect(self._set_musical_grid_visible)
-        self.singing_mode_checkbox = QCheckBox("Singing Preview")
-        self.singing_mode_checkbox.setChecked(False)
-        self.singing_mode_checkbox.setToolTip("Default off. Applies optional note pitch targets to voiced phonemes while preserving consonant noise/bursts.")
+        self.singing_mode_checkbox = QCheckBox("Enable Singing Preview")
+        self.singing_mode_checkbox.setChecked(bool(self.articulation_word_render_settings.get("singing_mode_enabled", True)))
+        self.singing_mode_checkbox.setToolTip("Applies optional note pitch targets to voiced phonemes while preserving consonant noise/bursts.")
         self.singing_mode_checkbox.toggled.connect(self._set_singing_mode_enabled)
-        for widget in (self.musical_timing_enabled_checkbox, QLabel("BPM"), self.musical_bpm_spin, self.musical_time_signature_combo, QLabel("Snap"), self.musical_snap_combo, self.musical_count_in_checkbox, self.musical_grid_checkbox, self.singing_mode_checkbox):
+        for widget in (self.musical_timing_enabled_checkbox, QLabel("Tempo BPM"), self.musical_bpm_spin, QLabel("Time Signature"), self.musical_time_signature_combo, QLabel("Snap to Note Value"), self.musical_snap_combo, self.musical_count_in_checkbox, self.musical_grid_checkbox, self.singing_mode_checkbox):
             musical_row.addWidget(widget)
         musical_row.addStretch(1)
         musical_layout.addLayout(musical_row)
@@ -14616,12 +14628,12 @@ class WaveToyWindow(QMainWindow):
         self.articulation_word_render_mode_combo = NoWheelComboBox()
         self.articulation_word_render_mode_combo.addItems(list(ARTICULATION_WORD_RENDER_MODES))
         apply_compact_combo_policy(self.articulation_word_render_mode_combo, minimum=170, maximum=240)
-        current_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
+        current_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CONTINUOUS))
         if current_mode not in ARTICULATION_WORD_RENDER_MODES:
-            current_mode = ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
+            current_mode = ARTICULATION_WORD_RENDER_CONTINUOUS
         self.articulation_word_render_settings["word_render_mode"] = current_mode
         self.articulation_word_render_mode_combo.setCurrentText(current_mode)
-        self.articulation_word_render_mode_combo.setToolTip("Compare the Task 032 clip-overlap fallback with the prototype continuous articulator-envelope renderer.")
+        self.articulation_word_render_mode_combo.setToolTip("Choose the Word Render Mode: continuous mouth motion, clip crossfade fallback, or plain concatenation.")
         self.articulation_word_render_mode_combo.currentTextChanged.connect(self._set_articulation_word_render_mode)
         validate_button = QPushButton("Validate Continuous")
         validate_button.setObjectName("phonemeCardPrimaryAction")
@@ -14664,15 +14676,15 @@ class WaveToyWindow(QMainWindow):
         self.continuous_formant_intensity_spin.setRange(0.0, 1.0)
         self.continuous_formant_intensity_spin.setSingleStep(0.05)
         self.continuous_formant_intensity_spin.setDecimals(2)
-        self.continuous_formant_intensity_spin.setValue(float(self.articulation_word_render_settings.get("continuous_formant_intensity", 0.45)))
-        self.continuous_formant_intensity_spin.setToolTip("Subtle Continuous Mouth Motion tract coloration. 0.00 is equivalent to Bypass formants.")
+        self.continuous_formant_intensity_spin.setValue(float(self.articulation_word_render_settings.get("continuous_formant_intensity", CONTINUOUS_DEFAULT_FORMANT_INTENSITY)))
+        self.continuous_formant_intensity_spin.setToolTip("Continuous Mouth Motion tract coloration intensity. 0.00 is equivalent to Bypass formants.")
         self.continuous_formant_intensity_spin.valueChanged.connect(self._set_continuous_formant_intensity)
         pitch_smoothing_label = QLabel("Pitch Glide ms")
         pitch_smoothing_label.setObjectName("timelineInspectorText")
         self.continuous_pitch_smoothing_spin = NoWheelSpinBox()
         self.continuous_pitch_smoothing_spin.setRange(0, 120)
         self.continuous_pitch_smoothing_spin.setSingleStep(5)
-        self.continuous_pitch_smoothing_spin.setValue(int(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", 20)))
+        self.continuous_pitch_smoothing_spin.setValue(int(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS)))
         self.continuous_pitch_smoothing_spin.setToolTip("Smooth voiced pitch changes without resetting oscillator phase.")
         self.continuous_pitch_smoothing_spin.valueChanged.connect(self._set_continuous_pitch_smoothing_ms)
         continuous_tuning_row.addWidget(formant_label)
@@ -17092,7 +17104,7 @@ class WaveToyWindow(QMainWindow):
             for key, value in self._source_metadata_for_mode(ARTICULATION_SOURCE_CURRENT).items():
                 setattr(new_phoneme, key, value)
             new_phoneme = new_phoneme.clamped()
-        self.articulation_chain_items.append(ArticulationChainItem(new_phoneme))
+        self.articulation_chain_items.append(ArticulationChainItem(new_phoneme, duration_ms=DEFAULT_CHAIN_PHONEME_DURATION_MS))
         self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
         self._mark_articulation_word_dirty()
         self._refresh_articulation_chain_cards()
@@ -17103,7 +17115,7 @@ class WaveToyWindow(QMainWindow):
             for key, value in self._source_metadata_for_mode(ARTICULATION_SOURCE_CURRENT).items():
                 setattr(phoneme, key, value)
             phoneme = phoneme.clamped()
-        self.articulation_chain_items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=phoneme.duration_ms))
+        self.articulation_chain_items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=DEFAULT_CHAIN_PHONEME_DURATION_MS))
         self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
         self._set_articulation_ui_from_phoneme(phoneme, regenerate=False)
         self._mark_articulation_word_dirty()
@@ -17290,8 +17302,8 @@ class WaveToyWindow(QMainWindow):
         if self.articulation_word_render_mode_combo is not None:
             mode = str(self.articulation_word_render_mode_combo.currentText())
         else:
-            mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
-        return mode if mode in ARTICULATION_WORD_RENDER_MODES else ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
+            mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CONTINUOUS))
+        return mode if mode in ARTICULATION_WORD_RENDER_MODES else ARTICULATION_WORD_RENDER_CONTINUOUS
 
     def _voice_profile_baseline_key(self) -> str:
         return "voice_profile_baseline_chain"
@@ -17488,7 +17500,7 @@ class WaveToyWindow(QMainWindow):
                 items[-1].transition_curve = "Ease In Out"
             for symbol in preset.phoneme_sequence:
                 phoneme = _phoneme_from_preset_symbol(symbol)
-                items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=phoneme.duration_ms, transition_to_next_ms=preset.transition_ms, transition_curve=preset.transition_curve))
+                items.append(ArticulationChainItem(phoneme=phoneme, duration_ms=DEFAULT_CHAIN_PHONEME_DURATION_MS, transition_to_next_ms=preset.transition_ms, transition_curve=preset.transition_curve))
         if items:
             items[-1].transition_to_next_ms = None
         return items
@@ -17555,12 +17567,12 @@ class WaveToyWindow(QMainWindow):
 
     def _reset_continuous_tuning(self, checked: bool = False) -> None:
         del checked
-        self.articulation_word_render_settings["continuous_formant_intensity"] = 0.45
-        self.articulation_word_render_settings["continuous_pitch_smoothing_ms"] = 20
+        self.articulation_word_render_settings["continuous_formant_intensity"] = CONTINUOUS_DEFAULT_FORMANT_INTENSITY
+        self.articulation_word_render_settings["continuous_pitch_smoothing_ms"] = CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS
         if self.continuous_formant_intensity_spin is not None:
-            self.continuous_formant_intensity_spin.setValue(0.45)
+            self.continuous_formant_intensity_spin.setValue(CONTINUOUS_DEFAULT_FORMANT_INTENSITY)
         if self.continuous_pitch_smoothing_spin is not None:
-            self.continuous_pitch_smoothing_spin.setValue(20)
+            self.continuous_pitch_smoothing_spin.setValue(CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS)
         self._mark_articulation_word_dirty()
 
     def _run_stop_consonant_tests(self, checked: bool = False) -> None:
@@ -18622,7 +18634,7 @@ class WaveToyWindow(QMainWindow):
     def _continuous_formant_intensity(self) -> float:
         if bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)):
             return 0.0
-        return float(np.clip(float(self.articulation_word_render_settings.get("continuous_formant_intensity", 0.45)), 0.0, 1.0))
+        return float(np.clip(float(self.articulation_word_render_settings.get("continuous_formant_intensity", CONTINUOUS_DEFAULT_FORMANT_INTENSITY)), 0.0, 1.0))
 
     def _shape_continuous_frame(self, mono: np.ndarray, phoneme: ArticulationPhoneme) -> np.ndarray:
         """Apply subtle tract coloration without moving the excitation pitch."""
@@ -19061,11 +19073,11 @@ class WaveToyWindow(QMainWindow):
                 self.continuous_debug_bypass_formants_checkbox.blockSignals(False)
             if self.continuous_formant_intensity_spin is not None:
                 self.continuous_formant_intensity_spin.blockSignals(True)
-                self.continuous_formant_intensity_spin.setValue(float(saved_settings.get("continuous_formant_intensity", 0.45)))
+                self.continuous_formant_intensity_spin.setValue(float(saved_settings.get("continuous_formant_intensity", CONTINUOUS_DEFAULT_FORMANT_INTENSITY)))
                 self.continuous_formant_intensity_spin.blockSignals(False)
             if self.continuous_pitch_smoothing_spin is not None:
                 self.continuous_pitch_smoothing_spin.blockSignals(True)
-                self.continuous_pitch_smoothing_spin.setValue(int(saved_settings.get("continuous_pitch_smoothing_ms", 20)))
+                self.continuous_pitch_smoothing_spin.setValue(int(saved_settings.get("continuous_pitch_smoothing_ms", CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS)))
                 self.continuous_pitch_smoothing_spin.blockSignals(False)
             self.articulation_word_render_audio = saved_audio
             self.articulation_word_render_signature = saved_signature
@@ -19140,7 +19152,7 @@ class WaveToyWindow(QMainWindow):
         phase = 0.0
         previous_tail = 0.0
         smoothed_pitch_hz = last_voiced_pitch
-        pitch_smoothing_ms = float(np.clip(float(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", 20)), 0.0, 120.0))
+        pitch_smoothing_ms = float(np.clip(float(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS)), 0.0, 120.0))
         pitch_alpha = 1.0 if pitch_smoothing_ms <= 0.0 else float(np.clip(frame_ms / max(frame_ms, pitch_smoothing_ms), 0.02, 1.0))
         formant_input_energy = 0.0
         formant_output_energy = 0.0
@@ -19722,9 +19734,9 @@ class WaveToyWindow(QMainWindow):
         self.articulation_last_word_render_created_at = data.get("last_word_render_created_at") if isinstance(data.get("last_word_render_created_at"), (int, float)) else None
         if isinstance(data.get("word_render_settings"), dict):
             self.articulation_word_render_settings.update(data["word_render_settings"])
-        loaded_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CLIP_CROSSFADE))
+        loaded_mode = str(self.articulation_word_render_settings.get("word_render_mode", ARTICULATION_WORD_RENDER_CONTINUOUS))
         if loaded_mode not in ARTICULATION_WORD_RENDER_MODES:
-            loaded_mode = ARTICULATION_WORD_RENDER_CLIP_CROSSFADE
+            loaded_mode = ARTICULATION_WORD_RENDER_CONTINUOUS
         self.articulation_word_render_settings["word_render_mode"] = loaded_mode
         self.articulation_syllable_markers = list(data.get("syllable_markers", [])) if isinstance(data.get("syllable_markers", []), list) else []
         self.articulation_phrase_markers = list(data.get("phrase_markers", [])) if isinstance(data.get("phrase_markers", []), list) else []
@@ -19733,11 +19745,15 @@ class WaveToyWindow(QMainWindow):
         if self.continuous_debug_bypass_formants_checkbox is not None:
             self.continuous_debug_bypass_formants_checkbox.setChecked(bool(self.articulation_word_render_settings.get("continuous_debug_bypass_formants", False)))
         if self.continuous_formant_intensity_spin is not None:
-            self.continuous_formant_intensity_spin.setValue(float(self.articulation_word_render_settings.get("continuous_formant_intensity", 0.45)))
+            self.continuous_formant_intensity_spin.setValue(float(self.articulation_word_render_settings.get("continuous_formant_intensity", CONTINUOUS_DEFAULT_FORMANT_INTENSITY)))
         if self.continuous_pitch_smoothing_spin is not None:
-            self.continuous_pitch_smoothing_spin.setValue(int(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", 20)))
+            self.continuous_pitch_smoothing_spin.setValue(int(self.articulation_word_render_settings.get("continuous_pitch_smoothing_ms", CONTINUOUS_DEFAULT_PITCH_SMOOTHING_MS)))
         if self.articulation_word_render_mode_combo is not None:
             self.articulation_word_render_mode_combo.setCurrentText(loaded_mode)
+        if self.singing_mode_checkbox is not None:
+            self.singing_mode_checkbox.blockSignals(True)
+            self.singing_mode_checkbox.setChecked(bool(self.articulation_word_render_settings.get("singing_mode_enabled", True)))
+            self.singing_mode_checkbox.blockSignals(False)
         self.articulation_word_render_audio = np.zeros((0, 2), dtype=np.float32)
         self.articulation_word_render_signature = None
         self._refresh_articulation_chain_cards()
@@ -19925,6 +19941,7 @@ class WaveToyWindow(QMainWindow):
         tools.setSpacing(8)
         secondary_actions = (
             ("Load", lambda checked=False, p=phoneme: self._load_saved_phoneme(p)),
+            ("Add to Chain", lambda checked=False, p=phoneme: self._add_saved_phoneme_to_chain(p)),
             ("Rename", lambda checked=False, p=phoneme: self._rename_saved_phoneme(p)),
             ("Duplicate", lambda checked=False, p=phoneme: self._duplicate_saved_phoneme(p)),
         )
@@ -19944,6 +19961,14 @@ class WaveToyWindow(QMainWindow):
 
     def _load_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
         self._set_articulation_ui_from_phoneme(phoneme)
+
+    def _add_saved_phoneme_to_chain(self, phoneme: ArticulationPhoneme) -> None:
+        new_phoneme = ArticulationPhoneme.from_json_dict(phoneme.to_json_dict())
+        self.articulation_chain_items.append(ArticulationChainItem(new_phoneme, duration_ms=DEFAULT_CHAIN_PHONEME_DURATION_MS))
+        self.articulation_selected_chain_index = len(self.articulation_chain_items) - 1
+        self._set_articulation_ui_from_phoneme(new_phoneme)
+        self._mark_articulation_word_dirty()
+        self._refresh_articulation_chain_cards()
 
     def _rename_saved_phoneme(self, phoneme: ArticulationPhoneme) -> None:
         new_name, ok = QInputDialog.getText(self, "Rename Phoneme", "New friendly name:", text=phoneme.name)
