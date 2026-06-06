@@ -74,9 +74,9 @@ def test_articulation_workspace_uses_compact_selector_policy():
 
 def test_speech_assets_sidebar_stays_compact_in_chain_workflow():
     source = _source()
-    assert 'chain_split.addLayout(build_sidebar, 1)' in source
+    assert 'speechBuilderPhonemeLibraryColumn' in source
     assert 'apply_articulation_picker_sidebar_width_policy(speech_assets)' in source
-    assert 'build_sidebar.addWidget(speech_assets)' in source
+    assert 'library_column.addWidget(CollapsibleSection("Speech Assets", speech_assets, expanded=False))' in source
 
 
 def test_motion_preview_only_appears_in_motion_workflow():
@@ -111,10 +111,11 @@ def test_task_098_chain_cards_are_compact_and_contextual():
     source = _source()
     assert "UI_BUTTON_HEIGHT_COMPACT = 28" in source
     assert "UI_CARD_PADDING_COMPACT = 8" in source
-    assert "card.setMinimumHeight(104)" in source
+    assert "card.setMinimumHeight(88)" in source
     assert "button.setMinimumHeight(UI_BUTTON_HEIGHT_COMPACT)" in source
-    assert "Use Current Wave for Selected" in source
-    assert "Use Current Wave for Remaining" in source
-    assert "Use Current Wave for Whole Chain" in source
+    assert 'duration_spin.setObjectName("chainCardDurationSpin")' in source
+    assert "def _apply_current_wave_to_selected_chain_item" in source
+    assert "def _apply_current_wave_to_remaining_chain" in source
+    assert "def _apply_current_wave_to_whole_chain" in source
     assert "Reset Selected Source" in source
     assert "Reset Chain Sources" in source

@@ -131,7 +131,8 @@ def test_chain_card_selected_state_and_selector_are_in_source():
     assert 'card.setProperty("selected", index == self.articulation_selected_chain_index)' in source
     assert 'card.mousePressEvent = lambda event, i=index: self._select_articulation_chain_item(i)' in source
     assert 'variation_combo.setObjectName("chainCardVoiceWaveVariationSelector")' in source
-    assert 'Voice / Wave Variation' in source
+    assert 'duration_spin.setObjectName("chainCardDurationSpin")' in source
+    assert 'variation_label = QLabel("Source")' in source
 
 
 def test_existing_apply_current_wave_helpers_still_exist_without_schema_migration():
