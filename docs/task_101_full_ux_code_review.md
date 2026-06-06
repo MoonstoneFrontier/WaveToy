@@ -4,7 +4,7 @@
 
 WaveToy has reached a strong feature depth, but the current interface is organized around implementation history rather than user intent. The main window now mixes sound design, phoneme editing, speech-chain building, timeline arrangement, diagnostics, asset storage, and future voice-font planning in a single tab strip. The global command bar attempts to normalize access to common actions, but several of its commands are context-dependent and ambiguous, so users still need to understand which tab owns the current action.
 
-The highest-priority UX problem is the articulation workflow. The core user goal is simple: **click a phoneme, assign a voice/wave variation, adjust timing, preview, then render**. In the current UI this path crosses Articulation Lab, Articulation Timeline → Timeline → Chain, Timing / Performance, Render, Motion, Inspector, Profiles, Speech Assets, and sometimes Classic Controls or Wave Explorer when the source is the current waveform. Source assignment exists in multiple forms: current phoneme controls, chain-level buttons, per-card badges/selectors, and current-wave actions. The result is powerful but hard to learn.
+The highest-priority UX problem is the articulation workflow. The core user goal is simple: **click a phoneme, assign a voice/wave variation, adjust timing, preview, then render**. In the current UI this path crosses Articulation Lab, Articulation Timeline → Timeline → Chain, Timing / Performance, Render, Motion, Inspector, Profiles, Speech Assets, and sometimes Voice Lab or Wave Explorer when the source is the current waveform. Source assignment exists in multiple forms: current phoneme controls, chain-level buttons, per-card badges/selectors, and current-wave actions. The result is powerful but hard to learn.
 
 This task intentionally makes no runtime changes. The recommended next step is to rebuild the articulation workflow around a **Selected Phoneme Workbench** that keeps source, timing, expression, and actions in one contextual panel while preserving compact chain cards for quick selection and direct source changes. The broader plan is to reduce global toolbar scope, split workspaces by user goal, collapse advanced/diagnostic controls, and make storage/project state visible as a settings/workspace concern.
 
@@ -13,7 +13,7 @@ This task intentionally makes no runtime changes. The recommended next step is t
 - Main window construction and tab insertion order in `wave_toy.py`.
 - Global command bar actions and callbacks.
 - File, Library, Edit, View, and Help menu actions.
-- Classic Controls, Voice, Wave Explorer, Graphical Editor, Articulation Lab, Articulation Timeline, Performance Timeline, Timeline, Speech Asset Library, and Voice Font construction.
+- Voice Lab, Voice, Wave Explorer, Graphical Editor, Articulation Lab, Articulation Timeline, Performance Timeline, Timeline, Speech Asset Library, and Voice Font construction.
 - Speech diagnostics dock, profile controls, storage resolution, and project/data-directory actions.
 - Existing regression tests around articulation chain source assignment, storage directory resolution, scroll capture, and UI control classification.
 
@@ -25,7 +25,7 @@ This task intentionally makes no runtime changes. The recommended next step is t
 4. **Primary and secondary actions compete visually.** Many buttons share large, saturated story-button styling even when they are secondary, advanced, or diagnostic.
 5. **Advanced/debug controls appear beside everyday workflows.** Continuous tuning validation, stop tests, inspector analysis, voice-box/resonance controls, and export-debug actions can crowd normal speech creation.
 6. **Source assignment has no single home.** Users can apply the current wave to a current phoneme, selected chain card, or whole chain, while chain cards also show source badges and saved assets carry their own source metadata.
-7. **Render/play actions are duplicated.** The app has global play/loop/stop, Classic Controls play/loop/stop, phoneme preview, word/chain playback, motion preview, timeline playback, and rendered mix playback.
+7. **Render/play actions are duplicated.** The app has global play/loop/stop, Voice Lab play/loop/stop, phoneme preview, word/chain playback, motion preview, timeline playback, and rendered mix playback.
 8. **Saved assets are discoverable only after learning storage vocabulary.** Speech Assets, Speech Asset Library, File import/export entry actions, library menu actions, and Timeline drawer assets all expose overlapping concepts.
 9. **Storage/data-directory state is visible but not actionable enough.** Users see project/data status and File menu data-directory commands, but there is no coherent storage settings page or migration workflow.
 10. **Scroll and focus policies are improving but need a documented exception model.** Passive wheel widgets and no-wheel combos reduce accidental capture, yet tables, text edits, and picker panels need predictable local-scroll exceptions.
@@ -74,9 +74,9 @@ This task intentionally makes no runtime changes. The recommended next step is t
 | Current tab | User-facing clarity | Main issue | Recommended future form |
 |---|---:|---|---|
 | Voice | Medium | Entry tab name is broad; overlaps future voice-source/profile concepts. | Sound Design home or simplified Start workspace. |
-| Classic Controls | Medium | Clear to existing users but implementation-oriented; dense mixer/synth controls. | Sound Design → Classic/Advanced Controls section. |
+| Voice Lab | Medium | Clear to existing users but implementation-oriented; dense mixer/synth controls. | Sound Design → Classic/Advanced Controls section. |
 | Wave Explorer | Medium-high | Goal is visual exploration, but it also exposes editing/preset workspaces. | Sound Design → Explorer workspace. |
-| Graphical Editor | High | User can infer direct manipulation, but it duplicates Classic Controls. | Sound Design → Graphical Editor mode. |
+| Graphical Editor | High | User can infer direct manipulation, but it duplicates Voice Lab. | Sound Design → Graphical Editor mode. |
 | Articulation Lab | Medium | Good concept, but current phoneme editing is disconnected from chain work. | Speech Builder → Phoneme Design drawer/panel. |
 | Articulation Timeline | Low-medium | Highest-value speech workflow but name sounds technical and overlaps Timeline. | Speech Builder primary workspace. |
 | Performance Timeline | Low-medium | Timing automation is valuable but not clearly tied to speech or arrangement. | Speech Builder → Timing/Performance or Arrangement → Automation depending context. |

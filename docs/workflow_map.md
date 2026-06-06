@@ -13,7 +13,7 @@ This document maps primary workflows from the current UI to a proposed future pa
 Current path:
 
 ```
-Classic Controls
+Voice Lab
 → adjust wave shape/pitch/stereo/texture sliders
 → ▶ Play or global Play
 → Save Audio if needed
@@ -23,7 +23,7 @@ Estimated current cost: 1 tab if not already there, then many control adjustment
 
 Hunt points:
 
-- Classic Controls, Wave Explorer, and Graphical Editor all support sound design with overlapping controls.
+- Voice Lab, Wave Explorer, and Graphical Editor all support sound design with overlapping controls.
 - Global `Render / Create` and Classic `▶ Play` can feel like competing primary actions.
 
 Recommended future path:
@@ -45,7 +45,7 @@ Larger refactor: merge Classic, Wave Explorer, and Graphical Editor under one So
 Current path:
 
 ```
-Classic Controls or Wave Explorer
+Voice Lab or Wave Explorer
 → Save Audio / Save
 ```
 
@@ -74,12 +74,12 @@ Quick win: rename local buttons and tooltips to distinguish `Export Audio` from 
 
 Larger refactor: asset-save flow in Assets workspace.
 
-## 3. Create a voice/wave variation
+## 3. Create a saved voice preset
 
 Current path:
 
 ```
-Classic Controls / Wave Explorer / Graphical Editor
+Voice Lab / Wave Explorer / Graphical Editor
 → adjust wave layers and pitch/stereo/texture
 → optionally use Articulation Lab Apply Current Wave or Articulation Timeline Apply Current Wave actions
 ```
@@ -89,7 +89,7 @@ Estimated current cost: 1-3 tabs plus source apply click.
 Hunt points:
 
 - The variation is created in sound-design tabs but assigned in speech tabs.
-- Users must know that Current Classic Wave can be used as an articulation source.
+- Users must know that Current Unsaved Voice Lab Sound can be used as an articulation source.
 
 Recommended future path:
 
@@ -99,7 +99,7 @@ Sound Design
 → Speech Builder Selected Phoneme Workbench → Source selector
 ```
 
-Quick win: document Current Classic Wave as a source option in source-assignment sections.
+Quick win: document Current Unsaved Voice Lab Sound as a source option in source-assignment sections.
 
 Larger refactor: dedicated source variation asset type/picker in Assets/Speech Builder.
 
@@ -135,7 +135,7 @@ Quick win: cross-link Articulation Lab and Chain with clearer labels.
 
 Larger refactor: put phoneme drawer, chain cards, and Selected Phoneme Workbench in one Speech Builder screen.
 
-## 5. Assign voice variation per phoneme
+## 5. Assign saved voice per phoneme
 
 Current path:
 
@@ -497,7 +497,7 @@ Larger refactor: Task 107 Storage Settings and Migration Wizard.
 
 | Workflow | Current tab/menu count | Proposed tab/workspace count | Priority | Main fix |
 |---|---:|---:|---|---|
-| Assign voice variation per phoneme | 2-3 | 1 | Highest | Selected Phoneme Workbench Source section. |
+| Assign saved voice per phoneme | 2-3 | 1 | Highest | Selected Phoneme Workbench Source section. |
 | Build phoneme chain | 2 | 1 | Highest | Put phoneme drawer and chain cards together. |
 | Play selected phoneme | 1-2 | 1 | High | Selection-driven Play Selected. |
 | Render/export word | 1-2 | 1 | High | Render result panel. |

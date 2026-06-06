@@ -16,7 +16,7 @@
 | Future workspace | Replaces / absorbs | User goal |
 |---|---|---|
 | Start / Voice | Voice landing content, basic first-run guidance | Start a sound or speech workflow. |
-| Sound Design | Classic Controls, Wave Explorer, Graphical Editor | Create and shape waves, stereo motion, pitch, and texture. |
+| Sound Design | Voice Lab, Wave Explorer, Graphical Editor | Create and shape waves, stereo motion, pitch, and texture. |
 | Speech Builder | Articulation Lab, Articulation Timeline Chain/Timing/Render/Motion, selected phoneme controls | Build phoneme chains, assign source variations, preview, and render words. |
 | Arrangement | Timeline and clip-level editing | Arrange audio and speech assets into lanes and render a mix. |
 | Assets | Speech Asset Library, Speech Assets drawers, voice/wave/profile libraries | Find, load, duplicate, tag, import, and export reusable assets. |
@@ -140,7 +140,7 @@ Rules:
 - The selected card is the default scope.
 - Whole-chain actions require clear labels and confirmation if destructive/resetting.
 - Per-card source selector is a compact shortcut, not a separate source model.
-- Current Classic Wave is a source option, but users should not have to leave Speech Builder just to understand what is assigned.
+- Current Unsaved Voice Lab Sound is a source option, but users should not have to leave Speech Builder just to understand what is assigned.
 
 ## Proposed timeline workflow
 

@@ -117,5 +117,5 @@ def test_task_098_chain_cards_are_compact_and_contextual():
     assert "def _apply_current_wave_to_selected_chain_item" in source
     assert "def _apply_current_wave_to_remaining_chain" in source
     assert "def _apply_current_wave_to_whole_chain" in source
-    assert "Reset Selected Source" in source
+    assert "Reset Selected to Default Voice" in source
     assert "Reset Chain Sources" in source

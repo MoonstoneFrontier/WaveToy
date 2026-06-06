@@ -28,23 +28,29 @@ def test_voice_source_dock_and_current_voice_panel_are_in_speech_builder():
     assert 'build_sidebar.addWidget(self._build_current_voice_status_panel())' in source
 
 
-def test_voice_source_dock_displays_required_voice_metadata_and_controls():
+def test_voice_source_dock_displays_voice_picker_without_raw_metadata_labels():
     source = _source()
 
+    start = source.index('def _build_voice_source_dock')
+    end = source.index('def _build_current_voice_status_panel', start)
+    dock_source = source[start:end]
+
     for expected in (
-        'Current Voice:',
-        'Source Mode:',
-        'Badge:',
-        'Preview Color:',
-        'Category:',
+        'Active Voice:',
+        'Voice preset selector',
         'voiceSourceDockVoiceSelector',
-        'Previous Voice',
-        'Next Voice',
         '▶ Preview Voice',
-        'Refresh Library',
+        'Apply to Selected',
+        'Apply to Remaining',
+        'Apply to Whole Chain',
+        'Refresh Voices',
+        'Selecting a voice does not change the chain until Apply is clicked.',
         'Ready',
     ):
-        assert expected in source
+        assert expected in dock_source
+
+    for hidden in ('Source Mode:', 'Badge:', 'Preview Color:', 'Category:'):
+        assert hidden not in dock_source
 
 
 def test_selecting_current_voice_is_non_destructive_until_apply_scope():
@@ -79,3 +85,31 @@ def test_apply_current_voice_scopes_selected_remaining_and_whole_chain():
     win.current_voice_variation_id = f"{wave_toy.ARTICULATION_SOURCE_MIX_WAVE}:sine"
     win._apply_current_voice_to_whole_chain()
     assert all(item.phoneme.source_mode == wave_toy.ARTICULATION_SOURCE_MIX_WAVE for item in win.articulation_chain_items)
+
+
+def test_saved_voice_presets_appear_in_voice_source_options():
+    win = _window_with_chain()
+    win.user_presets_path = wave_toy.Path("/tmp/unused_voice_presets.json")
+    win._read_user_recipes = MethodType(lambda self: [
+        {"name": "Charles_flat", "asset_type": "voice_preset", "voice_preset": True, "ui": {}, "settings": {}},
+        {"name": "NotAVoice", "asset_type": "sound", "ui": {}, "settings": {}},
+    ], win)
+
+    options = win.available_chain_voice_wave_variations()
+
+    assert "Charles_flat" in {option["label"] for option in options}
+    assert f"{wave_toy.ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX}Charles_flat" in {option["id"] for option in options}
+    assert "NotAVoice" not in {option["label"] for option in options}
+
+
+def test_saved_voice_preset_metadata_keeps_recipe_snapshot():
+    win = _window_with_chain()
+    win.user_presets_path = wave_toy.Path("/tmp/unused_voice_presets.json")
+    win._read_user_recipes = MethodType(lambda self: [
+        {"name": "Charles_flat", "asset_type": "voice_preset", "voice_preset": True, "ui": {"note": "C4"}, "settings": {"duration": 1.0}},
+    ], win)
+
+    metadata = win._source_metadata_for_variation_id(f"{wave_toy.ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX}Charles_flat")
+
+    assert metadata["source_mode"] == wave_toy.ARTICULATION_SOURCE_CURRENT
+    assert metadata["source_recipe_snapshot"]["name"] == "Charles_flat"

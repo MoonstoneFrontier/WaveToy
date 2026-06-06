@@ -37,7 +37,7 @@ def test_task_098_ui_audit_covers_required_major_areas():
     text = AUDIT_PATH.read_text(encoding="utf-8")
     for area in (
         "Global command bar",
-        "Classic Controls",
+        "Voice Lab",
         "Articulation Timeline → Timeline → Chain",
         "Articulation Timeline → Timeline → Timing / Performance",
         "Articulation Timeline → Render",

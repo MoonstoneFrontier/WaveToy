@@ -73,9 +73,9 @@ def test_workflow_map_covers_primary_user_workflows():
     for workflow in (
         "Create a basic sound",
         "Save a sound",
-        "Create a voice/wave variation",
+        "Create a saved voice preset",
         "Build a phoneme chain",
-        "Assign voice variation per phoneme",
+        "Assign saved voice per phoneme",
         "Play selected phoneme",
         "Play full word",
         "Render/export word",

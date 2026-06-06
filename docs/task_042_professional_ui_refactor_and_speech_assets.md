@@ -24,9 +24,9 @@ Primary navigation has been renamed toward a more professional workflow:
 4. **Graphical Editor** — direct manipulation workflow.
 5. **Timeline** — audio-editor-style arrangement and export.
 6. **Library** — central asset management.
-7. **Classic Controls** — full legacy/fallback control surface.
+7. **Voice Lab** — full legacy/fallback control surface.
 
-The old capabilities remain accessible. Classic Controls is intentionally retained as the advanced fallback surface rather than removed.
+The old capabilities remain accessible. Voice Lab is intentionally retained as the advanced fallback surface rather than removed.
 
 ## Speech Assets visibility
 
@@ -63,7 +63,7 @@ User-facing terminology was updated toward a professional tone:
 | Speech Bin | Speech Assets |
 | Audio Palette | Audio Assets |
 | Timeline Storyboard | Timeline |
-| Classic Editor | Classic Controls |
+| Classic Editor | Voice Lab |
 | Pitch Toys | Pitch Tools |
 | Sound Magic | Texture / Effects |
 | toy sound shelf | Audio Assets |
