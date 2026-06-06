@@ -51,14 +51,14 @@ Categories:
 | Save / Export | Global command bar | `_global_save_export` | import_export | Save/export active item | No | Explicit Save Project / Export Audio / Export Word / Export Mix | contextual | High: ambiguous persistence. |
 | Reset | Global command bar | `_global_reset_context` | destructive_action | Reset current context | No | Contextual reset/clear actions only | contextual | High: destructive ambiguity. |
 | Project path label | Shell under global bar | `_project_status_text` | status_display | Know current project path/dirty state | Yes | Shell + Settings/Project | always_visible | Low. |
-| ＋ Wave | Classic Controls | wave row add callback | primary_action | Add synth wave layer | Yes | Sound Design → Classic | contextual | Low. |
-| All / Clear Solo | Classic Controls | clear solo callback | secondary_action | Restore all wave layers audible | Yes | Sound Design → Classic mixer | contextual | Low. |
-| Preset buttons | Classic Controls | preset callbacks | secondary_action | Start from sound examples | Maybe | Sound Design → Presets | contextual | Low. |
-| ▶ Play | Classic Controls | `_play` | transport | Play current generated sound | Yes | Sound Design toolbar | contextual | Medium: duplicate global play. |
-| 🔁 Loop | Classic Controls | `_toggle_live_loop` | transport | Loop generated sound | Yes | Sound Design toolbar | contextual | Medium. |
-| ■ Stop | Classic Controls | `_stop` | transport | Stop sound playback | Yes | Sound Design toolbar | contextual | Low. |
-| Save Audio | Classic Controls | `_save` | import_export | Export generated audio | Yes | Sound Design export toolbar | contextual | Medium: distinguish from project save. |
-| Load Audio | Classic Controls | `_load_sound` | import_export | Load external audio | Maybe | Assets/Arrangement import or Sound Design import | contextual | Medium. |
+| ＋ Wave | Voice Lab | wave row add callback | primary_action | Add synth wave layer | Yes | Sound Design → Classic | contextual | Low. |
+| All / Clear Solo | Voice Lab | clear solo callback | secondary_action | Restore all wave layers audible | Yes | Sound Design → Classic mixer | contextual | Low. |
+| Preset buttons | Voice Lab | preset callbacks | secondary_action | Start from sound examples | Maybe | Sound Design → Presets | contextual | Low. |
+| ▶ Play | Voice Lab | `_play` | transport | Play current generated sound | Yes | Sound Design toolbar | contextual | Medium: duplicate global play. |
+| 🔁 Loop | Voice Lab | `_toggle_live_loop` | transport | Loop generated sound | Yes | Sound Design toolbar | contextual | Medium. |
+| ■ Stop | Voice Lab | `_stop` | transport | Stop sound playback | Yes | Sound Design toolbar | contextual | Low. |
+| Save Audio | Voice Lab | `_save` | import_export | Export generated audio | Yes | Sound Design export toolbar | contextual | Medium: distinguish from project save. |
+| Load Audio | Voice Lab | `_load_sound` | import_export | Load external audio | Maybe | Assets/Arrangement import or Sound Design import | contextual | Medium. |
 | Note Wheel | Classic/Wave Explorer | `_open_note_wheel` | expression_control | Select note/pitch emotionally | Yes | Sound Design pitch section | contextual | Low. |
 | Voice Font Import Recording | Voice Font | `_import_voice_font_recording` | import_export | Future consent-first capture import | Maybe | Assets → Voice Font Planning | contextual | Low. |
 | Voice Font Record | Voice Font | future notice lambda | advanced_debug | Future disabled recording placeholder | No | Voice Font Planning advanced/future | advanced_collapsed | Low. |
@@ -77,7 +77,7 @@ Categories:
 | Create Syllable | Articulation Timeline → Chain | `_create_articulation_syllable` | secondary_action | Build syllable from chain context | Maybe | Speech Builder Actions / Assets | contextual | Medium. |
 | Apply Current Wave to Selected | Articulation Timeline → Chain Wave Source | `_apply_current_wave_to_selected_chain_item` | source_assignment | Assign source to selected chain phoneme | No | Selected Phoneme Workbench Source | contextual | High: core workflow. |
 | Apply Current Wave to Chain | Articulation Timeline → Chain Wave Source | `_apply_current_wave_to_whole_chain` | source_assignment | Assign source to all chain phonemes | No | Workbench Source bulk menu | contextual | High: bulk mutation. |
-| Reset Selected Source | Articulation Timeline → Chain Wave Source | `_reset_selected_chain_item_source` | source_assignment | Restore selected default source | No | Workbench Source | contextual | Medium. |
+| Reset Selected to Default Voice | Articulation Timeline → Chain Wave Source | `_reset_selected_chain_item_source` | source_assignment | Restore selected default source | No | Workbench Source | contextual | Medium. |
 | Reset Chain Sources | Articulation Timeline → Chain Destructive | `_reset_whole_chain_source` | destructive_action | Restore all default sources | No | Workbench Source bulk destructive with confirmation | contextual | High. |
 | Clear Chain | Articulation Timeline → Chain Destructive | `_clear_articulation_chain` | destructive_action | Remove chain cards | Maybe | Chain toolbar destructive overflow | contextual | High. |
 | Live Preview | Articulation Timeline → Chain | `_set_live_preview_enabled` | transport | Auto-audition edits | Maybe | Workbench Actions/Preview | contextual | Medium: playback lifecycle. |

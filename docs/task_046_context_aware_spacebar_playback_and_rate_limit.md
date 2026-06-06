@@ -11,7 +11,7 @@ Shift+Space continues to use the existing live-loop toggle path.
 | Main tab | Spacebar target | Current implementation |
 | --- | --- | --- |
 | Synthesis | Current rendered WaveToy synthesis audio | Calls `_play()` |
-| Classic Controls | Current rendered WaveToy synthesis audio | Calls `_play()` |
+| Voice Lab | Current rendered WaveToy synthesis audio | Calls `_play()` |
 | Wave Explorer | Active Wave Explorer workspace output or current rendered audio | Calls `_play_wave_explorer_context()`, currently falls back to `_play()` with TODO for deeper workspace renders |
 | Articulation Lab | Current selected phoneme preview, or chain/word context when chain widgets have focus | Calls `_play_articulation_context()` |
 | Articulation Timeline | Created word/current chain render, word motion audio when applicable, then chain fallback | Implemented as `_play_articulation_timeline_context()` and reached from Articulation Lab chain/timeline focus |

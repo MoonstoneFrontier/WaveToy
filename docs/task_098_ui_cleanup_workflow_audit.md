@@ -34,19 +34,19 @@ WaveToy's current interface is feature rich, but many unrelated actions share th
 
 ### Top-level tabs
 - **Purpose:** Switch between major workflows.
-- **Current controls:** Classic Controls, Articulation Lab/Timeline, Voice Font, Performance Timeline, Graphical Editor, Timeline, Speech Asset Library, Wave Explorer, related pages.
+- **Current controls:** Voice Lab, Articulation Lab/Timeline, Voice Font, Performance Timeline, Graphical Editor, Timeline, Speech Asset Library, Wave Explorer, related pages.
 - **Classification:** All tabs `navigation`.
 - **Misplaced/duplicated:** Some workflow-specific tools are reachable from multiple tabs with inconsistent names.
 - **Move/collapse/rename/contextual:** Keep tabs task-oriented; avoid names that sound like implementation details.
 - **Density/color issues:** Tab height and selected-state styling should be calmer and more compact.
 - **Suggested future layout:** Group sound design, speech, timeline, and library workflows; use compact selected underline.
 
-### Classic Controls
+### Voice Lab
 - **Purpose:** Primary waveform synthesis and classic WaveToy sound design.
 - **Current controls:** Wave rows, oscillators, sliders, mute/solo, current sound generation/play/export, tuning and effects controls.
 - **Classification:** Generate/play `primary_action` or `transport`; sliders `editor_control`; wave shape selectors `selector`; mute/solo `secondary_action`; export/save `export_import`; meters/status `diagnostic`/`status_only`.
 - **Misplaced/duplicated:** Current sound source assignment for phonemes is too far from Chain cards.
-- **Move/collapse/rename/contextual:** Keep synthesis controls here, but expose “Current Classic Wave” as a chain-card source selector.
+- **Move/collapse/rename/contextual:** Keep synthesis controls here, but expose “Current Unsaved Voice Lab Sound” as a chain-card source selector.
 - **Density/color issues:** Many controls are equal weight; sliders and buttons feel bulky.
 - **Suggested future layout:** Compact wave rows with local mute/solo, a separated transport/export strip, and source routing shown contextually in speech workflows.
 
@@ -64,14 +64,14 @@ WaveToy's current interface is feature rich, but many unrelated actions share th
 - **Current controls:** Internal Timeline/Render/Inspector/Profiles subtabs, chain builder, timing canvas, motion previews, render actions.
 - **Classification:** Subtabs `navigation`; Create/Play/Export Word `primary_action`; chain edit buttons `secondary_action`; reset/clear `destructive_action`; render modes `selector`; validation `diagnostic`/`debug_advanced`.
 - **Misplaced/duplicated:** Timing selection became the effective selection gateway even when Chain cards were visible.
-- **Move/collapse/rename/contextual:** Direct card selection and card-local Voice / Wave Variation selectors reduce cross-tab jumping.
+- **Move/collapse/rename/contextual:** Direct card selection and card-local Voice selector selectors reduce cross-tab jumping.
 - **Density/color issues:** Chain cards had tall buttons and heavy padding.
 - **Suggested future layout:** Chain for content/source, Timing / Performance for durations and beat grid, Motion for curves/visemes, Render for output.
 
 ### Articulation Timeline → Timeline → Chain
 - **Purpose:** Assemble phoneme chain and choose each card's sound source.
 - **Current controls:** Add Current, Create Syllable, Clear Chain, Apply Current Wave to Selected/Chain, Reset Selected/Chain Sources, chain cards, CV/VC library.
-- **Classification:** Add/Create `secondary_action`/`primary_action`; Clear/Reset Chain `destructive_action`; Apply/Reset Selected `secondary_action`; cards `library_asset` plus `editor_control`; Voice / Wave Variation combo `selector`; Play on card `transport`.
+- **Classification:** Add/Create `secondary_action`/`primary_action`; Clear/Reset Chain `destructive_action`; Apply/Reset Selected `secondary_action`; cards `library_asset` plus `editor_control`; Voice selector combo `selector`; Play on card `transport`.
 - **Misplaced/duplicated:** Old Apply Wave buttons remain useful as batch fallbacks but should not be the only per-card source path.
 - **Move/collapse/rename/contextual:** Keep batch buttons, rename for clarity, and put per-card source selector on each card.
 - **Density/color issues:** Reduced card minimum height, padding, and secondary button height in this patch.
@@ -241,7 +241,7 @@ WaveToy's current interface is feature rich, but many unrelated actions share th
 - Chain cards are directly selectable in the Chain tab.
 - The selected card has a stronger outline/accent and stores selected object state.
 - Card selection updates the shared `articulation_selected_chain_index`, which continues to sync with Timing / Performance timeline selection.
-- Each card exposes a compact `Voice / Wave Variation` selector with at least `Default Voice` and `Current Classic Wave`.
+- Each card exposes a compact `Voice selector` selector with at least `Default Voice` and `Current Unsaved Voice Lab Sound`.
 - Mix waves are exposed as existing source options without changing the project or export schema.
 - Existing Apply Current Wave to Selected/Chain and Reset Selected/Chain Sources actions remain as fallback/batch operations.
 - Selection and source assignment do not render audio; preview/play/render are still explicit user actions.

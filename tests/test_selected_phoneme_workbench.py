@@ -42,7 +42,7 @@ def test_workbench_includes_required_sections_and_primary_create_word():
     source = _source()
 
     assert 'Selected Phoneme Status' in source
-    assert 'Voice / Wave Source' in source
+    assert 'Voice' in source
     assert 'Timing' in source
     assert 'Actions' in source
     assert 'make_primary_action_button("Create Word", self._create_articulation_word' in source
@@ -53,11 +53,11 @@ def test_workbench_includes_required_sections_and_primary_create_word():
 def test_workbench_source_scope_labels_are_clear():
     source = _source()
 
-    assert 'Voice / Wave Source' in source
+    assert 'Voice' in source
     assert 'selectedPhonemeVoiceWaveVariationSelector' in source
     assert 'Apply to Selected' in source
-    assert 'Reset Selected Source' in source
-    assert 'Use Current Classic Wave' not in source
+    assert 'Reset Selected to Default Voice' in source
+    assert 'Use Current Unsaved Voice Lab Sound' not in source
 
 
 def test_selecting_timing_track_or_chain_card_uses_same_selected_index():

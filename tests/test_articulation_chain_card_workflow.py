@@ -61,7 +61,7 @@ def test_selected_chain_index_updates_from_chain_card_selection_helper():
     assert win.articulation_selected_chain_index == 1
 
 
-def test_voice_wave_variation_options_include_default_and_current_classic_wave():
+def test_voice_wave_variation_options_include_default_and_current_voice_lab_sound():
     win = _window_with_chain()
 
     options = win.available_chain_voice_wave_variations()
@@ -69,7 +69,7 @@ def test_voice_wave_variation_options_include_default_and_current_classic_wave()
     ids = {option["id"] for option in options}
 
     assert "Default Voice" in labels
-    assert "Current Classic Wave" in labels
+    assert "Current Unsaved Voice Lab Sound" in labels
     assert wave_toy.ARTICULATION_SOURCE_DEFAULT in ids
     assert wave_toy.ARTICULATION_SOURCE_CURRENT in ids
 
