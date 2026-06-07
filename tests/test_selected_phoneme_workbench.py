@@ -112,3 +112,15 @@ def test_no_project_or_export_schema_changes_for_workbench():
 
     assert '"schema": "wavetoy.articulation_chain.v1"' not in source
     assert 'selected_phoneme_workbench' not in source.lower().split('to_json_dict', 1)[0]
+
+
+def test_workbench_preview_and_word_actions_are_grouped_with_clear_labels():
+    source = _source()
+
+    assert 'preview_title = QLabel("Preview Actions")' in source
+    assert 'actions_title = QLabel("Word Actions")' in source
+    assert 'make_transport_button("▶ Preview Voice", self._preview_current_voice' in source
+    assert 'make_transport_button("▶ Play Selected Phoneme"' in source
+    assert 'make_transport_button("▶ Preview Word", self._play_articulation_word' in source
+    assert 'make_primary_action_button("Create Word", self._create_articulation_word' in source
+    assert 'make_export_import_button("Export Word", self._export_articulation_word' in source

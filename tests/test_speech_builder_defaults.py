@@ -104,3 +104,12 @@ def test_performance_timing_labels_are_clear_and_not_ambiguous():
 
     assert 'QCheckBox("Musical Timing")' not in source
     assert 'QCheckBox("Singing Preview")' not in source
+
+
+def test_live_preview_stops_previous_playback_instead_of_overlapping():
+    source = _source()
+
+    assert '[WaveToy Live Preview] stop previous target=' in source
+    assert 'reason=no_overlap' in source
+    assert 'self._stop_phoneme_preview()' in source
+    assert 'self._stop_articulation_motion()' in source
