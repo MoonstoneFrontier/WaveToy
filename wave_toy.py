@@ -11684,6 +11684,12 @@ class WaveToyWindow(QMainWindow):
         self._refreshing_voice_source_controls = False
         self.voice_source_dock_selector: QComboBox | None = None
         self.voice_source_dock_status_label: QLabel | None = None
+        self.voice_source_dock_type_label: QLabel | None = None
+        self.saved_voice_asset_list: QListWidget | None = None
+        self.saved_voice_asset_empty_label: QLabel | None = None
+        self.saved_voice_asset_details_label: QLabel | None = None
+        self.saved_voice_asset_ids: List[str] = []
+        self._selected_saved_voice_id: str | None = None
         self.voice_source_dock_mode_label: QLabel | None = None
         self.voice_source_dock_badge_label: QLabel | None = None
         self.voice_source_dock_color_label: QLabel | None = None
@@ -15097,10 +15103,10 @@ class WaveToyWindow(QMainWindow):
             return "#5cdb95"
         return "#ffd166"
 
-    def _build_voice_source_dock(self) -> QWidget:
-        dock = self._toy_group("Voice Source Dock")
-        dock.setObjectName("voiceSourceDock")
-        layout = QVBoxLayout(dock)
+    def _build_saved_voices_panel(self) -> QWidget:
+        panel = self._toy_group("Saved Voices")
+        panel.setObjectName("savedVoicesPanel")
+        layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 16, 10, 10)
         layout.setSpacing(8)
 
@@ -15109,38 +15115,62 @@ class WaveToyWindow(QMainWindow):
         self.voice_source_dock_status_label.setWordWrap(True)
         layout.addWidget(self.voice_source_dock_status_label)
 
-        self.voice_source_dock_type_label = QLabel("Saved Voice selector")
+        active_row = QHBoxLayout()
+        active_row.setObjectName("savedVoicesActiveVoiceRow")
+        active_row.setSpacing(8)
+        active_row.addWidget(QLabel("Active Voice"))
+        self.voice_source_dock_selector = NoWheelComboBox()
+        self.voice_source_dock_selector.setObjectName("activeVoiceSelector")
+        apply_compact_combo_policy(self.voice_source_dock_selector, minimum=200, maximum=320)
+        self.voice_source_dock_selector.currentIndexChanged.connect(lambda _row, combo=self.voice_source_dock_selector: self._select_current_voice_from_selector(combo))
+        active_row.addWidget(self.voice_source_dock_selector, 1)
+        layout.addLayout(active_row)
+
+        self.voice_source_dock_type_label = QLabel("Selecting a voice does not change the chain until Apply is clicked.")
         self.voice_source_dock_type_label.setObjectName("symbolHint")
         self.voice_source_dock_type_label.setWordWrap(True)
         layout.addWidget(self.voice_source_dock_type_label)
 
-        self.voice_source_dock_note_label = QLabel("Selecting a voice does not change the chain until Apply is clicked.")
-        self.voice_source_dock_note_label.setObjectName("symbolHint")
-        self.voice_source_dock_note_label.setWordWrap(True)
-        layout.addWidget(self.voice_source_dock_note_label)
+        self.saved_voice_asset_empty_label = QLabel("No saved voices yet. Create one in Voice Lab with Save Voice Preset.")
+        self.saved_voice_asset_empty_label.setObjectName("symbolHint")
+        self.saved_voice_asset_empty_label.setWordWrap(True)
+        layout.addWidget(self.saved_voice_asset_empty_label)
 
-        controls = QHBoxLayout()
-        controls.setObjectName("voiceSourceDockToolbar")
-        controls.setSpacing(8)
-        controls.addWidget(QLabel("Voice selector"))
-        self.voice_source_dock_selector = NoWheelComboBox()
-        self.voice_source_dock_selector.setObjectName("voiceSourceDockVoiceSelector")
-        apply_compact_combo_policy(self.voice_source_dock_selector, minimum=180, maximum=280)
-        self.voice_source_dock_selector.currentIndexChanged.connect(lambda _row, combo=self.voice_source_dock_selector: self._select_current_voice_from_selector(combo))
-        controls.addWidget(self.voice_source_dock_selector, 1)
-        controls.addWidget(make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview only the active saved or unsaved voice"))
-        controls.addWidget(make_secondary_action_button("Apply Voice to Selected", self._apply_current_voice_to_selected_chain_item, "Apply the active voice to only the selected phoneme"))
-        controls.addWidget(make_secondary_action_button("Apply Voice to Remaining", self._apply_current_voice_to_remaining_chain, "Apply the active voice to the selected phoneme and every following phoneme"))
-        controls.addWidget(make_secondary_action_button("Apply Voice to Whole Chain", self._apply_current_voice_to_whole_chain, "Apply the active voice to the entire editable chain"))
-        controls.addWidget(make_secondary_action_button("Refresh Voices", self._refresh_voice_source_library, "Refresh saved Voice Lab presets and imported voice options without changing chain cards"))
-        controls.addWidget(make_secondary_action_button("Open Voices Folder", self._open_voices_folder, "Open the WaveToy Voices folder used by saved Voice Lab presets"))
-        layout.addLayout(controls)
+        self.saved_voice_asset_list = QListWidget()
+        self.saved_voice_asset_list.setObjectName("savedVoiceAssetList")
+        self.saved_voice_asset_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.saved_voice_asset_list.currentRowChanged.connect(self._select_saved_voice_asset)
+        layout.addWidget(self.saved_voice_asset_list)
+
+        self.saved_voice_asset_details_label = QLabel("Choose a saved voice to preview or assign it.")
+        self.saved_voice_asset_details_label.setObjectName("symbolHint")
+        self.saved_voice_asset_details_label.setWordWrap(True)
+        self.saved_voice_asset_details_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.saved_voice_asset_details_label)
+
+        controls = make_button_row_or_toolbar(
+            make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview only the active saved or unsaved voice"),
+            make_secondary_action_button("Apply to Selected", self._apply_current_voice_to_selected_chain_item, "Apply the active voice to only the selected phoneme"),
+            make_secondary_action_button("Apply to Remaining", self._apply_current_voice_to_remaining_chain, "Apply the active voice to the selected phoneme and every following phoneme"),
+            make_secondary_action_button("Apply to Whole Chain", self._apply_current_voice_to_whole_chain, "Apply the active voice to the entire editable chain"),
+            make_secondary_action_button("Refresh Voices", self._refresh_voice_source_library, "Refresh saved Voice Lab presets without changing chain cards"),
+            make_secondary_action_button("Open Voices Folder", self._open_voices_folder, "Open the WaveToy Voices folder used by saved Voice Lab presets"),
+            spacing=8,
+        )
+        controls.setObjectName("savedVoicesActions")
+        layout.addWidget(controls)
 
         ready = QLabel("Ready")
         ready.setObjectName("symbolHint")
         ready.setAlignment(Qt.AlignRight)
         layout.addWidget(ready)
         self._refresh_voice_source_controls()
+        return panel
+
+    def _build_voice_source_dock(self) -> QWidget:
+        """Backward-compatible builder for the Speech Builder saved voice asset browser."""
+        dock = self._build_saved_voices_panel()
+        dock.setObjectName("voiceSourceDock")
         return dock
 
     def _build_current_voice_status_panel(self) -> QWidget:
@@ -15178,6 +15208,78 @@ class WaveToyWindow(QMainWindow):
         finally:
             combo.blockSignals(was_blocked)
 
+    def _voice_asset_display_name(self, variation: Dict[str, str] | str) -> str:
+        if isinstance(variation, dict):
+            return str(variation.get("label") or "Saved Voice")
+        return str(variation or "Saved Voice")
+
+    def _voice_asset_metadata_summary(self, variation_id: str | None = None) -> str:
+        variation_id = str(variation_id or getattr(self, "current_voice_variation_id", ARTICULATION_SOURCE_CURRENT))
+        if not variation_id.startswith(ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX):
+            details = self._voice_variation_details(variation_id)
+            return f"{details['label']} • {details['source_type']}"
+        name = variation_id[len(ARTICULATION_SOURCE_VOICE_PRESET_ID_PREFIX):]
+        recipe = self._saved_voice_preset_recipe_by_name(name) or {"name": name}
+        metadata = recipe.get("voice_metadata") if isinstance(recipe.get("voice_metadata"), dict) else {}
+        created = str(metadata.get("created_at") or "").strip() if isinstance(metadata, dict) else ""
+        updated = str(metadata.get("updated_at") or "").strip() if isinstance(metadata, dict) else ""
+        notes = str(metadata.get("notes") or metadata.get("description") or recipe.get("description") or "").strip() if isinstance(metadata, dict) else str(recipe.get("description") or "").strip()
+        parts = [f"Name: {name}", "Source: Voice Lab"]
+        if updated:
+            parts.append(f"Updated: {updated}")
+        elif created:
+            parts.append(f"Created: {created}")
+        if notes:
+            parts.append(f"Notes: {notes}")
+        return " • ".join(parts)
+
+    def _refresh_saved_voice_asset_cards(self) -> None:
+        saved_options = [option for option in self.available_chain_voice_wave_variations() if option.get("category") == "voice_preset"]
+        self.saved_voice_asset_ids = [str(option["id"]) for option in saved_options]
+        current_id = str(getattr(self, "current_voice_variation_id", ARTICULATION_SOURCE_CURRENT))
+        selected_id = str(getattr(self, "_selected_saved_voice_id", "") or "")
+        if current_id in self.saved_voice_asset_ids:
+            selected_id = current_id
+        elif selected_id not in self.saved_voice_asset_ids:
+            selected_id = ""
+        self._selected_saved_voice_id = selected_id or None
+
+        asset_list = getattr(self, "saved_voice_asset_list", None)
+        if asset_list is not None:
+            was_blocked = bool(asset_list.blockSignals(True))
+            try:
+                asset_list.clear()
+                selected_row = -1
+                for row, option in enumerate(saved_options):
+                    asset_list.addItem(self._voice_asset_display_name(option))
+                    if str(option["id"]) == selected_id:
+                        selected_row = row
+                asset_list.setCurrentRow(selected_row)
+            finally:
+                asset_list.blockSignals(was_blocked)
+        empty_label = getattr(self, "saved_voice_asset_empty_label", None)
+        if empty_label is not None:
+            empty_label.setVisible(not bool(saved_options))
+        details_label = getattr(self, "saved_voice_asset_details_label", None)
+        if details_label is not None:
+            if selected_id:
+                details_label.setText(self._voice_asset_metadata_summary(selected_id))
+            elif saved_options:
+                details_label.setText("Choose a saved voice to preview or assign it.")
+            else:
+                details_label.setText("No saved voices yet. Create one in Voice Lab with Save Voice Preset.")
+
+    def _select_saved_voice_asset(self, row: int) -> None:
+        if bool(getattr(self, "_refreshing_voice_source_controls", False)):
+            return
+        ids = list(getattr(self, "saved_voice_asset_ids", []))
+        if row < 0 or row >= len(ids):
+            self._selected_saved_voice_id = None
+            return
+        self._selected_saved_voice_id = ids[row]
+        self.current_voice_variation_id = ids[row]
+        self._refresh_voice_source_controls()
+
     def _refresh_voice_source_controls(self) -> None:
         previous_guard = bool(getattr(self, "_refreshing_voice_source_controls", False))
         self._refreshing_voice_source_controls = True
@@ -15198,7 +15300,7 @@ class WaveToyWindow(QMainWindow):
             source_type = details.get("source_type", "Saved Voice" if details.get("category") == "voice_preset" else "Current Voice Lab Sound")
             has_saved_voices = any(option.get("category") == "voice_preset" for option in variations)
             voice_picker_text = (
-                f"{source_type} • choose a saved Voice Lab preset, current Voice Lab sound, or default voice."
+                f"{source_type} • saved voices appear first; Current Voice Lab Sound and Default Voice remain available."
                 if has_saved_voices
                 else "No saved voices yet. Create one in Voice Lab with Save Voice Preset."
             )
@@ -15211,6 +15313,7 @@ class WaveToyWindow(QMainWindow):
             for label, text in label_updates:
                 if label is not None:
                     label.setText(text)
+            self._refresh_saved_voice_asset_cards()
         finally:
             self._refreshing_voice_source_controls = previous_guard
 
@@ -15246,11 +15349,12 @@ class WaveToyWindow(QMainWindow):
     def _refresh_voice_source_library(self, checked: bool = False) -> None:
         del checked
         self._refresh_voice_source_controls()
-        self._show_non_modal_status("Voice Source Dock voices refreshed. Ready.")
+        self._show_non_modal_status("Saved voices refreshed. Ready.")
 
     def _preview_current_voice(self, checked: bool = False) -> None:
         del checked
         # Voice preview intentionally reuses the existing playback path and does not assign or render chain cards.
+        self._stop()
         self._play()
 
     def _build_speech_builder_phoneme_library_panel(self) -> QWidget:

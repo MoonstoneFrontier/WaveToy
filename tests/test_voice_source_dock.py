@@ -20,7 +20,7 @@ def _source() -> str:
 def test_voice_source_dock_and_current_voice_panel_are_in_speech_builder():
     source = _source()
 
-    assert 'self._toy_group("Voice Source Dock")' in source
+    assert 'self._toy_group("Saved Voices")' in source
     assert 'dock.setObjectName("voiceSourceDock")' in source
     assert 'chain_tab_layout.addWidget(voice_source_dock)' in source
     assert 'self._toy_group("Current Voice")' in source
@@ -31,18 +31,18 @@ def test_voice_source_dock_and_current_voice_panel_are_in_speech_builder():
 def test_voice_source_dock_displays_voice_picker_without_raw_metadata_labels():
     source = _source()
 
-    start = source.index('def _build_voice_source_dock')
+    start = source.index('def _build_saved_voices_panel')
     end = source.index('def _build_current_voice_status_panel', start)
     dock_source = source[start:end]
 
     for expected in (
         'Active Voice:',
-        'Voice selector',
-        'voiceSourceDockVoiceSelector',
+        'Active Voice',
+        'activeVoiceSelector',
         '▶ Preview Voice',
-        'Apply Voice to Selected',
-        'Apply Voice to Remaining',
-        'Apply Voice to Whole Chain',
+        'Apply to Selected',
+        'Apply to Remaining',
+        'Apply to Whole Chain',
         'Refresh Voices',
         'Selecting a voice does not change the chain until Apply is clicked.',
         'Ready',
