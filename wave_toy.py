@@ -10694,7 +10694,7 @@ class ArticulationWaveformDiagnosticsCanvas(QWidget):
             painter.drawPath(path_neg)
         else:
             painter.setPen(QPen(QColor("#6c757d"), 1))
-            painter.drawText(plot, Qt.AlignCenter, "Render or Play Word to populate waveform diagnostics.")
+            painter.drawText(plot, Qt.AlignCenter, "Preview Word or Create Word to populate waveform diagnostics.")
         if self.overlays_visible and self.performance_points:
             duration_ms = max(1.0, len(self.audio) * 1000.0 / float(self.sample_rate)) if len(self.audio) else max(1.0, max((float(point.get("time_ms", 0.0) or 0.0) for point in self.performance_points), default=1.0))
             for point in self.performance_points:
@@ -14536,7 +14536,7 @@ class WaveToyWindow(QMainWindow):
         render_primary_hint.setWordWrap(True)
         render_primary_layout.addWidget(render_primary_hint)
         primary_word_row = make_button_row_or_toolbar(
-            make_transport_button("▶ Preview Word", self._play_articulation_word, "Preview the smoothed word render; Create Word remains the primary reliable output"),
+            make_transport_button("▶ Preview Word", self._play_articulation_word, "Preview Word renders through the same reliable buffer path used by Create Word"),
             make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain"),
             make_transport_button("▶ Preview Chain", self._play_articulation_chain, "Preview the raw phoneme sequence for order checking"),
             spacing=8,
@@ -14964,7 +14964,7 @@ class WaveToyWindow(QMainWindow):
         motion_buttons = QHBoxLayout()
         motion_buttons.setSpacing(8)
         for icon, label, color, callback in (
-            ("▶", "Play Word Motion", "#b8f2e6", self._play_articulation_motion),
+            ("▶", "Word Motion Preview", "#b8f2e6", self._play_articulation_motion),
             ("🔁", "Loop Word Motion", "#caffbf", self._loop_articulation_motion),
             ("⏹", "Stop Motion", "#ffadad", self._stop_articulation_motion),
             ("🐢", "Slow Motion Visual Only", "#ffd6a5", self._slow_articulation_motion),
@@ -14975,7 +14975,7 @@ class WaveToyWindow(QMainWindow):
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             motion_buttons.addWidget(button)
         motion_card_layout.addLayout(motion_buttons)
-        self.articulation_motion_status_label = QLabel("Motion idle • add chain phonemes, then use Play Word Motion or Play Word.")
+        self.articulation_motion_status_label = QLabel("Motion idle • add chain phonemes, then use Word Motion Preview or Preview Word.")
         self.articulation_motion_status_label.setObjectName("symbolHint")
         self.articulation_motion_status_label.setWordWrap(True)
         motion_card_layout.addWidget(self.articulation_motion_status_label)
@@ -15364,7 +15364,11 @@ class WaveToyWindow(QMainWindow):
         label = str(entry.get("label") or entry.get("word") or "speech regression")
         symbols = [str(symbol) for symbol in entry.get("chain", [])] if isinstance(entry.get("chain"), list) else self._word_to_regression_chain_symbols(str(entry.get("word") or label))
         self._populate_speech_regression_chain(symbols, label=label)
-        self._show_non_modal_status(f"Loaded speech regression entry: {label}")
+        message = f"Benchmark loaded: {label} • Preview Word and Create Word use the same render settings."
+        status_label = getattr(self, "speech_regression_suite_status_label", None)
+        if status_label is not None:
+            status_label.setText(message)
+        self._show_non_modal_status(message)
 
     def _preview_speech_regression_entry(self, checked: bool = False) -> None:
         self._load_speech_regression_entry_to_chain(checked=False)
@@ -15397,10 +15401,14 @@ class WaveToyWindow(QMainWindow):
         layout.addLayout(row)
         layout.addWidget(make_button_row_or_toolbar(
             make_secondary_action_button("Load Chain", self._load_speech_regression_entry_to_chain, "Load this regression entry into the Chain Editor"),
-            make_transport_button("▶ Audition", self._preview_speech_regression_entry, "Render and play this regression entry using the normal Preview Word path"),
+            make_transport_button("▶ Audition Benchmark", self._preview_speech_regression_entry, "Load this benchmark, then render and play it using the normal Preview Word path"),
             make_primary_action_button("Render Benchmark", self._render_speech_regression_entry, "Render this regression entry through the same Create Word path"),
             spacing=6,
         ))
+        self.speech_regression_suite_status_label = QLabel("Benchmark loaded: none • choose a benchmark, then Load Chain, Audition Benchmark, or Render Benchmark.")
+        self.speech_regression_suite_status_label.setObjectName("symbolHint")
+        self.speech_regression_suite_status_label.setWordWrap(True)
+        layout.addWidget(self.speech_regression_suite_status_label)
         return panel
 
     def _build_selected_phoneme_workbench(self) -> QWidget:
@@ -15487,13 +15495,13 @@ class WaveToyWindow(QMainWindow):
         layout.addWidget(transition_title)
         layout.addWidget(transition_hint)
 
-        preview_title = QLabel("Preview")
+        preview_title = QLabel("Preview Actions")
         preview_title.setObjectName("timelineInspectorText")
         layout.addWidget(preview_title)
         preview_actions = make_button_row_or_toolbar(
             make_transport_button("▶ Preview Voice", self._preview_current_voice, "Preview the active voice before applying it"),
             make_transport_button("▶ Play Selected Phoneme", lambda checked=False: self._play_chain_item(self.articulation_selected_chain_index if isinstance(self.articulation_selected_chain_index, int) else -1), "Preview only the selected phoneme"),
-            make_transport_button("▶ Preview Word", self._play_articulation_word, "Render Word, then play the same rendered buffer used by Create Word"),
+            make_transport_button("▶ Preview Word", self._play_articulation_word, "Preview Word renders, caches, and plays the same buffer used by Create Word"),
             spacing=8,
         )
         layout.addWidget(preview_actions)
@@ -15502,8 +15510,8 @@ class WaveToyWindow(QMainWindow):
         actions_title.setObjectName("timelineInspectorText")
         layout.addWidget(actions_title)
         actions = make_button_row_or_toolbar(
-            make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain without visiting Render"),
-            make_export_import_button("Export Word", self._export_articulation_word, "Export the rendered word without visiting Render"),
+            make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain"),
+            make_export_import_button("Export Word", self._export_articulation_word, "Export the current rendered word"),
             make_secondary_action_button("Send Word to Timeline", self._send_articulation_word_to_timeline, "Send the rendered word to the Timeline"),
             make_transport_button("▶ Preview Chain", self._play_articulation_chain, "Preview the raw chain; Create Word is the primary output"),
             make_secondary_action_button("Duplicate", lambda checked=False: self._duplicate_selected_component(), "Duplicate the selected phoneme"),
@@ -17602,8 +17610,9 @@ class WaveToyWindow(QMainWindow):
         target = getattr(self, "live_preview_target", "selected_timeline_fragment")
         selected_index = self.articulation_selected_chain_index if isinstance(self.articulation_selected_chain_index, int) else None
         if self.playback_start_monotonic is not None:
-            print(f"[WaveToy Live Preview] skip target={target} selected_index={selected_index} reason=playback_busy")
-            return
+            print(f"[WaveToy Live Preview] stop previous target={target} selected_index={selected_index} reason=no_overlap")
+            self._stop_phoneme_preview()
+            self._stop_articulation_motion()
         if not self._can_start_playback(show_status=False):
             print(f"[WaveToy Live Preview] skip target={target} selected_index={selected_index} reason=rate_limited_or_refused")
             return
@@ -18531,7 +18540,7 @@ class WaveToyWindow(QMainWindow):
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         phoneme_sequence = " + ".join(item.phoneme.name for item in self.articulation_chain_items) or "<empty>"
         print(
-            "[WaveToy Play Word] "
+            "[WaveToy Preview Word] "
             f"render_mode={render_mode} "
             f"duration={duration:.3f}s "
             f"peak={peak:.3f} "
@@ -19789,14 +19798,24 @@ class WaveToyWindow(QMainWindow):
 
     def _play_articulation_word(self, checked: bool = False) -> None:
         del checked
+        self._stop_phoneme_preview()
+        self._stop_articulation_motion()
         if not self._can_start_playback():
             return
         cached_reused = self._current_word_audio_is_fresh()
-        audio = self.articulation_word_render_audio if cached_reused else self._render_word_audio_for_current_chain()
-        fresh_render_created = not cached_reused and bool(audio.size)
+        fresh_render_created = False
+        audio = self.articulation_word_render_audio if cached_reused else np.zeros((0, 2), dtype=np.float32)
+        if not cached_reused:
+            try:
+                rendered_audio = self._render_word_audio_for_current_chain()
+            except Exception as exc:
+                self._show_non_modal_status(f"Preview Word render failed: {exc}")
+                return
+            fresh_render_created = bool(rendered_audio.size)
+            audio = self.articulation_word_render_audio if self._current_word_audio_is_fresh() else rendered_audio
         self._log_play_word_render_path(self._articulation_word_render_mode(), audio, cached_reused, fresh_render_created)
         if audio.size == 0:
-            QMessageBox.information(self, "Play Word", "The current articulation chain did not render any audio.")
+            QMessageBox.information(self, "Preview Word", "The current articulation chain did not render any audio.")
             return
         self._start_articulation_motion(loop=False, speed=1.0, audio=audio)
 
