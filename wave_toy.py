@@ -81,6 +81,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QMenu,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QAbstractItemView,
@@ -7633,9 +7634,11 @@ class TimelineCanvas(QWidget):
         elif op == "trim_left":
             right_edge = self.drag_start_time_seconds + self.drag_start_duration_seconds
             new_start = min(max(0.0, target_time), right_edge - minimum)
-            delta_visible = max(0.0, (new_start - self.drag_start_time_seconds) * clip.playback_rate)
-            max_trim = max(0.0, clip.source_duration_seconds - self.drag_start_trim_end_seconds - minimum * clip.playback_rate)
-            clip.trim_start_seconds = min(max_trim, self.drag_start_trim_start_seconds + delta_visible)
+            delta_visible = (new_start - self.drag_start_time_seconds) * max(0.25, float(clip.playback_rate or 1.0))
+            max_trim = max(0.0, clip.source_duration_seconds - self.drag_start_trim_end_seconds - minimum * max(0.25, float(clip.playback_rate or 1.0)))
+            clip.trim_start_seconds = float(np.clip(self.drag_start_trim_start_seconds + delta_visible, 0.0, max_trim))
+            actual_delta = (clip.trim_start_seconds - self.drag_start_trim_start_seconds) / max(0.25, float(clip.playback_rate or 1.0))
+            new_start = self.drag_start_time_seconds + actual_delta
             clip.stretched_audio_cache = None
             clip._stretch_cache_key = None
             clip.preview_waveform_cache = []
@@ -11624,6 +11627,8 @@ class WaveToyWindow(QMainWindow):
         self.timeline_preserve_pitch = True
         self.timeline_stretch_quality = "Balanced"
         self.timeline_stretch_quality_combo: QComboBox | None = None
+        self.word_render_progress_dialog: QProgressDialog | None = None
+        self.word_render_progress_stage = ""
 
         self.phonemes_dir = self.storage.phonemes_dir
         self.current_phoneme = ArticulationPhoneme.from_json_dict(VOWEL_PRESETS["AH"] | {"name": "AH", "voice_pitch": 220.0, "voice_strength": 0.65})
@@ -19795,6 +19800,62 @@ class WaveToyWindow(QMainWindow):
         self._log_word_render_debug(ARTICULATION_WORD_RENDER_CLIP_CROSSFADE, audio)
         return audio
 
+    def _begin_word_render_progress(self, title: str) -> None:
+        """Show user-visible progress for word render/create/export operations."""
+        existing = self.__dict__.get("word_render_progress_dialog")
+        if existing is not None:
+            self._update_word_render_progress(0, "Preparing phoneme chain")
+            return
+        dialog = QProgressDialog("Preparing phoneme chain", "Cancel", 0, 100, self)
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        self.word_render_progress_dialog = dialog
+        self.word_render_progress_stage = "Preparing phoneme chain"
+        dialog.show()
+        instance = getattr(QApplication, "instance", None)
+        app = instance() if callable(instance) else None
+        if app is not None:
+            app.processEvents()
+
+    def _update_word_render_progress(self, percent: int, message: str) -> None:
+        dialog = getattr(self, "word_render_progress_dialog", None)
+        self.word_render_progress_stage = str(message or "")
+        if dialog is None:
+            return
+        try:
+            dialog.setLabelText(self.word_render_progress_stage)
+            dialog.setValue(int(np.clip(int(percent), 0, 100)))
+        finally:
+            instance = getattr(QApplication, "instance", None)
+            app = instance() if callable(instance) else None
+            if app is not None:
+                app.processEvents()
+
+    def _finish_word_render_progress(self, success: bool, message: str = "") -> None:
+        dialog = getattr(self, "word_render_progress_dialog", None)
+        final_message = message or ("Done" if success else "Word render failed")
+        self.word_render_progress_stage = final_message
+        if dialog is not None:
+            try:
+                dialog.setLabelText(final_message)
+                dialog.setValue(100 if success else 0)
+                instance = getattr(QApplication, "instance", None)
+                app = instance() if callable(instance) else None
+                if app is not None:
+                    app.processEvents()
+            finally:
+                if success:
+                    dialog.close()
+                else:
+                    dialog.cancel()
+                self.word_render_progress_dialog = None
+        if not success and hasattr(self, "_show_non_modal_status"):
+            self._show_non_modal_status(final_message)
+
     def _render_articulation_word(self) -> np.ndarray:
         mode = self._articulation_word_render_mode()
         print(f"[WaveToy Word] selected render_mode={mode}")
@@ -19860,16 +19921,28 @@ class WaveToyWindow(QMainWindow):
         if not self.articulation_chain_items:
             QMessageBox.information(self, "Create Word", "Add at least one phoneme to the Articulation Chain first.")
             return np.zeros((0, 2), dtype=np.float32)
+        owns_progress = self.__dict__.get("word_render_progress_dialog") is None
+        if owns_progress:
+            self._begin_word_render_progress("Render Word")
         voice_source_state = self._snapshot_voice_source_ui_state()
         editable_chain_items = self.articulation_chain_items
         render_chain_items = self._render_chain_items_snapshot()
         try:
+            self._update_word_render_progress(10, "Preparing phoneme chain")
             self.articulation_chain_items = render_chain_items
+            self._update_word_render_progress(25, "Resolving voices")
+            self._update_word_render_progress(45, "Rendering continuous mouth motion")
             rendered_audio = self._render_articulation_word()
+            self._update_word_render_progress(70, "Applying transitions")
             self.articulation_last_render_source_snapshot = [self._voice_source_field_snapshot(item.phoneme_for_render()) for item in render_chain_items]
+        except Exception as exc:
+            if owns_progress:
+                self._finish_word_render_progress(False, f"Word render failed: {exc}")
+            raise
         finally:
             self.articulation_chain_items = editable_chain_items
             self._restore_voice_source_ui_state(voice_source_state)
+        self._update_word_render_progress(85, "Building waveform diagnostics")
         self.articulation_word_render_audio = rendered_audio
         self.articulation_word_render_signature = self._current_word_render_signature() if self.articulation_word_render_audio.size else None
         self.articulation_last_word_render_created_at = time.time()
@@ -19878,27 +19951,37 @@ class WaveToyWindow(QMainWindow):
         self._update_articulation_waveform_diagnostics_canvas()
         if self._articulation_inspector_source_key() == "current_rendered_word":
             self._refresh_articulation_inspector()
+        if owns_progress:
+            self._finish_word_render_progress(True, "Done")
         return self.articulation_word_render_audio
 
     def _create_articulation_word(self, checked: bool = False) -> np.ndarray:
         del checked
-        audio = self._render_word_audio_for_current_chain()
-        if audio.size == 0:
+        self._begin_word_render_progress("Create Word")
+        try:
+            audio = self._render_word_audio_for_current_chain()
+            if audio.size == 0:
+                self._finish_word_render_progress(False, "Create Word produced no audio")
+                return audio
+            default_name = self._suggested_chain_asset_name() or "word"
+            name, ok = QInputDialog.getText(self, "Create Word", "Name this Speech Assets word:", text=default_name)
+            if not ok:
+                name = default_name
+            name = name.strip() or default_name
+            self._update_word_render_progress(92, "Saving Speech Asset")
+            word_item = self._create_rendered_speech_bin_item("word", name=name)
+            if word_item is not None:
+                self._save_library_asset("word", word_item.name, word_item.metadata(), description="Created word asset with phoneme sequence, timing, transitions, stress markers, note events, and voice profile references", tags=["speech-bin"])
+                self.timeline_selected_speech_item_id = word_item.id
+                self._timeline_refresh_speech_bin_cards()
+                message = f"Word ready: {word_item.name} • {word_item.duration_seconds:.2f}s • {self._chain_custom_transition_summary()} • saved to Speech Assets."
+                self.articulation_word_status_label.setText(message)
+                self._timeline_debug(message)
+            self._finish_word_render_progress(True, "Done")
             return audio
-        default_name = self._suggested_chain_asset_name() or "word"
-        name, ok = QInputDialog.getText(self, "Create Word", "Name this Speech Assets word:", text=default_name)
-        if not ok:
-            name = default_name
-        name = name.strip() or default_name
-        word_item = self._create_rendered_speech_bin_item("word", name=name)
-        if word_item is not None:
-            self._save_library_asset("word", word_item.name, word_item.metadata(), description="Created word asset with phoneme sequence, timing, transitions, stress markers, note events, and voice profile references", tags=["speech-bin"])
-            self.timeline_selected_speech_item_id = word_item.id
-            self._timeline_refresh_speech_bin_cards()
-            message = f"Word ready: {word_item.name} • {word_item.duration_seconds:.2f}s • {self._chain_custom_transition_summary()} • saved to Speech Assets."
-            self.articulation_word_status_label.setText(message)
-            self._timeline_debug(message)
-        return audio
+        except Exception as exc:
+            self._finish_word_render_progress(False, f"Create Word failed: {exc}")
+            raise
 
     def _play_articulation_word(self, checked: bool = False) -> None:
         del checked
@@ -19949,7 +20032,9 @@ class WaveToyWindow(QMainWindow):
                 path = path.with_suffix(".flac")
             else:
                 path = path.with_suffix(".wav")
+        self._begin_word_render_progress("Export Word")
         try:
+            self._update_word_render_progress(92, "Saving Speech Asset")
             save_audio_file(path, self.articulation_word_render_audio)
             sidecar = path.with_suffix(path.suffix + ".wave-toy-word.json")
             data = ArticulationChain(
@@ -19971,8 +20056,10 @@ class WaveToyWindow(QMainWindow):
             self._save_library_asset("word", path.stem, data, description="Exported word metadata", source_path=str(sidecar))
             self.articulation_last_word_render_path = path
             self._update_articulation_word_status()
+            self._finish_word_render_progress(True, "Done")
             QMessageBox.information(self, "Word Exported", f"Saved created word:\n{path}\n\nSaved word metadata:\n{sidecar}")
         except Exception as exc:
+            self._finish_word_render_progress(False, f"Export Word failed: {exc}")
             QMessageBox.warning(self, "Could not export word", str(exc))
 
     def _play_articulation_chain(self, checked: bool = False) -> None:
@@ -21752,14 +21839,22 @@ class WaveToyWindow(QMainWindow):
         edit_layout.setContentsMargins(0, 0, 0, 0)
         edit_layout.setSpacing(10)
         self.timeline_tool_buttons = {}
+        tooltips = {
+            "select": "Select / Move: click a clip to select it; drag the clip body to change start time and lane without changing source audio.",
+            "trim": "Trim Left / Trim Right: drag a clip edge to change source offset or visible duration while preserving the source audio reference.",
+            "stretch": "Stretch Clip: drag a clip edge to change duration and playback/stretch ratio without modifying the source file.",
+            "split": "Split at Playhead: split the selected clip at the playhead when the playhead is inside the clip.",
+            "delete": "Delete Clip: remove the selected timeline clip without deleting its source audio or Speech Asset.",
+        }
         for tool, icon, label, color, shortcut in (
-            ("select", "➤", "Select/Move", "#b8f2e6", "V"),
-            ("trim", "↔", "Trim Tool", "#caffbf", "T"),
-            ("stretch", "⤢", "Time Stretch", "#ffd166", "S"),
-            ("split", "✂", "Split", "#f1c0e8", "Ctrl+B"),
-            ("delete", "⌫", "Delete", "#ffadad", "Delete"),
+            ("select", "➤", "Select / Move", "#b8f2e6", "V"),
+            ("trim", "↔", "Trim Left / Trim Right", "#caffbf", "T"),
+            ("stretch", "⤢", "Stretch Clip", "#ffd166", "S"),
+            ("split", "✂", "Split at Playhead", "#f1c0e8", "Ctrl+B"),
+            ("delete", "⌫", "Delete Clip", "#ffadad", "Delete"),
         ):
             button = self._make_story_button(icon, f"{label} ({shortcut})", color, (self._timeline_split_selected if tool == "split" else self._timeline_delete_selected if tool == "delete" else lambda checked=False, name=tool: self._timeline_set_tool(name)))
+            button.setToolTip(tooltips[tool])
             button.setCheckable(tool in {"select", "trim", "stretch"})
             button.setChecked(tool == self.timeline_edit_tool)
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
@@ -22734,6 +22829,78 @@ class WaveToyWindow(QMainWindow):
         self._timeline_update_inspector()
         self._timeline_debug(f"Clip selected id={clip.clip_id} start={clip.start_time_seconds:.3f}s lane={clip.lane}")
 
+    def _timeline_invalidate_clip_render_cache(self, clip: TimelineClip) -> None:
+        clip.stretched_audio_cache = None
+        clip._stretch_cache_key = None
+        clip.preview_waveform_cache = []
+        clip._preview_waveform_cache_key = None
+        clip.rendered_duration_seconds = clip.duration_seconds
+
+    def _timeline_finish_clip_edit(self, clip: TimelineClip, message: str) -> None:
+        self._timeline_update_duration()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = clip.clip_id
+            self.timeline_canvas._refresh_size()
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(message)
+
+    def _timeline_move_selected_clip(self, start_time_seconds: float, lane: int | None = None) -> bool:
+        clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if clip is None:
+            return False
+        clip.start_time_seconds = self._timeline_snap_time(start_time_seconds)
+        if lane is not None:
+            clip.lane = int(np.clip(int(lane), 0, max(0, self.timeline_lane_count - 1)))
+        self._timeline_finish_clip_edit(clip, f"Clip moved id={clip.clip_id} start={clip.start_time_seconds:.3f}s lane={clip.lane}")
+        return True
+
+    def _timeline_trim_selected_left(self, new_start_time_seconds: float) -> bool:
+        clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if clip is None:
+            return False
+        minimum = 0.005
+        old_start = clip.start_time_seconds
+        old_end = clip.end_time_seconds
+        new_start = min(max(0.0, self._timeline_snap_time(new_start_time_seconds)), old_end - minimum)
+        rate = max(0.25, float(clip.playback_rate or 1.0))
+        old_trim_start = clip.trim_start_seconds
+        delta_source = (new_start - old_start) * rate
+        max_trim_start = max(0.0, clip.source_duration_seconds - clip.trim_end_seconds - minimum * rate)
+        clip.trim_start_seconds = float(np.clip(old_trim_start + delta_source, 0.0, max_trim_start))
+        actual_delta = (clip.trim_start_seconds - old_trim_start) / rate
+        clip.start_time_seconds = old_start + actual_delta
+        self._timeline_invalidate_clip_render_cache(clip)
+        self._timeline_finish_clip_edit(clip, f"Clip trim-left id={clip.clip_id} start={clip.start_time_seconds:.3f}s source_offset={clip.trim_start_seconds:.3f}s")
+        return True
+
+    def _timeline_trim_selected_right(self, new_end_time_seconds: float) -> bool:
+        clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if clip is None:
+            return False
+        minimum = 0.005
+        new_end = max(clip.start_time_seconds + minimum, self._timeline_snap_time(new_end_time_seconds))
+        wanted_source_visible = max(minimum * clip.playback_rate, (new_end - clip.start_time_seconds) * max(0.25, float(clip.playback_rate or 1.0)))
+        clip.trim_end_seconds = max(0.0, clip.source_duration_seconds - clip.trim_start_seconds - wanted_source_visible)
+        self._timeline_invalidate_clip_render_cache(clip)
+        self._timeline_finish_clip_edit(clip, f"Clip trim-right id={clip.clip_id} duration={clip.duration_seconds:.3f}s")
+        return True
+
+    def _timeline_stretch_selected_clip(self, new_duration_seconds: float) -> bool:
+        clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
+        if clip is None:
+            return False
+        minimum = 0.005
+        duration = self._timeline_snap_time(new_duration_seconds) if self.timeline_snap_enabled else max(minimum, float(new_duration_seconds))
+        duration = max(minimum, duration)
+        visible_source = max(minimum, clip.source_visible_duration_seconds)
+        clip.playback_rate = float(np.clip(visible_source / duration, 0.25, 4.0))
+        clip.stretch_mode = "preserve_pitch" if self.timeline_preserve_pitch else "speed_change"
+        self._timeline_invalidate_clip_render_cache(clip)
+        self._timeline_finish_clip_edit(clip, f"Clip stretched id={clip.clip_id} duration={clip.duration_seconds:.3f}s ratio={clip.stretch_ratio:.3f}x")
+        return True
+
     def _timeline_clear_selection(self, move_playhead_to: float | None = None) -> None:
         self.timeline_selected_clip_id = None
         if move_playhead_to is not None:
@@ -22763,8 +22930,10 @@ class WaveToyWindow(QMainWindow):
             f"\nTrimmed duration: {trimmed_duration:.3f}s"
             f"\nStretched duration: {clip.duration_seconds:.3f}s"
             f"\nRendered duration: {rendered_duration:.3f}s"
+            f"\nSource offset: {clip.trim_start_seconds:.3f}s"
             f"\nTrim start: {clip.trim_start_seconds:.3f}s"
             f"\nTrim end: {clip.trim_end_seconds:.3f}s"
+            f"\nPlayback/stretch ratio: {clip.stretch_ratio:.2f}x duration / {clip.playback_rate:.2f}x playback rate"
             f"\nStretch ratio: {clip.stretch_ratio:.2f}x duration"
             f"\nGain: {clip.gain:.2f}x"
             f"\nFade in/out: {clip.fade_in_seconds:.3f}s / {clip.fade_out_seconds:.3f}s"
