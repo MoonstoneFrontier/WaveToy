@@ -340,6 +340,7 @@ WAVETOY_ASSET_CATEGORIES: Dict[str, str] = {
     "phoneme": "Phonemes",
     "cv_combination": "CVCombinations",
     "vc_combination": "VCCombinations",
+    "syllable": "Syllables",
     "word": "Words",
     "phrase": "Phrases",
     "voice_source": "VoiceSources",
@@ -1223,6 +1224,10 @@ class WaveToyStorage:
         self.recovery_dir = self.root / "Recovery"
         self.legacy_imports_dir = self.root / "LegacyImports"
         self.audio_dir = self.root / "Audio"
+        self.rendered_dir = self.root / "Rendered"
+        self.rendered_syllables_dir = self.rendered_dir / "Syllables"
+        self.rendered_words_dir = self.rendered_dir / "Words"
+        self.rendered_phrases_dir = self.rendered_dir / "Phrases"
         self.voices_dir = self.root / "Voices"
         self.chains_dir = self.root / "Chains"
         self.words_dir = self.root / "Words"
@@ -1242,6 +1247,9 @@ class WaveToyStorage:
             self.recovery_dir,
             self.legacy_imports_dir,
             self.audio_dir,
+            self.rendered_syllables_dir,
+            self.rendered_words_dir,
+            self.rendered_phrases_dir,
             self.voices_dir,
             self.chains_dir,
             self.words_dir,
@@ -2334,6 +2342,7 @@ class SpeechBinItem:
             "phoneme": "🔤",
             "syllable": "🔡",
             "word": "🧩",
+            "phrase": "💬",
             "chain": "🧬",
         }.get(self.item_type, "🗣")
 
@@ -2343,6 +2352,7 @@ class SpeechBinItem:
             "phoneme": "articulation_phoneme",
             "syllable": "articulation_syllable_render",
             "word": "articulation_word_render",
+            "phrase": "articulation_phrase_render",
             "chain": "articulation_chain_raw",
         }.get(self.item_type, "articulation_word_render")
 
@@ -7291,14 +7301,15 @@ class SpeechBinCard(QWidget):
         actions = (
             ("▶", "Preview", self.owner._timeline_preview_speech_item),
             ("✏", "Rename", self.owner._timeline_rename_speech_item),
+            ("💾", "Export", self.owner._timeline_export_speech_item),
             ("⧉", "Duplicate", self.owner._timeline_duplicate_speech_item),
             ("Del", "Delete", self.owner._timeline_delete_speech_item),
-            ("+", "Add to Timeline", self.owner._timeline_add_speech_item_to_playhead),
+            ("+", "Send to Timeline", self.owner._timeline_add_speech_item_to_playhead),
         )
         for icon, tip, callback in actions:
-            button = QPushButton(icon if tip != "Add to Timeline" else "+ Timeline")
+            button = QPushButton(icon if tip != "Send to Timeline" else "Send")
             button.setToolTip(tip)
-            button.setMinimumSize(QSize(42 if tip != "Add to Timeline" else 86, WaveToySizing.MIN_TOUCH_TARGET))
+            button.setMinimumSize(QSize(42 if tip != "Send to Timeline" else 86, WaveToySizing.MIN_TOUCH_TARGET))
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(lambda checked=False, item_id=self.item.id, cb=callback: cb(item_id))
             layout.addWidget(button, 0, Qt.AlignRight | Qt.AlignBottom)
@@ -7321,7 +7332,7 @@ class SpeechBinCard(QWidget):
         painter.drawText(QRectF(text_left, rect.top() + 12, rect.width() - 330, 24), Qt.AlignLeft | Qt.AlignVCenter, self.item.name)
         painter.setFont(QFont("Arial", 11, QFont.Bold))
         painter.setPen(QColor("#2563eb"))
-        asset_type = "Phrase" if self.item.item_type == "chain" else self.item.item_type.title()
+        asset_type = "Phrase" if self.item.item_type in {"chain", "phrase"} else self.item.item_type.title()
         painter.drawText(QRectF(text_left, rect.top() + 34, rect.width() - 330, 18), Qt.AlignLeft | Qt.AlignVCenter, f"{asset_type} • {self.item.duration_seconds:.2f}s • {self.item.source_mode}")
         painter.setPen(QColor("#607d8b"))
         sequence = self.item.display_sequence or self.item.ipa_sequence
@@ -7360,14 +7371,17 @@ class SpeechBinCard(QWidget):
         menu = QMenu(self)
         preview_action = menu.addAction("▶ Preview")
         rename_action = menu.addAction("✏ Rename")
+        export_action = menu.addAction("💾 Export WAV")
         duplicate_action = menu.addAction("⧉ Duplicate")
-        add_action = menu.addAction("➕ Add to Timeline at Playhead")
+        add_action = menu.addAction("➕ Send to Timeline at Playhead")
         delete_action = menu.addAction("🗑 Delete from Speech Assets")
         action = menu.exec(self.mapToGlobal(pos))
         if action == preview_action:
             self.owner._timeline_preview_speech_item(self.item.id)
         elif action == rename_action:
             self.owner._timeline_rename_speech_item(self.item.id)
+        elif action == export_action:
+            self.owner._timeline_export_speech_item(self.item.id)
         elif action == duplicate_action:
             self.owner._timeline_duplicate_speech_item(self.item.id)
         elif action == add_action:
@@ -14548,7 +14562,9 @@ class WaveToyWindow(QMainWindow):
         render_primary_layout.addWidget(render_primary_hint)
         primary_word_row = make_button_row_or_toolbar(
             make_transport_button("▶ Preview Word", self._play_articulation_word, "Preview Word renders through the same reliable buffer path used by Create Word"),
-            make_primary_action_button("Create Word", self._create_articulation_word, "Create a named Speech Asset from the current chain"),
+            make_primary_action_button("Create Word", self._create_articulation_word, "Create a named rendered word asset from the current chain"),
+            make_secondary_action_button("Create Syllable", self._create_articulation_syllable, "Create a first-class rendered syllable asset from the current chain"),
+            make_secondary_action_button("Create Phrase", self._create_articulation_phrase, "Create a rendered phrase asset from the current chain for Timeline arrangement"),
             make_transport_button("▶ Preview Chain", self._play_articulation_chain, "Preview the raw phoneme sequence for order checking"),
             spacing=8,
         )
@@ -14565,6 +14581,9 @@ class WaveToyWindow(QMainWindow):
         render_primary_layout.addWidget(export_row)
         render_primary_layout.addWidget(self.articulation_word_status_label)
         render_layout.addWidget(render_primary_card)
+        rendered_assets_panel = self._build_speech_assets_panel("render")
+        rendered_assets_panel.setMaximumWidth(16777215)
+        render_layout.addWidget(CollapsibleSection("Rendered Assets", rendered_assets_panel, expanded=True), 1)
         inspector_layout.addWidget(self._build_articulation_inspector_panel())
 
         render_settings_card = self._toy_group("Render Mode Settings")
@@ -20915,9 +20934,11 @@ class WaveToyWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        title = QLabel("Speech Assets")
+        panel_title = "Rendered Assets" if context == "render" else "Speech Assets"
+        title = QLabel(panel_title)
         title.setObjectName("timelineInspectorTitle")
-        subtitle = QLabel("Created phonemes, syllables, words, and phrases. Create Word saves here; select an asset to preview or add it to the Timeline.")
+        subtitle_text = "Rendered syllables, words, and phrases. Preview, export, rename, delete, or send assets to the Timeline; combine syllables there for editable words and phrases." if context == "render" else "Created phonemes, syllables, words, and phrases. Create Word saves here; select an asset to preview or add it to the Timeline."
+        subtitle = QLabel(subtitle_text)
         subtitle.setObjectName("timelineInspectorText")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
@@ -20925,13 +20946,21 @@ class WaveToyWindow(QMainWindow):
 
         filters = QTabWidget()
         filters.setObjectName("speechAssetFilterTabs")
-        for label, item_filter in (
+        filter_specs = (
             ("All", "all"),
             ("Phonemes", "phoneme"),
             ("Syllables", "syllable"),
             ("Words", "word"),
             ("Phrases", "phrase"),
-        ):
+        )
+        if context == "render":
+            filter_specs = (
+                ("All", "rendered"),
+                ("Syllables", "syllable"),
+                ("Words", "word"),
+                ("Phrases", "phrase"),
+            )
+        for label, item_filter in filter_specs:
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(4, 6, 4, 4)
@@ -22001,6 +22030,35 @@ class WaveToyWindow(QMainWindow):
             self._timeline_debug(f"Speech cache write failed prefix={prefix} error={exc}")
             return None
 
+    def _rendered_speech_asset_dir(self, item_type: str) -> Path | None:
+        return {
+            "syllable": self.storage.rendered_syllables_dir,
+            "word": self.storage.rendered_words_dir,
+            "phrase": self.storage.rendered_phrases_dir,
+        }.get(item_type)
+
+    def _save_rendered_speech_asset_files(self, item: SpeechBinItem) -> None:
+        """Persist rendered syllable/word/phrase audio plus sidecar metadata under project data."""
+        target_dir = self._rendered_speech_asset_dir(item.item_type)
+        if target_dir is None or item.audio_data.size == 0:
+            return
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            stem = filesystem_safe_name(f"{item.name}_{item.id}", fallback=f"{item.item_type}_{item.id}")
+            wav_path = target_dir / f"{stem}.wav"
+            save_wav(wav_path, item.audio_data, SAMPLE_RATE)
+            item.audio_cache_path = str(wav_path)
+            sidecar = wav_path.with_suffix(".rendered-speech.json")
+            self.storage.write_json(sidecar, {
+                "asset_type": item.item_type,
+                "name": item.name,
+                "sample_rate": SAMPLE_RATE,
+                "rendered_audio_path": str(wav_path),
+                "metadata": item.metadata(),
+            })
+        except Exception as exc:
+            self._timeline_debug(f"Rendered speech asset save failed id={item.id} type={item.item_type} error={exc}")
+
     def _add_speech_bin_item(
         self,
         name: str,
@@ -22036,6 +22094,7 @@ class WaveToyWindow(QMainWindow):
             created_at=time.time(),
             audio_data=np.array(audio, dtype=np.float32, copy=True),
         )
+        self._save_rendered_speech_asset_files(item)
         self.timeline_speech_bin.append(item)
         self.timeline_selected_speech_item_id = item.id
         self._timeline_refresh_speech_bin_cards()
@@ -22085,8 +22144,8 @@ class WaveToyWindow(QMainWindow):
                 return None
         display = self._speech_display_sequence_for_chain()
         if not name:
-            default = display.replace(" + ", "").lower() if item_type == "word" else display.replace(" + ", "")
-            name = default or item_type.title()
+            suggested = self._suggested_chain_asset_name() or display.replace(" + ", "_")
+            name = f"{item_type}_{suggested}" if suggested else item_type.title()
         metadata = self._speech_chain_metadata_snapshot()
         metadata["render_signature"] = self.articulation_word_render_signature or self._current_word_render_signature()
         metadata["render_mode"] = self._articulation_word_render_mode()
@@ -22122,7 +22181,7 @@ class WaveToyWindow(QMainWindow):
         audio = self._current_gapless_word_audio()
         if audio.size == 0:
             return None
-        default_name = self._speech_display_sequence_for_chain().replace(" + ", "").lower() or "word"
+        default_name = self._suggested_chain_asset_name() or "word"
         return self._create_rendered_speech_bin_item("word", name=default_name)
 
     def _send_current_phoneme_to_timeline(self, checked: bool = False) -> None:
@@ -22145,7 +22204,23 @@ class WaveToyWindow(QMainWindow):
                 return audio
         item = self._create_rendered_speech_bin_item("syllable")
         if item is not None:
+            self._save_library_asset("syllable", item.name, item.metadata(), description="Rendered syllable asset with phoneme chain, timing, render settings, and voice profile references", tags=["speech-bin", "rendered"])
             QMessageBox.information(self, "Create Syllable", f"Syllable saved to Speech Assets: {item.name} ({item.duration_seconds:.2f}s).")
+        return self.articulation_word_render_audio
+
+    def _create_articulation_phrase(self, checked: bool = False) -> np.ndarray:
+        del checked
+        if not self.articulation_chain_items:
+            QMessageBox.information(self, "Create Phrase", "Add at least one phoneme to the Articulation Chain first.")
+            return np.zeros((0, 2), dtype=np.float32)
+        if self.articulation_word_render_audio.size == 0:
+            audio = self._render_word_audio_for_current_chain()
+            if audio.size == 0:
+                return audio
+        item = self._create_rendered_speech_bin_item("phrase")
+        if item is not None:
+            self._save_library_asset("phrase", item.name, item.metadata(), description="Rendered phrase asset with phoneme chain, timing, render settings, and voice profile references", tags=["speech-bin", "rendered"])
+            QMessageBox.information(self, "Create Phrase", f"Phrase saved to Speech Assets: {item.name} ({item.duration_seconds:.2f}s).")
         return self.articulation_word_render_audio
 
     def _send_articulation_word_to_timeline(self, checked: bool = False) -> None:
@@ -22302,7 +22377,14 @@ class WaveToyWindow(QMainWindow):
                     widget = item.widget()
                     if widget is not None:
                         widget.deleteLater()
-            visible_items = [item for item in self.timeline_speech_bin if item_filter == "all" or item.item_type == item_filter or (item_filter == "phrase" and item.item_type == "chain")]
+            visible_items = [
+                item
+                for item in self.timeline_speech_bin
+                if item_filter == "all"
+                or (item_filter == "rendered" and item.item_type in {"syllable", "word", "phrase"})
+                or item.item_type == item_filter
+                or (item_filter == "phrase" and item.item_type == "chain")
+            ]
             if not visible_items:
                 label = "Create a word, syllable, phrase, or phoneme in Articulation Lab to populate Speech Assets."
                 if item_filter != "all":
@@ -22349,6 +22431,50 @@ class WaveToyWindow(QMainWindow):
         self._timeline_refresh_speech_bin_cards()
         self._play_audio_array(audio)
         self._timeline_debug(f"Speech preview id={item.id} type={item.item_type} name={item.name} warning={warning}")
+
+    def _timeline_export_speech_item(self, item_id: int | None = None) -> None:
+        item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
+        if item is None:
+            QMessageBox.information(self, "Speech Assets", "Select a speech card to export.")
+            return
+        audio, warning = self._speech_audio_for_item(item)
+        if audio.size == 0:
+            QMessageBox.warning(self, "Export Speech Asset", warning or "That speech card could not render audio for export.")
+            return
+        default_dir = self._rendered_speech_asset_dir(item.item_type) or self.storage.exports_dir
+        default_path = default_dir / f"{filesystem_safe_name(item.name, fallback=item.item_type)}.wav"
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Speech Asset",
+            str(default_path),
+            "WAV Audio (*.wav);;Ogg Vorbis (*.ogg);;MP3 Audio (*.mp3);;FLAC Audio (*.flac)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.suffix:
+            if "Ogg" in selected_filter:
+                path = path.with_suffix(".ogg")
+            elif "MP3" in selected_filter:
+                path = path.with_suffix(".mp3")
+            elif "FLAC" in selected_filter:
+                path = path.with_suffix(".flac")
+            else:
+                path = path.with_suffix(".wav")
+        try:
+            save_audio_file(path, audio)
+            sidecar = path.with_suffix(path.suffix + ".rendered-speech.json")
+            self.storage.write_json(sidecar, {
+                "name": item.name,
+                "asset_type": item.item_type,
+                "sample_rate": SAMPLE_RATE,
+                "exported_audio_path": str(path),
+                "metadata": item.metadata(),
+            })
+            QMessageBox.information(self, "Export Speech Asset", f"Exported {item.item_type} asset to:\n{path}")
+            self._timeline_debug(f"Speech asset exported id={item.id} type={item.item_type} path={path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Speech Asset", f"Could not export speech asset:\n{exc}")
 
     def _timeline_rename_speech_item(self, item_id: int | None = None) -> None:
         item = self._timeline_speech_item_by_id(item_id if item_id is not None else self.timeline_selected_speech_item_id)
