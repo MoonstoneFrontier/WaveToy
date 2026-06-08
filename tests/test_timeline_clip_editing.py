@@ -217,10 +217,11 @@ class _Rect:
 
 
 class _MouseEvent:
-    def __init__(self, x, y, *, button=None, buttons=None):
+    def __init__(self, x, y, *, button=None, buttons=None, modifiers=0):
         self._pos = _Point(x, y)
         self._button = wave_toy.Qt.LeftButton if button is None else button
         self._buttons = wave_toy.Qt.LeftButton if buttons is None else buttons
+        self._modifiers = modifiers
         self.accepted = False
 
     def button(self):
@@ -234,6 +235,9 @@ class _MouseEvent:
 
     def position(self):
         return self._pos
+
+    def modifiers(self):
+        return self._modifiers
 
     def accept(self):
         self.accepted = True
@@ -348,3 +352,100 @@ def test_split_at_playhead_toolbar_action_uses_selected_clip(monkeypatch, qapp):
     assert len(win.timeline_clips) == 2
     assert win.timeline_selected_clip_id == 2
     assert win.timeline_clips[0].source_path == win.timeline_clips[1].source_path
+
+
+def _group_for_canvas(win, clip_ids=(1,), name="communication", group_type="word"):
+    clips = [clip for clip in win.timeline_clips if clip.clip_id in set(clip_ids)]
+    group = wave_toy.TimelineGroup(
+        group_id="group-1",
+        name=name,
+        group_type=group_type,
+        clip_ids=list(clip_ids),
+        start_time_seconds=min([clip.start_time_seconds for clip in clips] or [0.0]),
+        end_time_seconds=max([clip.end_time_seconds for clip in clips] or [0.0]),
+        created_at=123.0,
+    )
+    win.timeline_groups = [group]
+    win.timeline_selected_clip_ids = []
+    win.timeline_selected_group_id = None
+    return group
+
+
+
+
+def _patch_canvas_clip_at_for_test(canvas):
+    def clip_at(self, pos):
+        point_x = pos.x() if hasattr(pos, "x") else 0.0
+        point_y = pos.y() if hasattr(pos, "y") else 0.0
+        for clip in reversed(self.owner.timeline_clips):
+            rect = self._clip_hit_rect(clip)
+            if rect.left() <= point_x <= rect.right() and rect.top() <= point_y <= rect.bottom():
+                return clip
+        return None
+    canvas._clip_at = MethodType(clip_at, canvas)
+
+def test_group_label_visible(qapp):
+    win, canvas, clip = _canvas_for_clip(qapp)
+    group = _group_for_canvas(win, [clip.clip_id], name="communication", group_type="word")
+
+    text = canvas._group_label_text(group)
+    rect = _Rect(canvas._time_to_x(group.start_time_seconds) + 8, canvas._lane_top(clip.lane) + 6, 220, 24)
+    canvas._group_label_rect = MethodType(lambda self, candidate: rect, canvas)
+
+    assert text == "[WORD] communication (1 clips)"
+    assert canvas._group_label_rect(group).width() > 0
+
+
+def test_group_selection_from_canvas(qapp):
+    win, canvas, clip = _canvas_for_clip(qapp)
+    group = _group_for_canvas(win, [clip.clip_id], name="communication", group_type="word")
+    rect = _Rect(canvas._time_to_x(group.start_time_seconds) + 8, canvas._lane_top(clip.lane) + 6, 220, 24)
+    canvas._group_label_rect = MethodType(lambda self, candidate: rect, canvas)
+
+    canvas.mousePressEvent(_MouseEvent(rect.center().x(), rect.center().y()))
+
+    assert win.timeline_selected_group_id == group.group_id
+    assert win.timeline_selected_clip_ids == [clip.clip_id]
+    assert "Group type: word" in win.inspector_text
+
+
+def test_ctrl_click_multiselect(qapp):
+    if wave_toy.Qt.ControlModifier == 0:
+        wave_toy.Qt.ControlModifier = 2
+    win, canvas, first = _canvas_for_clip(qapp)
+    second = _clip(2)
+    second.start_time_seconds = first.start_time_seconds + 1.25
+    win.timeline_clips.append(second)
+    win.timeline_next_clip_id = 3
+    _patch_canvas_clip_at_for_test(canvas)
+
+    first_rect = canvas._clip_hit_rect(first)
+    second_rect = canvas._clip_hit_rect(second)
+    canvas.mousePressEvent(_MouseEvent(first_rect.center().x(), first_rect.center().y()))
+    canvas.mouseReleaseEvent(_MouseEvent(first_rect.center().x(), first_rect.center().y()))
+    canvas.mousePressEvent(_MouseEvent(second_rect.center().x(), second_rect.center().y(), modifiers=wave_toy.Qt.ControlModifier))
+
+    assert win.timeline_selected_clip_ids == [first.clip_id, second.clip_id]
+    assert "2 clips selected" in win.inspector_text
+
+
+def test_shift_click_range_select(qapp):
+    if wave_toy.Qt.ShiftModifier == 0:
+        wave_toy.Qt.ShiftModifier = 4
+    win, canvas, first = _canvas_for_clip(qapp)
+    second = _clip(2)
+    second.start_time_seconds = first.start_time_seconds + 1.25
+    third = _clip(3)
+    third.start_time_seconds = first.start_time_seconds + 2.5
+    win.timeline_clips.extend([second, third])
+    win.timeline_next_clip_id = 4
+    _patch_canvas_clip_at_for_test(canvas)
+
+    first_rect = canvas._clip_hit_rect(first)
+    third_rect = canvas._clip_hit_rect(third)
+    canvas.mousePressEvent(_MouseEvent(first_rect.center().x(), first_rect.center().y()))
+    canvas.mouseReleaseEvent(_MouseEvent(first_rect.center().x(), first_rect.center().y()))
+    canvas.mousePressEvent(_MouseEvent(third_rect.center().x(), third_rect.center().y(), modifiers=wave_toy.Qt.ShiftModifier))
+
+    assert win.timeline_selected_clip_ids == [first.clip_id, second.clip_id, third.clip_id]
+    assert "3 clips selected" in win.inspector_text

@@ -2374,6 +2374,68 @@ class SpeechBinItem:
 
 
 @dataclass
+class TimelineGroup:
+    """Lightweight non-destructive word/phrase grouping for Timeline clips."""
+
+    group_id: str
+    name: str
+    group_type: str
+    clip_ids: List[int]
+    start_time_seconds: float
+    end_time_seconds: float
+    created_at: float
+    notes: str = ""
+
+    @property
+    def duration_seconds(self) -> float:
+        return max(0.0, self.end_time_seconds - self.start_time_seconds)
+
+    def metadata(self) -> Dict[str, object]:
+        return {
+            "group_id": self.group_id,
+            "name": self.name,
+            "group_type": self.group_type,
+            "clip_ids": list(self.clip_ids),
+            "start_time_seconds": self.start_time_seconds,
+            "end_time_seconds": self.end_time_seconds,
+            "duration_seconds": self.duration_seconds,
+            "created_at": self.created_at,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_metadata(cls, data: object) -> "TimelineGroup | None":
+        if not isinstance(data, dict):
+            return None
+        group_type = str(data.get("group_type") or "").lower()
+        if group_type not in {"word", "phrase"}:
+            return None
+        raw_clip_ids = data.get("clip_ids", [])
+        if not isinstance(raw_clip_ids, list):
+            return None
+        clip_ids: List[int] = []
+        for clip_id in raw_clip_ids:
+            try:
+                clip_ids.append(int(clip_id))
+            except (TypeError, ValueError):
+                continue
+        if not clip_ids:
+            return None
+        start = float(data.get("start_time_seconds", 0.0) or 0.0)
+        end = float(data.get("end_time_seconds", start) or start)
+        return cls(
+            group_id=str(data.get("group_id") or uuid.uuid4().hex),
+            name=str(data.get("name") or f"{group_type.title()} Group"),
+            group_type=group_type,
+            clip_ids=clip_ids,
+            start_time_seconds=start,
+            end_time_seconds=max(start, end),
+            created_at=float(data.get("created_at", time.time()) or time.time()),
+            notes=str(data.get("notes") or ""),
+        )
+
+
+@dataclass
 class TimelineClip:
     """Audio clip placed on the Timeline."""
 
@@ -2389,6 +2451,8 @@ class TimelineClip:
     source_type: str = "generated_wavetoy_sound"
     speech_metadata: Dict[str, object] | None = None
     muted_warning: str | None = None
+    voice_name: str | None = None
+    voice_variation: str | None = None
     source_audio_full_length_samples: int = 0
     trim_start_seconds: float = 0.0
     trim_end_seconds: float = 0.0
@@ -2418,11 +2482,32 @@ class TimelineClip:
         self.fade_out_seconds = float(np.clip(float(self.fade_out_seconds or 0.0), 0.0, self.duration_seconds))
         self.stretch_mode = str(self.stretch_mode or "preserve_pitch")
         self.stretch_algorithm = str(self.stretch_algorithm or "numpy_phase_vocoder")
+        if not self.voice_name or not self.voice_variation:
+            voice_metadata = self._voice_metadata_from_speech_metadata()
+            self.voice_name = self.voice_name or voice_metadata.get("voice_name")
+            self.voice_variation = self.voice_variation or voice_metadata.get("voice_variation")
         self.rendered_duration_seconds = self.duration_seconds
         if not self.expression_metadata or not self.svg_visual_metadata:
             svg_metadata = svg_metadata_for_clip(self.clip_id, self.name, self.duration_seconds)
             self.expression_metadata = dict(self.expression_metadata or svg_metadata["expression"])
             self.svg_visual_metadata = dict(self.svg_visual_metadata or svg_metadata["visual_object"])
+
+    def _voice_metadata_from_speech_metadata(self) -> Dict[str, str]:
+        metadata = self.speech_metadata if isinstance(self.speech_metadata, dict) else {}
+        articulation = metadata.get("articulation_metadata") if isinstance(metadata.get("articulation_metadata"), dict) else metadata
+        candidates = [metadata, articulation]
+        for key in ("render_source_snapshot", "voice_source_snapshot", "source_snapshot"):
+            value = articulation.get(key) if isinstance(articulation, dict) else None
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                candidates.append(value[0])
+        voice_name = ""
+        voice_variation = ""
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            voice_name = voice_name or str(candidate.get("voice_name") or candidate.get("voice") or candidate.get("profile_name") or candidate.get("character_voice") or "")
+            voice_variation = voice_variation or str(candidate.get("voice_variation") or candidate.get("variation") or candidate.get("source_mode") or "")
+        return {"voice_name": voice_name, "voice_variation": voice_variation}
 
     @property
     def source_duration_seconds(self) -> float:
@@ -2496,6 +2581,8 @@ class TimelineClip:
             "rendered_duration_seconds": self.rendered_duration_seconds,
             "sample_rate": self.sample_rate,
             "source_type": self.source_type,
+            "voice_name": self.voice_name or "",
+            "voice_variation": self.voice_variation or "",
             "recipe": self.recipe or {},
             "expression_metadata": self.expression_metadata or {},
             "svg_visual_metadata": self.svg_visual_metadata or {},
@@ -7508,6 +7595,62 @@ class TimelineCanvas(QWidget):
             return "right"
         return None
 
+
+    def _group_clips(self, group: TimelineGroup) -> List[TimelineClip]:
+        clip_ids = set(group.clip_ids)
+        return [clip for clip in getattr(self.owner, "timeline_clips", []) if clip.clip_id in clip_ids]
+
+    def _group_band_rect(self, group: TimelineGroup) -> QRectF:
+        clips = self._group_clips(group)
+        if clips:
+            start_time = min(clip.start_time_seconds for clip in clips)
+            end_time = max(clip.end_time_seconds for clip in clips)
+            lanes = [clip.lane for clip in clips]
+            top = min(self._lane_top(lane) for lane in lanes) + 2
+            bottom = max(self._lane_top(lane) + self.lane_height - 10 for lane in lanes)
+        else:
+            start_time = group.start_time_seconds
+            end_time = group.end_time_seconds
+            top = self.top_pad + 2
+            bottom = top + self.lane_height - 12
+        left = self._time_to_x(start_time)
+        right = self._time_to_x(max(start_time + 0.001, end_time))
+        return QRectF(left, top, max(18.0, right - left), max(26.0, bottom - top))
+
+    def _group_label_text(self, group: TimelineGroup) -> str:
+        noun = "words" if group.group_type == "phrase" else "clips"
+        return f"[{group.group_type.upper()}] {group.name} ({len(group.clip_ids)} {noun})"
+
+    def _group_label_rect(self, group: TimelineGroup) -> QRectF:
+        band = self._group_band_rect(group)
+        width = min(max(180.0, len(self._group_label_text(group)) * 7.5), max(180.0, band.width()))
+        return QRectF(band.left() + 8, band.top() + 4, width, 24.0)
+
+    def _group_at(self, pos: QPoint) -> TimelineGroup | None:
+        point = QPointF(pos)
+        groups = self.owner._timeline_group_list() if hasattr(self.owner, "_timeline_group_list") else self.owner.__dict__.get("timeline_groups", [])
+        for group in reversed(groups if isinstance(groups, list) else []):
+            if self._group_label_rect(group).contains(point):
+                return group
+        return None
+
+
+    def _modifier_active(self, modifiers: object, target: object) -> bool:
+        if not target:
+            return False
+        try:
+            return bool(modifiers & target)
+        except Exception:
+            pass
+        for value in (modifiers, getattr(modifiers, "value", None)):
+            for target_value in (target, getattr(target, "value", None)):
+                try:
+                    if value is not None and target_value is not None and int(value) & int(target_value):
+                        return True
+                except Exception:
+                    continue
+        return modifiers == target
+
     def _interaction_debug(self, event_name: str, clip: TimelineClip | None = None, operation: str | None = None) -> None:
         parts = [f"event={event_name}", f"interaction_state={self.interaction_state}"]
         if clip is not None:
@@ -7731,9 +7874,32 @@ class TimelineCanvas(QWidget):
         painter.setPen(QPen(QColor("#ff2f91"), 5, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(QPointF(playhead_x, 0), QPointF(playhead_x, self.height()))
 
+
+        groups = self.owner._timeline_group_list() if hasattr(self.owner, "_timeline_group_list") else self.owner.__dict__.get("timeline_groups", [])
+        for group in groups if isinstance(groups, list) else []:
+            clips = self._group_clips(group)
+            if not clips:
+                continue
+            band_rect = self._group_band_rect(group)
+            selected_group = group.group_id == getattr(self.owner, "timeline_selected_group_id", None)
+            tint = QColor(88, 166, 255, 46) if group.group_type == "word" else QColor(152, 109, 255, 50)
+            border = QColor("#2f80ed") if group.group_type == "word" else QColor("#7b2cbf")
+            painter.setPen(QPen(border, 4 if selected_group else 2, Qt.SolidLine if selected_group else Qt.DashLine))
+            painter.setBrush(tint)
+            painter.drawRoundedRect(band_rect, 12, 12)
+            label_rect = self._group_label_rect(group)
+            painter.setBrush(QColor("#e7f1ff") if group.group_type == "word" else QColor("#f0e7ff"))
+            painter.setPen(QPen(border, 2))
+            painter.drawRoundedRect(label_rect, 8, 8)
+            painter.setFont(QFont("Arial", 10, QFont.Bold))
+            painter.setPen(QColor("#1d3557"))
+            painter.drawText(label_rect.adjusted(8, 0, -8, 0), Qt.AlignLeft | Qt.AlignVCenter, self._group_label_text(group))
+
         for clip in getattr(self.owner, "timeline_clips", []):
             rect = self._clip_rect(clip)
-            selected = clip.clip_id == self.selected_clip_id
+            raw_selected_ids = self.owner.__dict__.get("timeline_selected_clip_ids", [])
+            selected_ids = set(raw_selected_ids if isinstance(raw_selected_ids, list) else [])
+            selected = clip.clip_id == self.selected_clip_id or clip.clip_id in selected_ids
             is_speech = str(getattr(clip, "source_type", "")).startswith("articulation_")
             speech_type = str((clip.speech_metadata or {}).get("item_type", "speech")) if is_speech else ""
             icon = {"phoneme": "🔤", "syllable": "🔡", "word": "🧩", "chain": "🧬"}.get(speech_type, "🌊")
@@ -7839,9 +8005,41 @@ class TimelineCanvas(QWidget):
         self.setFocus(Qt.MouseFocusReason)
         if self.interaction_state != "idle":
             self._cancel_or_end_drag(commit=False)
+        group = self._group_at(event.pos())
+        if group is not None:
+            self._clear_timeline_interaction_state()
+            self.owner._timeline_select_group(group.group_id)
+            self.selected_clip_id = self.owner.timeline_selected_clip_id
+            self._set_interaction_status("Group selected")
+            self.update()
+            event.accept()
+            return
         clip = self._clip_at(event.pos())
         if clip is not None:
+            modifiers = getattr(event, "_modifiers", None)
+            if modifiers is None:
+                modifiers = event.modifiers() if hasattr(event, "modifiers") else (QApplication.keyboardModifiers() if hasattr(QApplication, "keyboardModifiers") else 0)
             tool = getattr(self.owner, "timeline_edit_tool", "select")
+            try:
+                numeric_modifiers = int(modifiers)
+            except Exception:
+                numeric_modifiers = int(getattr(modifiers, "value", 0) or 0) if getattr(modifiers, "value", None) is not None else 0
+            if tool == "select" and (self._modifier_active(modifiers, Qt.ControlModifier) or bool(numeric_modifiers & 2)):
+                self.owner._timeline_toggle_clip_selection(clip.clip_id)
+                self.selected_clip_id = self.owner.timeline_selected_clip_id
+                self._clear_timeline_interaction_state()
+                self._set_interaction_status("Clip selection toggled")
+                self.update()
+                event.accept()
+                return
+            if tool == "select" and (self._modifier_active(modifiers, Qt.ShiftModifier) or bool(numeric_modifiers & 4)):
+                self.owner._timeline_select_clip_range(clip.clip_id)
+                self.selected_clip_id = self.owner.timeline_selected_clip_id
+                self._clear_timeline_interaction_state()
+                self._set_interaction_status("Clip range selected")
+                self.update()
+                event.accept()
+                return
             edge = self._edge_at(clip, event.pos())
             operation = "move"
             if tool == "trim" and edge is not None:
@@ -7867,6 +8065,19 @@ class TimelineCanvas(QWidget):
             self.owner._timeline_clear_selection(move_playhead_to=self.owner._timeline_snap_time(self._x_to_time(event.position().x())))
             self.setCursor(Qt.ArrowCursor)
         self.update()
+
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            return super().mouseDoubleClickEvent(event)
+        group = self._group_at(event.pos())
+        if group is not None:
+            self.owner._timeline_select_group(group.group_id)
+            self.owner._timeline_rename_group(group.group_id)
+            self.update()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         if self.drag_clip_id is not None and not (event.buttons() & Qt.LeftButton):
@@ -11600,6 +11811,9 @@ class WaveToyWindow(QMainWindow):
         self.last_playback_activation_monotonic = 0.0
 
         self.timeline_clips: List[TimelineClip] = []
+        self.timeline_groups: List[TimelineGroup] = []
+        self.timeline_selected_clip_ids: List[int] = []
+        self.timeline_selected_group_id: str | None = None
         self.timeline_lane_names = ["Melody", "Rhythm", "Atmosphere", "Effects"]
         self.timeline_lane_count = len(self.timeline_lane_names)
         self.timeline_next_clip_id = 1
@@ -12153,6 +12367,7 @@ class WaveToyWindow(QMainWindow):
                 "audio_palette": [item.metadata() for item in self.timeline_audio_palette],
                 "speech_bin": [item.metadata() for item in self.timeline_speech_bin],
                 "clips": [clip.metadata() for clip in self.timeline_clips],
+                "groups": [group.metadata() for group in self.timeline_groups],
                 "last_mix_path": str(self.timeline_last_mix_path) if self.timeline_last_mix_path else None,
             },
             "exports": {
@@ -12239,6 +12454,7 @@ class WaveToyWindow(QMainWindow):
             self.timeline_snap_seconds = float(timeline.get("snap_seconds", self.timeline_snap_seconds) or self.timeline_snap_seconds)
             self.timeline_audio_palette = self._rehydrate_audio_palette(timeline.get("audio_palette", []))
             self.timeline_clips = self._rehydrate_timeline_clips(timeline.get("clips", []))
+            self.timeline_groups = self._rehydrate_timeline_groups(timeline.get("groups", []))
             self.timeline_next_palette_item_id = max([item.item_id for item in self.timeline_audio_palette] or [0]) + 1
             self.timeline_next_clip_id = max([clip.clip_id for clip in self.timeline_clips] or [0]) + 1
         window = data.get("window", {})
@@ -21890,11 +22106,16 @@ class WaveToyWindow(QMainWindow):
             edit_layout.addWidget(button)
             if tool in {"select", "trim", "stretch"}:
                 self.timeline_tool_buttons[tool] = button
-        for icon, label, color, callback in (
-            ("⧉", "Duplicate Clip (Ctrl+D)", "#f1c0e8", self._timeline_duplicate_selected),
-            ("💾", "Export Last Mix", "#fdffb6", self._timeline_export_last_mix),
+        for icon, label, color, callback, tooltip in (
+            ("⧉", "Duplicate Clip (Ctrl+D)", "#f1c0e8", self._timeline_duplicate_selected, "Duplicate the selected clip without changing its source audio."),
+            ("Word", "Group as Word", "#b8f2e6", self._timeline_group_selected_as_word, "Group selected syllable clips into a word-level Timeline group."),
+            ("Phrase", "Group as Phrase", "#d7b9ff", self._timeline_group_selected_as_phrase, "Group selected word/syllable clips into a phrase-level Timeline group."),
+            ("Render", "Render Selection", "#ffd166", self._timeline_render_selection, "Render the selected clips or group into a new rendered speech asset."),
+            ("Ungroup", "Ungroup", "#ffadad", self._timeline_ungroup_selected, "Remove the selected group while keeping clips in place."),
+            ("💾", "Export Last Mix", "#fdffb6", self._timeline_export_last_mix, "Export the most recent full Timeline mix."),
         ):
             button = self._make_story_button(icon, label, color, callback)
+            button.setToolTip(tooltip)
             button.setMinimumHeight(WaveToySizing.BUTTON_HEIGHT)
             edit_layout.addWidget(button)
         self.timeline_snap_checkbox = QCheckBox("Snap")
@@ -22301,6 +22522,8 @@ class WaveToyWindow(QMainWindow):
                     source_type=str(entry.get("source_type", "restored_clip")),
                     speech_metadata=entry.get("speech_metadata") if isinstance(entry.get("speech_metadata"), dict) else None,
                     muted_warning=warning,
+                    voice_name=str(entry.get("voice_name") or "") or None,
+                    voice_variation=str(entry.get("voice_variation") or "") or None,
                     source_audio_full_length_samples=full_length,
                     trim_start_seconds=float(entry.get("trim_start_seconds", entry.get("trim_start", 0.0)) or 0.0),
                     trim_end_seconds=float(entry.get("trim_end_seconds", entry.get("trim_end", 0.0)) or 0.0),
@@ -22316,6 +22539,22 @@ class WaveToyWindow(QMainWindow):
             except Exception as exc:
                 print(f"[WaveToy Project] Could not restore timeline clip {entry.get('name')}: {exc}")
         return clips
+
+
+    def _rehydrate_timeline_groups(self, entries: object) -> List[TimelineGroup]:
+        groups: List[TimelineGroup] = []
+        if not isinstance(entries, list):
+            return groups
+        known_clip_ids = {clip.clip_id for clip in self.timeline_clips}
+        for entry in entries:
+            group = TimelineGroup.from_metadata(entry)
+            if group is None:
+                continue
+            group.clip_ids = [clip_id for clip_id in group.clip_ids if clip_id in known_clip_ids]
+            if group.clip_ids:
+                self._timeline_recalculate_group_bounds(group)
+                groups.append(group)
+        return groups
 
     def _timeline_refresh_palette_cards(self) -> None:
         if self.timeline_palette_list_widget is None:
@@ -22645,9 +22884,13 @@ class WaveToyWindow(QMainWindow):
             source_type=item.source_type,
             speech_metadata=item.metadata(),
             muted_warning=warning,
+            voice_name=self._timeline_voice_metadata_for_speech_item(item).get("voice_name") or None,
+            voice_variation=self._timeline_voice_metadata_for_speech_item(item).get("voice_variation") or None,
         )
         self.timeline_clips.append(clip)
         self.timeline_selected_clip_id = clip.clip_id
+        self.timeline_selected_clip_ids = [clip.clip_id]
+        self.timeline_selected_group_id = None
         self.timeline_selected_speech_item_id = item.id
         self._timeline_update_duration()
         self._timeline_mark_mix_dirty()
@@ -22732,6 +22975,8 @@ class WaveToyWindow(QMainWindow):
         )
         self.timeline_clips.append(clip)
         self.timeline_selected_clip_id = clip.clip_id
+        self.timeline_selected_clip_ids = [clip.clip_id]
+        self.timeline_selected_group_id = None
         self.timeline_selected_palette_item_id = item.item_id
         self._timeline_update_duration()
         self._timeline_mark_mix_dirty()
@@ -22828,7 +23073,7 @@ class WaveToyWindow(QMainWindow):
                 round(float(clip.trim_start_seconds), 6),
                 round(float(clip.trim_end_seconds), 6),
                 round(float(clip.playback_rate), 6),
-                self.timeline_stretch_quality,
+                getattr(self, "timeline_stretch_quality", "Balanced"),
                 pitch_preserve,
                 algorithm,
                 str(clip.source_path or ""),
@@ -22839,7 +23084,7 @@ class WaveToyWindow(QMainWindow):
                 if clip.stretched_audio_cache is not None and clip._stretch_cache_key == cache_key:
                     audio = np.array(clip.stretched_audio_cache, dtype=np.float32, copy=True)
                 else:
-                    audio = time_stretch_preserve_pitch(audio, SAMPLE_RATE, target_duration, self.timeline_stretch_quality)
+                    audio = time_stretch_preserve_pitch(audio, SAMPLE_RATE, target_duration, getattr(self, "timeline_stretch_quality", "Balanced"))
                     clip.stretched_audio_cache = np.array(audio, dtype=np.float32, copy=True)
                     clip._stretch_cache_key = cache_key
             else:
@@ -22930,6 +23175,8 @@ class WaveToyWindow(QMainWindow):
         )
         self.timeline_clips.append(clip)
         self.timeline_selected_clip_id = clip.clip_id
+        self.timeline_selected_clip_ids = [clip.clip_id]
+        self.timeline_selected_group_id = None
         self._timeline_update_duration()
         self._timeline_mark_mix_dirty()
         if self.timeline_canvas is not None:
@@ -22938,6 +23185,297 @@ class WaveToyWindow(QMainWindow):
             self.timeline_canvas.update()
         self._timeline_update_inspector()
         self._timeline_debug(f"Clip created id={clip.clip_id} start={clip.start_time_seconds:.3f}s lane={clip.lane} duration={clip.duration_seconds:.3f}s")
+
+
+
+    def _timeline_voice_metadata_for_speech_item(self, item: SpeechBinItem) -> Dict[str, str]:
+        metadata = item.metadata() if hasattr(item, "metadata") else {}
+        articulation = metadata.get("articulation_metadata") if isinstance(metadata.get("articulation_metadata"), dict) else {}
+        candidates: List[Dict[str, object]] = [metadata, articulation]
+        for key in ("render_source_snapshot", "voice_source_snapshot", "source_snapshot"):
+            value = articulation.get(key) if isinstance(articulation, dict) else None
+            if isinstance(value, list):
+                candidates.extend(candidate for candidate in value if isinstance(candidate, dict))
+        voice_names: List[str] = []
+        variations: List[str] = []
+        for candidate in candidates:
+            voice = str(candidate.get("voice_name") or candidate.get("voice") or candidate.get("profile_name") or candidate.get("character_voice") or "").strip()
+            variation = str(candidate.get("voice_variation") or candidate.get("variation") or candidate.get("source_mode") or "").strip()
+            if voice and voice not in voice_names:
+                voice_names.append(voice)
+            if variation and variation not in variations:
+                variations.append(variation)
+        return {"voice_name": ", ".join(voice_names), "voice_variation": ", ".join(variations)}
+
+
+    def _timeline_source_voices_for_clips(self, clips: List[TimelineClip]) -> List[str]:
+        voices: List[str] = []
+        for clip in clips:
+            label = str(clip.voice_name or "").strip()
+            variation = str(clip.voice_variation or "").strip()
+            if variation and variation != label:
+                label = f"{label} ({variation})" if label else variation
+            if label and label not in voices:
+                voices.append(label)
+        return voices
+
+    def _timeline_select_group(self, group_id: str | None) -> TimelineGroup | None:
+        group = self._timeline_group_by_id(group_id)
+        if group is None:
+            return None
+        self._timeline_recalculate_group_bounds(group)
+        self.timeline_selected_group_id = group.group_id
+        self.timeline_selected_clip_ids = [clip_id for clip_id in group.clip_ids if self._timeline_clip_by_id(clip_id) is not None]
+        self.timeline_selected_clip_id = self.timeline_selected_clip_ids[0] if self.timeline_selected_clip_ids else None
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = self.timeline_selected_clip_id
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Timeline group selected id={group.group_id} type={group.group_type} clips={len(group.clip_ids)}")
+        return group
+
+    def _timeline_rename_group(self, group_id: str | None = None) -> bool:
+        group = self._timeline_group_by_id(group_id or self.__dict__.get("timeline_selected_group_id"))
+        if group is None:
+            QMessageBox.information(self, "Rename Group", "Select a timeline group first.")
+            return False
+        name, ok = QInputDialog.getText(self, "Rename Timeline Group", "Group name:", text=group.name)
+        if not ok or not str(name).strip():
+            return False
+        group.name = str(name).strip()
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Timeline group renamed id={group.group_id} name={group.name}")
+        return True
+
+    def _timeline_toggle_clip_selection(self, clip_id: int) -> None:
+        if self._timeline_clip_by_id(clip_id) is None:
+            return
+        selected = list(self.__dict__.get("timeline_selected_clip_ids", []) or [])
+        if clip_id in selected:
+            selected = [existing for existing in selected if existing != clip_id]
+        else:
+            selected.append(clip_id)
+        self.timeline_selected_clip_ids = selected
+        self.timeline_selected_clip_id = clip_id if clip_id in selected else (selected[-1] if selected else None)
+        self.timeline_selected_group_id = None
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = self.timeline_selected_clip_id
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+
+    def _timeline_select_clip_range(self, clip_id: int) -> None:
+        ordered = sorted(self.timeline_clips, key=lambda clip: (clip.start_time_seconds, clip.lane, clip.clip_id))
+        ids = [clip.clip_id for clip in ordered]
+        if clip_id not in ids:
+            return
+        anchor = self.timeline_selected_clip_id if self.timeline_selected_clip_id in ids else (self.timeline_selected_clip_ids[-1] if getattr(self, "timeline_selected_clip_ids", []) else clip_id)
+        start = ids.index(anchor)
+        end = ids.index(clip_id)
+        if start > end:
+            start, end = end, start
+        self.timeline_selected_clip_ids = ids[start:end + 1]
+        self.timeline_selected_clip_id = clip_id
+        self.timeline_selected_group_id = None
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = clip_id
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+
+    def _timeline_group_list(self) -> List[TimelineGroup]:
+        groups = self.__dict__.get("timeline_groups", [])
+        return groups if isinstance(groups, list) else []
+
+    def _timeline_group_by_id(self, group_id: str | None) -> TimelineGroup | None:
+        if not group_id:
+            return None
+        for group in self._timeline_group_list():
+            if group.group_id == group_id:
+                return group
+        return None
+
+    def _timeline_group_id_for_clip(self, clip_id: int | None) -> str | None:
+        if clip_id is None:
+            return None
+        for group in reversed(self._timeline_group_list()):
+            if clip_id in group.clip_ids:
+                return group.group_id
+        return None
+
+    def _timeline_selected_clips(self) -> List[TimelineClip]:
+        raw_selected_ids = self.__dict__.get("timeline_selected_clip_ids", [])
+        selected_ids = list(raw_selected_ids) if isinstance(raw_selected_ids, list) else []
+        if not selected_ids and self.timeline_selected_clip_id is not None:
+            selected_ids = [self.timeline_selected_clip_id]
+        selected = [clip for clip in self.timeline_clips if clip.clip_id in set(selected_ids)]
+        return sorted(selected, key=lambda clip: (clip.start_time_seconds, clip.lane, clip.clip_id))
+
+    def _timeline_recalculate_group_bounds(self, group: TimelineGroup) -> None:
+        clips = [clip for clip in self.timeline_clips if clip.clip_id in set(group.clip_ids)]
+        if not clips:
+            return
+        group.start_time_seconds = min(clip.start_time_seconds for clip in clips)
+        group.end_time_seconds = max(clip.end_time_seconds for clip in clips)
+
+    def _timeline_group_selected(self, group_type: str, name: str | None = None) -> TimelineGroup | None:
+        group_type = str(group_type or "").lower()
+        if group_type not in {"word", "phrase"}:
+            return None
+        clips = self._timeline_selected_clips()
+        if not clips:
+            QMessageBox.information(self, "Timeline Group", "Select one or more timeline clips first.")
+            return None
+        clip_ids = [clip.clip_id for clip in clips]
+        if not name:
+            first_name = filesystem_safe_name(clips[0].name, fallback="clip")
+            name = f"{group_type}_from_{first_name}_{len(clips)}clips"
+        group = TimelineGroup(
+            group_id=uuid.uuid4().hex,
+            name=name,
+            group_type=group_type,
+            clip_ids=clip_ids,
+            start_time_seconds=min(clip.start_time_seconds for clip in clips),
+            end_time_seconds=max(clip.end_time_seconds for clip in clips),
+            created_at=time.time(),
+            notes="Timeline speech composer group; clips remain non-destructive source references.",
+        )
+        if "timeline_groups" not in self.__dict__ or not isinstance(self.__dict__.get("timeline_groups"), list):
+            self.timeline_groups = []
+        self.timeline_groups.append(group)
+        self.timeline_selected_group_id = group.group_id
+        self.timeline_selected_clip_ids = clip_ids
+        self.timeline_selected_clip_id = clip_ids[0]
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = self.timeline_selected_clip_id
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Timeline group created id={group.group_id} type={group.group_type} clips={len(group.clip_ids)} name={group.name}")
+        return group
+
+    def _timeline_group_selected_as_word(self, checked: bool = False) -> TimelineGroup | None:
+        del checked
+        return self._timeline_group_selected("word")
+
+    def _timeline_group_selected_as_phrase(self, checked: bool = False) -> TimelineGroup | None:
+        del checked
+        return self._timeline_group_selected("phrase")
+
+    def _timeline_ungroup_selected(self, checked: bool = False) -> bool:
+        del checked
+        group_id = self.__dict__.get("timeline_selected_group_id") or self._timeline_group_id_for_clip(self.timeline_selected_clip_id)
+        group = self._timeline_group_by_id(group_id)
+        if group is None:
+            QMessageBox.information(self, "Ungroup", "Select a timeline group or a clip that belongs to a group first.")
+            return False
+        self.timeline_groups = [existing for existing in self._timeline_group_list() if existing.group_id != group.group_id]
+        self.timeline_selected_group_id = None
+        self.timeline_selected_clip_ids = [clip_id for clip_id in group.clip_ids if self._timeline_clip_by_id(clip_id) is not None]
+        self.timeline_selected_clip_id = self.timeline_selected_clip_ids[0] if self.timeline_selected_clip_ids else None
+        self._timeline_mark_mix_dirty()
+        if self.timeline_canvas is not None:
+            self.timeline_canvas.selected_clip_id = self.timeline_selected_clip_id
+            self.timeline_canvas.update()
+        self._timeline_update_inspector()
+        self._timeline_debug(f"Timeline group removed id={group.group_id} kept_clips={len(self.timeline_selected_clip_ids)}")
+        return True
+
+    def _timeline_mix_clips(self, clips: List[TimelineClip], progress_dialog: QProgressDialog | None = None, started_at: float | None = None) -> np.ndarray:
+        if not clips:
+            return np.zeros((0, 2), dtype=np.float32)
+        ordered = sorted(clips, key=lambda clip: (clip.start_time_seconds, clip.lane, clip.clip_id))
+        start_time = min(clip.start_time_seconds for clip in ordered)
+        end_time = max(clip.end_time_seconds for clip in ordered)
+        total_samples = max(1, int(math.ceil((end_time - start_time) * SAMPLE_RATE)))
+        mix = np.zeros((total_samples, 2), dtype=np.float32)
+        for index, clip in enumerate(ordered, start=1):
+            if progress_dialog is not None:
+                elapsed = time.monotonic() - (started_at or time.monotonic())
+                progress_dialog.setLabelText(f"Rendering {clip.name} ({index}/{len(ordered)}) • {elapsed:.1f}s elapsed")
+                progress_dialog.setValue(index - 1)
+                if hasattr(QApplication, "processEvents"):
+                    QApplication.processEvents()
+                if hasattr(progress_dialog, "wasCanceled") and progress_dialog.wasCanceled():
+                    return np.zeros((0, 2), dtype=np.float32)
+            start = max(0, int(round((clip.start_time_seconds - start_time) * SAMPLE_RATE)))
+            clip_audio = self._timeline_render_clip_audio(clip)
+            if clip_audio.size == 0:
+                continue
+            end = min(total_samples, start + len(clip_audio))
+            if end > start:
+                mix[start:end, :2] += np.asarray(clip_audio[: end - start, :2], dtype=np.float32)
+        peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+        if peak > 1.0:
+            mix = mix / peak
+        if progress_dialog is not None:
+            progress_dialog.setValue(len(ordered))
+        return mix.astype(np.float32, copy=False)
+
+    def _timeline_render_selected_to_asset(self, item_type: str, name: str | None = None) -> SpeechBinItem | None:
+        group = self._timeline_group_by_id(self.__dict__.get("timeline_selected_group_id"))
+        clips = [clip for clip in self.timeline_clips if group is not None and clip.clip_id in set(group.clip_ids)] if group is not None else self._timeline_selected_clips()
+        clips = sorted(clips, key=lambda clip: (clip.start_time_seconds, clip.lane, clip.clip_id))
+        if not clips:
+            QMessageBox.information(self, "Render Selection", "Select clips or a timeline group before rendering.")
+            return None
+        if item_type not in {"word", "phrase"}:
+            item_type = group.group_type if group is not None else "word"
+        if group is not None and group.group_type in {"word", "phrase"}:
+            item_type = group.group_type
+            self._timeline_recalculate_group_bounds(group)
+        progress_dialog = None
+        started_at = time.monotonic()
+        try:
+            progress_dialog = QProgressDialog(f"Rendering {item_type} selection", "Cancel", 0, len(clips), self)
+            progress_dialog.setWindowTitle("Render Timeline Selection")
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setValue(0)
+            progress_dialog.show()
+        except Exception:
+            progress_dialog = None
+        audio = self._timeline_mix_clips(clips, progress_dialog=progress_dialog, started_at=started_at)
+        if progress_dialog is not None:
+            progress_dialog.close()
+        if audio.size == 0:
+            QMessageBox.warning(self, "Render Selection", "The selected clips did not produce audio.")
+            return None
+        if not name:
+            default_name = group.name if group is not None else f"{item_type}_from_{filesystem_safe_name(clips[0].name, fallback='clip')}_{len(clips)}clips"
+            try:
+                chosen, ok = QInputDialog.getText(self, "Render Selection", f"Name this {item_type} asset:", text=default_name)
+                name = str(chosen).strip() if ok and str(chosen).strip() else default_name
+            except Exception:
+                name = default_name
+        metadata = {
+            "timeline_group": group.metadata() if group is not None else None,
+            "timeline_clip_ids": [clip.clip_id for clip in clips],
+            "timeline_clips": [clip.metadata() for clip in clips],
+            "timeline_render_start_seconds": min(clip.start_time_seconds for clip in clips),
+            "timeline_render_end_seconds": max(clip.end_time_seconds for clip in clips),
+            "source_voices": self._timeline_source_voices_for_clips(clips),
+            "composition_model": "timeline_selected_clips_non_destructive",
+        }
+        item = self._add_speech_bin_item(
+            name=name,
+            item_type=item_type,
+            audio=audio,
+            ipa_sequence="",
+            display_sequence=" + ".join(clip.name for clip in clips),
+            articulation_metadata=metadata,
+            source_mode=f"timeline_{item_type}_selection_render",
+        )
+        if item is not None:
+            self._timeline_refresh_speech_bin_cards()
+            self._timeline_debug(f"Timeline selection rendered type={item_type} id={item.id} clips={len(clips)} path={item.audio_cache_path}")
+        return item
+
+    def _timeline_render_selection(self, checked: bool = False) -> SpeechBinItem | None:
+        del checked
+        group = self._timeline_group_by_id(self.__dict__.get("timeline_selected_group_id"))
+        item_type = group.group_type if group is not None else "word"
+        return self._timeline_render_selected_to_asset(item_type)
 
     def _timeline_clip_by_id(self, clip_id: int | None) -> TimelineClip | None:
         for clip in self.timeline_clips:
@@ -22950,6 +23488,8 @@ class WaveToyWindow(QMainWindow):
         if clip is None:
             return
         self.timeline_selected_clip_id = clip_id
+        self.timeline_selected_clip_ids = [clip_id]
+        self.timeline_selected_group_id = self._timeline_group_id_for_clip(clip_id)
         if self.timeline_canvas is not None:
             self.timeline_canvas.selected_clip_id = clip_id
         self._timeline_update_inspector()
@@ -23029,6 +23569,8 @@ class WaveToyWindow(QMainWindow):
 
     def _timeline_clear_selection(self, move_playhead_to: float | None = None) -> None:
         self.timeline_selected_clip_id = None
+        self.timeline_selected_clip_ids = []
+        self.timeline_selected_group_id = None
         if move_playhead_to is not None:
             self.timeline_playhead_seconds = max(0.0, move_playhead_to)
         if self.timeline_canvas is not None:
@@ -23038,6 +23580,35 @@ class WaveToyWindow(QMainWindow):
 
     def _timeline_update_inspector(self) -> None:
         if self.timeline_inspector_label is None:
+            return
+        group = self._timeline_group_by_id(self.__dict__.get("timeline_selected_group_id"))
+        if group is not None:
+            self._timeline_recalculate_group_bounds(group)
+            clips = [clip for clip in self.timeline_clips if clip.clip_id in set(group.clip_ids)]
+            names = ", ".join(clip.name for clip in sorted(clips, key=lambda item: (item.start_time_seconds, item.lane, item.clip_id))) or "none"
+            voices = ", ".join(self._timeline_source_voices_for_clips(clips)) or "unspecified"
+            self.timeline_inspector_label.setText(
+                f"{group.name}\n"
+                f"Group type: {group.group_type}\n"
+                f"Render type: {group.group_type} asset\n"
+                f"Clip count: {len(clips)}\n"
+                f"Source voices: {voices}\n"
+                f"Start time: {group.start_time_seconds:.3f}s\n"
+                f"Duration: {group.duration_seconds:.3f}s\n"
+                f"Included clips: {names}"
+            )
+            return
+        selected_clips = self._timeline_selected_clips()
+        if len(selected_clips) > 1:
+            start_time = min(clip.start_time_seconds for clip in selected_clips)
+            end_time = max(clip.end_time_seconds for clip in selected_clips)
+            self.timeline_inspector_label.setText(
+                f"{len(selected_clips)} clips selected\n"
+                f"Clip count: {len(selected_clips)}\n"
+                f"Start time: {start_time:.3f}s\n"
+                f"Duration: {max(0.0, end_time - start_time):.3f}s\n"
+                f"Suggested next action: Group as Word/Phrase or Render Selection."
+            )
             return
         clip = self._timeline_clip_by_id(self.timeline_selected_clip_id)
         if clip is None:
@@ -23123,6 +23694,8 @@ class WaveToyWindow(QMainWindow):
             source_type=source.source_type,
             speech_metadata=source.speech_metadata,
             muted_warning=source.muted_warning,
+            voice_name=source.voice_name,
+            voice_variation=source.voice_variation,
             source_audio_full_length_samples=source.source_audio_full_length_samples,
             trim_start_seconds=source.trim_start_seconds,
             trim_end_seconds=source.trim_end_seconds,
@@ -23138,6 +23711,8 @@ class WaveToyWindow(QMainWindow):
         )
         self.timeline_clips.append(duplicate)
         self.timeline_selected_clip_id = duplicate.clip_id
+        self.timeline_selected_clip_ids = [duplicate.clip_id]
+        self.timeline_selected_group_id = None
         self._timeline_update_duration()
         self._timeline_mark_mix_dirty()
         if self.timeline_canvas is not None:
@@ -23181,6 +23756,8 @@ class WaveToyWindow(QMainWindow):
             source_type=source.source_type,
             speech_metadata=source.speech_metadata,
             muted_warning=source.muted_warning,
+            voice_name=source.voice_name,
+            voice_variation=source.voice_variation,
             source_audio_full_length_samples=source.source_audio_full_length_samples,
             trim_start_seconds=right_trim_start,
             trim_end_seconds=original_trim_end,
@@ -23195,6 +23772,8 @@ class WaveToyWindow(QMainWindow):
         )
         self.timeline_clips.append(right)
         self.timeline_selected_clip_id = right.clip_id
+        self.timeline_selected_clip_ids = [right.clip_id]
+        self.timeline_selected_group_id = None
         self._timeline_update_duration()
         self._timeline_mark_mix_dirty()
         if self.timeline_canvas is not None:
@@ -23211,7 +23790,12 @@ class WaveToyWindow(QMainWindow):
             QMessageBox.information(self, "Delete Clip", "Select a timeline clip first.")
             return
         self.timeline_clips = [existing for existing in self.timeline_clips if existing.clip_id != clip.clip_id]
+        for group in self._timeline_group_list():
+            group.clip_ids = [clip_id for clip_id in group.clip_ids if clip_id != clip.clip_id]
+        self.timeline_groups = [group for group in self._timeline_group_list() if group.clip_ids]
         self.timeline_selected_clip_id = None
+        self.timeline_selected_clip_ids = []
+        self.timeline_selected_group_id = None
         self._timeline_update_duration()
         self._timeline_mark_mix_dirty()
         if self.timeline_canvas is not None:
@@ -23416,6 +24000,7 @@ class WaveToyWindow(QMainWindow):
                     "articulation_syllable_render",
                 ],
                 "clips": [clip.metadata() for clip in self.timeline_clips],
+                "groups": [group.metadata() for group in self.timeline_groups],
                 "notes": "Timeline metadata stores imported and speech source paths plus articulation snapshots only; raw audio arrays are not embedded. Missing speech cache audio should be re-rendered from speech_metadata.articulation_metadata when possible, otherwise the clip stays visible as muted with a warning.",
             }
             sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
